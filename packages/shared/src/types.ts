@@ -244,11 +244,12 @@ export type RpcCommand =
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" };
 
-/** RPC response envelope: bare object with matching `id` on stdout. */
+/** RPC response envelope on stdout: {id, type:"response", command, success, data}. */
 export interface RpcResponse {
 	id?: string;
-	ok?: boolean;
-	result?: unknown;
-	error?: unknown;
-	[k: string]: unknown;
+	type: "response";
+	command: string;
+	success: boolean;
+	data?: unknown;
+	error?: string;
 }

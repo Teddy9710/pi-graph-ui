@@ -6,6 +6,19 @@
 	"scripts": {
 		"dev": "node --watch src/main.ts",
 		"start": "node src/main.ts",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"@pi-graph/shared": "workspace:*",
+		"@hono/node-server": "^1.19.4",
+		"hono": "^4.10.0",
+		"ws": "^8.18.3"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"@types/ws": "^8.18.1",
+		"typescript": "^5.9.3",
+		"vitest": "^3.2.7"
 	}
 }
