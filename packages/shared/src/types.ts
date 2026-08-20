@@ -242,7 +242,8 @@ export interface ToolResultPayload {
 export type RpcCommand =
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "abort" };
+	| { id?: string; type: "abort" }
+	| { id?: string; type: "new_session"; parentSession?: string };
 
 /** RPC response envelope on stdout: {id, type:"response", command, success, data}. */
 export interface RpcResponse {

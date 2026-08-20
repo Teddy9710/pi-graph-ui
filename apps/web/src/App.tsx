@@ -53,10 +53,16 @@ function PromptBar() {
 	const sendPrompt = useStore((s) => s.sendPrompt);
 	const steer = useStore((s) => s.steer);
 	const abort = useStore((s) => s.abort);
+	const newSession = useStore((s) => s.newSession);
 	const running = session.agentStatus === "running";
 
 	return (
 		<footer className="pg-input-bar">
+			{!running && (
+				<button className="pg-btn pg-btn-ghost" title="清空当前会话，开始全新任务（pi 上下文一并重置）" onClick={newSession}>
+					＋ 新任务
+				</button>
+			)}
 			<input
 				value={text}
 				placeholder={running ? "运行中… 输入内容可插入转向指令 (steer)" : "给 pi agent 发一个任务…"}

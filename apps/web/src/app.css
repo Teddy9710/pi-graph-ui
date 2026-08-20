@@ -172,3 +172,12 @@ body {
 	border-radius: 8px;
 	overflow: hidden;
 }
+
+.pg-btn-ghost {
+	background: transparent;
+	border: 1px solid var(--pg-border);
+	color: var(--pg-fg);
+}
+.pg-btn-ghost:hover {
+	border-color: var(--pg-blue);
+}

@@ -89,4 +89,12 @@ export class EventHub {
 	history(): JsonAgentSessionEvent[] {
 		return this.replay;
 	}
+
+	/** Drop all replayed history and pending throttles (session reset). */
+	clear(): void {
+		for (const { timer } of this.withheld.values()) clearTimeout(timer);
+		this.withheld.clear();
+		this.lastSentAt.clear();
+		this.replay = [];
+	}
 }

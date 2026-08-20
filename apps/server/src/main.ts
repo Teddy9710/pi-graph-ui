@@ -38,7 +38,17 @@ const PI_ARGS = process.env.PI_ARGS?.split(/\s+/).filter(Boolean) ?? [];
 
 const bridge = new PiBridge({ bin: PI_BIN, cwd: PI_CWD, extraArgs: PI_ARGS });
 const hub = new EventHub({ intervalMs: 100 });
-const session: SessionState = initState();
+let session: SessionState = initState();
+
+/** Reset bridge-side state (new_session) and tell every client to rebuild. */
+function resetSession(): void {
+	hub.clear();
+	session = initState();
+	for (const client of wsClients()) {
+		client.send(JSON.stringify({ type: "reset" }));
+	}
+	console.log("[session] reset");
+}
 
 bridge.on("event", (event) => {
 	foldEvent(session, event);
@@ -123,9 +133,24 @@ wss.on("connection", (ws) => {
 		}
 		if (msg.type === "command" || msg.type === "request") {
 			try {
+				const command = msg.command as { type?: string } | undefined;
+				// Session reset: wait for pi's confirmation before dropping state —
+				// an immediately-following prompt raced ahead of the reset gets
+				// swallowed by pi otherwise (prompt response arrives before the
+				// new_session response).
+				if (command?.type === "new_session") {
+					bridge
+						.request({ type: "new_session" })
+						.then((response) => {
+							if (response.success) resetSession();
+							else ws.send(JSON.stringify({ type: "error", message: "new_session failed" }));
+						})
+						.catch((err: Error) => ws.send(JSON.stringify({ type: "error", message: err.message })));
+					return;
+				}
 				bridge.send(msg.command as never);
 				if (msg.type === "command") {
-					ws.send(JSON.stringify({ type: "ack", commandType: (msg.command as { type: string }).type }));
+					ws.send(JSON.stringify({ type: "ack", commandType: command?.type }));
 				}
 			} catch (err) {
 				ws.send(JSON.stringify({ type: "error", message: (err as Error).message }));

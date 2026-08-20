@@ -31,6 +31,7 @@ interface AppState {
 	sendPrompt: (message: string) => void;
 	steer: (message: string) => void;
 	abort: () => void;
+	newSession: () => void;
 	select: (nodeId: string | null) => void;
 }
 
@@ -66,6 +67,7 @@ export const useStore = create<AppState>((set, get) => ({
 	sendPrompt: (message) => send({ type: "command", command: { type: "prompt", message } }),
 	steer: (message) => send({ type: "command", command: { type: "steer", message } }),
 	abort: () => send({ type: "command", command: { type: "abort" } }),
+	newSession: () => send({ type: "command", command: { type: "new_session" } }),
 	select: (nodeId) => set({ selectedNodeId: nodeId }),
 }));
 
@@ -96,6 +98,11 @@ export function connect(): void {
 		try {
 			envelope = JSON.parse(String(msg.data));
 		} catch {
+			return;
+		}
+		if (envelope.type === "reset") {
+			// Bridge dropped the session - clear canvas, keep connection.
+			useStore.setState((s) => ({ ...resetSession(), selectedNodeId: null }));
 			return;
 		}
 		if (envelope.type === "hello" && envelope.snapshot) {
