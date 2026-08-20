@@ -1,0 +1,20 @@
+{
+	"name": "pi-graph-ui",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"build": "pnpm -r build",
+		"test": "pnpm -r test",
+		"typecheck": "pnpm -r typecheck",
+		"lint": "pnpm -r lint"
+	},
+	"devDependencies": {
+		"@types/node": "^24",
+		"typescript": "^5.9.3",
+		"vitest": "^3.2.7"
+	},
+	"engines": {
+		"node": ">=20"
+	}
+}

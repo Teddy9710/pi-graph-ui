@@ -1,0 +1,11 @@
+{
+	"name": "@pi-graph/server",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "node --watch src/main.ts",
+		"start": "node src/main.ts",
+		"typecheck": "tsc --noEmit"
+	}
+}
