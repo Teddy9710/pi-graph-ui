@@ -3,7 +3,12 @@
 	"compilerOptions": {
 		"module": "ESNext",
 		"moduleResolution": "Bundler",
-		"types": ["vite/client"]
+		"jsx": "react-jsx",
+		"noEmit": true,
+		"types": ["vite/client"],
+		"paths": {
+			"@pi-graph/shared": ["../../packages/shared/src/index.ts"]
+		}
 	},
-	"include": ["src"]
+	"include": ["src", "vite.config.ts"]
 }

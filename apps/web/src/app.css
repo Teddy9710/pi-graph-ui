@@ -1,0 +1,174 @@
+:root {
+	--pg-bg: #16181d;
+	--pg-node-bg: #1e2128;
+	--pg-fg: #e6e8ec;
+	--pg-border: #3a3f4b;
+	--pg-blue: #3b82f6;
+	--pg-green: #34d399;
+	--pg-red: #f87171;
+	--pg-panel-bg: #131519;
+}
+
+html,
+body,
+#root {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	background: var(--pg-bg);
+	color: var(--pg-fg);
+	font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.pg-node {
+	--pg-bg: var(--pg-node-bg);
+}
+
+.pg-app {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.pg-header {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--pg-border);
+	font-size: 13px;
+}
+
+.pg-ws {
+	font-size: 12px;
+}
+.pg-ws-open {
+	color: var(--pg-green);
+}
+.pg-ws-connecting {
+	color: #fbbf24;
+}
+.pg-ws-closed {
+	color: var(--pg-red);
+}
+
+.pg-main {
+	flex: 1;
+	display: flex;
+	min-height: 0;
+}
+
+.pg-canvas {
+	flex: 1;
+	min-width: 0;
+}
+
+.pg-panel {
+	width: 360px;
+	overflow-y: auto;
+	border-left: 1px solid var(--pg-border);
+	background: var(--pg-panel-bg);
+	padding: 12px;
+	font-size: 12.5px;
+}
+
+.pg-panel header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 10px;
+}
+
+.pg-panel h4 {
+	margin: 12px 0 4px;
+	font-size: 11.5px;
+	text-transform: uppercase;
+	opacity: 0.6;
+}
+
+.pg-pre {
+	background: #0e1013;
+	border: 1px solid var(--pg-border);
+	border-radius: 6px;
+	padding: 8px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: ui-monospace, Consolas, monospace;
+	font-size: 11.5px;
+	margin: 4px 0;
+	max-height: 320px;
+	overflow-y: auto;
+}
+
+.pg-meta {
+	font-size: 11px;
+	opacity: 0.65;
+	margin-top: 4px;
+}
+
+.pg-dim {
+	opacity: 0.6;
+}
+
+.pg-error-text {
+	color: var(--pg-red);
+}
+
+.pg-input-bar {
+	display: flex;
+	gap: 8px;
+	padding: 10px 14px;
+	border-top: 1px solid var(--pg-border);
+}
+
+.pg-input-bar input {
+	flex: 1;
+	background: #0e1013;
+	border: 1px solid var(--pg-border);
+	border-radius: 8px;
+	color: var(--pg-fg);
+	padding: 9px 12px;
+	font-size: 13px;
+	outline: none;
+}
+.pg-input-bar input:focus {
+	border-color: var(--pg-blue);
+}
+
+.pg-btn {
+	background: var(--pg-blue);
+	color: #fff;
+	border: none;
+	border-radius: 8px;
+	padding: 9px 18px;
+	font-size: 13px;
+	cursor: pointer;
+}
+.pg-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.pg-btn-danger {
+	background: var(--pg-red);
+}
+
+/* edges */
+.pg-edge path {
+	stroke: #4b5160;
+	stroke-width: 1.5;
+}
+.pg-edge-spawn path {
+	stroke-dasharray: 5 4;
+	stroke: #5b8bd0;
+}
+.pg-edge-live path {
+	stroke: var(--pg-blue);
+	stroke-width: 2;
+}
+
+.react-flow__minimap {
+	border-radius: 8px;
+	overflow: hidden;
+}
