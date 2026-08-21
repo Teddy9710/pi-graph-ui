@@ -6,6 +6,7 @@
 import { useEffect, useState } from "react";
 import { DetailPanel } from "./DetailPanel.tsx";
 import { GraphCanvas } from "./GraphCanvas.tsx";
+import { HistoryDrawer } from "./HistoryDrawer.tsx";
 import { connect, useStore } from "./store.ts";
 import "./app.css";
 
@@ -19,6 +20,9 @@ function Header() {
 	const wsStatus = useStore((s) => s.wsStatus);
 	const session = useStore((s) => s.session);
 	const piExit = useStore((s) => s.piExit);
+	const history = useStore((s) => s.history);
+	const openHistory = useStore((s) => s.openHistory);
+	const exitHistory = useStore((s) => s.exitHistory);
 	const statusText =
 		wsStatus === "open"
 			? "● connected"
@@ -30,19 +34,36 @@ function Header() {
 	return (
 		<header className="pg-header">
 			<b>pi-graph</b>
-			<span className={`pg-ws pg-ws-${wsStatus}`}>{statusText}</span>
-			<span className="pg-dim">
-				{session.agentStatus === "running" ? "agent running…" : "agent idle"}
-			</span>
-			<span className="pg-dim">
-				↑{formatTokens(session.usageTotal.input)} ↓{formatTokens(session.usageTotal.output)} tok
-			</span>
-			{session.lastError && <span className="pg-error-text">{session.lastError.slice(0, 80)}</span>}
+			{history ? (
+				<span className="pg-history-banner">
+					📜 历史回放
+					{history.loading ? "（加载中…）" : ""}
+					<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={exitHistory}>
+						返回实时
+					</button>
+				</span>
+			) : (
+				<span className={`pg-ws pg-ws-${wsStatus}`}>{statusText}</span>
+			)}
+			{!history && (
+				<>
+					<span className="pg-dim">
+						{session.agentStatus === "running" ? "agent running…" : "agent idle"}
+					</span>
+					<span className="pg-dim">
+						↑{formatTokens(session.usageTotal.input)} ↓{formatTokens(session.usageTotal.output)} tok
+					</span>
+				</>
+			)}
+			{session.lastError && !history && <span className="pg-error-text">{session.lastError.slice(0, 80)}</span>}
 			{piExit && (
 				<span className="pg-error-text" title={piExit.stderr.slice(-500)}>
 					pi exited (code {piExit.code ?? "?"}) — 检查 bridge server
 				</span>
 			)}
+			<button className="pg-btn pg-btn-ghost pg-btn-sm pg-history-btn" onClick={() => void openHistory()}>
+				历史
+			</button>
 		</header>
 	);
 }
@@ -54,7 +75,16 @@ function PromptBar() {
 	const steer = useStore((s) => s.steer);
 	const abort = useStore((s) => s.abort);
 	const newSession = useStore((s) => s.newSession);
+	const history = useStore((s) => s.history);
 	const running = session.agentStatus === "running";
+
+	if (history) {
+		return (
+			<footer className="pg-input-bar">
+				<input disabled placeholder="正在查看历史回放，返回实时后可继续对话" />
+			</footer>
+		);
+	}
 
 	return (
 		<footer className="pg-input-bar">
@@ -99,16 +129,19 @@ export default function App() {
 	useEffect(() => {
 		connect();
 	}, []);
+	const history = useStore((s) => s.history);
 	return (
 		<div className="pg-app">
 			<Header />
 			<div className="pg-main">
 				<div className="pg-canvas">
-					<GraphCanvas />
+					{/* History view replays a frozen graph; live view keeps streaming. */}
+					{history ? <GraphCanvas key="history" graphOverride={history.graph} /> : <GraphCanvas key="live" />}
 				</div>
 				<DetailPanel />
 			</div>
 			<PromptBar />
+			<HistoryDrawer />
 		</div>
 	);
 }

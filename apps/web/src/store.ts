@@ -19,6 +19,16 @@ import {
 export type WsStatus = "connecting" | "open" | "closed" | "reconnecting";
 
 export const WS_URL = (import.meta.env.VITE_WS_URL as string | undefined) || "ws://localhost:8787";
+export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || "http://localhost:8787";
+
+interface SessionMeta {
+	id: string;
+	startedAt: number;
+	endedAt: number;
+	eventCount: number;
+	firstUserText: string | null;
+	outputTokens: number;
+}
 
 interface AppState {
 	wsStatus: WsStatus;
@@ -28,15 +38,24 @@ interface AppState {
 	selectedNodeId: string | null;
 	eventCount: number;
 	lastEventAt: number | null;
+	/** History browsing: when set, the canvas renders this instead of live. */
+	history: { meta: SessionMeta; graph: Graph; loading: boolean } | null;
+	historyOpen: boolean;
+	sessions: SessionMeta[];
 	sendPrompt: (message: string) => void;
 	steer: (message: string) => void;
 	abort: () => void;
 	newSession: () => void;
 	select: (nodeId: string | null) => void;
+	openHistory: () => Promise<void>;
+	loadHistory: (id: string) => Promise<void>;
+	exitHistory: () => void;
 }
 
 let ws: WebSocket | null = null;
 let reconnectDelay = 1000;
+/** Monotonic token for in-flight history loads; bumped to cancel stale ones. */
+let historyReq = 0;
 
 function send(payload: unknown): void {
 	if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
@@ -63,12 +82,67 @@ export const useStore = create<AppState>((set, get) => ({
 	selectedNodeId: null,
 	eventCount: 0,
 	lastEventAt: null,
+	history: null,
+	historyOpen: false,
+	sessions: [],
 
 	sendPrompt: (message) => send({ type: "command", command: { type: "prompt", message } }),
 	steer: (message) => send({ type: "command", command: { type: "steer", message } }),
 	abort: () => send({ type: "command", command: { type: "abort" } }),
 	newSession: () => send({ type: "command", command: { type: "new_session" } }),
 	select: (nodeId) => set({ selectedNodeId: nodeId }),
+	openHistory: async () => {
+		set({ historyOpen: true });
+		try {
+			const res = await fetch(`${API_BASE}/api/sessions`);
+			const sessions: SessionMeta[] = await res.json();
+			set({ sessions });
+		} catch {
+			set({ sessions: [] });
+		}
+	},
+	loadHistory: async (id) => {
+		const req = ++historyReq;
+		set({
+			history: {
+				meta: { id, startedAt: 0, endedAt: 0, eventCount: 0, firstUserText: null, outputTokens: 0 },
+				graph: { nodes: [], edges: [] },
+				loading: true,
+			},
+		});
+		try {
+			const meta = get().sessions.find((s) => s.id === id);
+			const res = await fetch(`${API_BASE}/api/sessions/${id}/events`);
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const events: JsonAgentSessionEvent[] = await res.json();
+			const hist = initState();
+			for (const e of events) foldEvent(hist, e);
+			// Superseded (user hit 返回实时 or clicked another session) —
+			// don't yank the UI back into history mode.
+			if (req !== historyReq) return;
+			set({
+				history: {
+					meta: meta ?? {
+						id,
+						startedAt: 0,
+						endedAt: 0,
+						eventCount: events.length,
+						firstUserText: null,
+						outputTokens: hist.usageTotal.output,
+					},
+					graph: deriveGraph(hist),
+					loading: false,
+				},
+				selectedNodeId: null,
+			});
+		} catch {
+			if (req === historyReq) set({ history: null });
+		}
+	},
+	exitHistory: () => {
+		historyReq++; // cancel any in-flight load
+		set({ history: null, selectedNodeId: null });
+	},
 }));
 
 /** Open the WebSocket (idempotent) and wire it into the store. */

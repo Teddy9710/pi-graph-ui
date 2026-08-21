@@ -154,18 +154,27 @@ body {
 	background: var(--pg-red);
 }
 
-/* edges */
+/* edges - bright enough to read on the dark canvas */
 .pg-edge path {
-	stroke: #4b5160;
-	stroke-width: 1.5;
-}
-.pg-edge-spawn path {
-	stroke-dasharray: 5 4;
-	stroke: #5b8bd0;
-}
-.pg-edge-live path {
-	stroke: var(--pg-blue);
+	stroke: #9aa3b5;
 	stroke-width: 2;
+}
+.pg-edge .react-flow__edge-path {
+	stroke: #9aa3b5;
+	stroke-width: 2;
+}
+.pg-edge-spawn path,
+.pg-edge-spawn .react-flow__edge-path {
+	stroke-dasharray: 6 4;
+	stroke: #7ba4e0;
+}
+.pg-edge-live path,
+.pg-edge-live .react-flow__edge-path {
+	stroke: var(--pg-blue);
+	stroke-width: 2.5;
+}
+.pg-edge path {
+	stroke-linecap: round;
 }
 
 .react-flow__minimap {
@@ -180,4 +189,76 @@ body {
 }
 .pg-btn-ghost:hover {
 	border-color: var(--pg-blue);
+}
+
+/* history */
+.pg-history-btn {
+	margin-left: auto;
+}
+.pg-btn-sm {
+	padding: 4px 10px;
+	font-size: 12px;
+}
+.pg-history-banner {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	color: #fbbf24;
+	font-size: 12.5px;
+}
+.pg-drawer-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgb(0 0 0 / 0.45);
+	z-index: 30;
+	display: flex;
+}
+.pg-drawer {
+	width: 380px;
+	background: var(--pg-panel-bg);
+	border-right: 1px solid var(--pg-border);
+	padding: 14px;
+	overflow-y: auto;
+}
+.pg-drawer header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 12px;
+}
+.pg-drawer-close {
+	background: none;
+	border: none;
+	color: var(--pg-fg);
+	font-size: 18px;
+	cursor: pointer;
+}
+.pg-drawer ul {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.pg-session-item {
+	width: 100%;
+	text-align: left;
+	background: #0e1013;
+	border: 1px solid var(--pg-border);
+	border-radius: 8px;
+	color: var(--pg-fg);
+	padding: 10px;
+	cursor: pointer;
+	font-size: 12.5px;
+}
+.pg-session-item:hover,
+.pg-session-item.active {
+	border-color: var(--pg-blue);
+}
+.pg-session-title {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	margin-bottom: 4px;
 }

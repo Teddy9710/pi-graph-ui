@@ -19,12 +19,16 @@
  *   GET /api/state  - folded session summary (from @pi-graph/shared)
  */
 
+import { readFileSync } from "node:fs";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { WebSocketServer, type WebSocket } from "ws";
 import { deriveGraph, foldEvent, initState, type SessionState } from "@pi-graph/shared";
 import { EventHub } from "./event-hub.ts";
 import { PiBridge } from "./pi-bridge.ts";
+import { SessionStore } from "./session-store.ts";
+import { Leaderboard } from "./snake/leaderboard.ts";
+import { snakeRoutes } from "./snake/routes.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const PI_BIN = process.env.PI_BIN;
@@ -38,12 +42,14 @@ const PI_ARGS = process.env.PI_ARGS?.split(/\s+/).filter(Boolean) ?? [];
 
 const bridge = new PiBridge({ bin: PI_BIN, cwd: PI_CWD, extraArgs: PI_ARGS });
 const hub = new EventHub({ intervalMs: 100 });
+const store = new SessionStore();
 let session: SessionState = initState();
 
 /** Reset bridge-side state (new_session) and tell every client to rebuild. */
 function resetSession(): void {
 	hub.clear();
 	session = initState();
+	store.finalize();
 	for (const client of wsClients()) {
 		client.send(JSON.stringify({ type: "reset" }));
 	}
@@ -53,9 +59,11 @@ function resetSession(): void {
 bridge.on("event", (event) => {
 	foldEvent(session, event);
 	hub.ingest(event);
+	store.append(event);
 });
 bridge.on("exit", (code, stderr) => {
 	console.error(`[pi] exited code=${code}\n${stderr}`);
+	store.finalize();
 	for (const client of wsClients()) {
 		client.send(JSON.stringify({ type: "pi-exit", code, stderr }));
 	}
@@ -66,6 +74,31 @@ bridge.on("exit", (code, stderr) => {
 // ============================================================================
 
 const app = new Hono();
+
+// ----------------------------------------------------------------------------
+// Security middleware: minimal hardening shared by all routes.
+// ----------------------------------------------------------------------------
+app.use("*", async (c, next) => {
+	// Clickjacking + MIME sniffing hardening.
+	c.header("X-Content-Type-Options", "nosniff");
+	c.header("X-Frame-Options", "DENY");
+	c.header("Referrer-Policy", "no-referrer");
+	// Basic CSP for the snake demo page (served from this origin).
+	if (c.req.path === "/snake" || c.req.path === "/") {
+		c.header(
+			"Content-Security-Policy",
+			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'",
+		);
+	}
+	await next();
+});
+
+// Snake game sub-API (leaderboard + token issuance).
+app.route("/api/snake", snakeRoutes({ leaderboard: new Leaderboard() }));
+
+app.get("/snake", (c) => c.html(snakeHtml()));
+app.get("/", (c) => c.html(snakeHtml()));
+
 app.get("/health", (c) =>
 	c.json({
 		ok: true,
@@ -73,6 +106,8 @@ app.get("/health", (c) =>
 		clients: wsClients().length,
 	}),
 );
+app.get("/api/sessions", async (c) => c.json(await store.list()));
+app.get("/api/sessions/:id/events", async (c) => c.json(await store.read(c.req.param("id"))));
 app.get("/api/state", (c) => {
 	const graph = deriveGraph(session);
 	return c.json({
@@ -85,6 +120,19 @@ app.get("/api/state", (c) => {
 		edges: graph.edges.length,
 	});
 });
+
+// Serve the snake HTML inline (keep single-file front-end).
+let SNAKE_HTML = "";
+function snakeHtml(): string {
+	if (!SNAKE_HTML) {
+		try {
+			SNAKE_HTML = readFileSync(new URL("../../snake.html", import.meta.url), "utf8");
+		} catch {
+			SNAKE_HTML = "<h1>snake.html not found</h1>";
+		}
+	}
+	return SNAKE_HTML;
+}
 
 // ============================================================================
 // WebSocket

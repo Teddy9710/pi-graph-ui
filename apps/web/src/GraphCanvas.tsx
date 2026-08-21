@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef } from "react";
 import {
 	Background,
 	Controls,
+	MarkerType,
 	MiniMap,
 	ReactFlow,
 	ReactFlowProvider,
@@ -21,9 +22,11 @@ import "@xyflow/react/dist/style.css";
 import { layoutGraph } from "./layout.ts";
 import { nodeTypes } from "./nodes.tsx";
 import { useStore } from "./store.ts";
+import type { Graph } from "@pi-graph/shared";
 
-function Canvas() {
-	const graph = useStore((s) => s.graph);
+function Canvas({ graphOverride }: { graphOverride?: Graph }) {
+	const liveGraph = useStore((s) => s.graph);
+	const graph = graphOverride ?? liveGraph;
 	const select = useStore((s) => s.select);
 	const selectedNodeId = useStore((s) => s.selectedNodeId);
 	const { fitView } = useReactFlow();
@@ -47,6 +50,9 @@ function Canvas() {
 			graph.edges.map((e) => {
 				const target = graph.nodes.find((n) => n.id === e.target);
 				const running = target?.data.status === "running";
+				// Arrowheads bake their color into an inline style, so they
+				// must be given the same per-kind color as the CSS stroke.
+				const color = running ? "#3b82f6" : e.kind === "spawn" ? "#7ba4e0" : "#9aa3b5";
 				return {
 					id: e.id,
 					source: e.source,
@@ -54,6 +60,11 @@ function Canvas() {
 					className: `pg-edge pg-edge-${e.kind}${running ? " pg-edge-live" : ""}`,
 					animated: running,
 					type: e.kind === "spawn" ? "smoothstep" : "default",
+					// No edge-selection UI; opting out also avoids RF's default
+					// gray selected stroke overriding our colors.
+					selectable: false,
+					// Arrows make the parent->child direction explicit.
+					markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color },
 				};
 			}),
 		[graph],
@@ -92,10 +103,10 @@ function Canvas() {
 	);
 }
 
-export function GraphCanvas() {
+export function GraphCanvas({ graphOverride }: { graphOverride?: Graph }) {
 	return (
 		<ReactFlowProvider>
-			<Canvas />
+			<Canvas graphOverride={graphOverride} />
 		</ReactFlowProvider>
 	);
 }

@@ -111,7 +111,9 @@ function AgentDetail({ result }: { result: SubagentSingleResult }) {
 }
 
 export function DetailPanel() {
-	const graph = useStore((s) => s.graph);
+	// Resolve node ids against whatever graph the canvas is showing —
+	// in history mode that's the archived graph, not the live one.
+	const graph = useStore((s) => (s.history ? s.history.graph : s.graph));
 	const selectedNodeId = useStore((s) => s.selectedNodeId);
 
 	const node = graph.nodes.find((n) => n.id === selectedNodeId);

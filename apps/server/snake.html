@@ -5,10 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>贪吃蛇游戏</title>
 <style>
-  :root {
-    --board-size: 20;
-    --cell: 24px;
-  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
@@ -25,57 +21,30 @@
     border-radius: 20px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.5);
     text-align: center;
+    max-width: 720px;
+    width: 100%;
   }
-  h1 {
-    font-size: 28px;
-    margin-bottom: 4px;
-    letter-spacing: 2px;
-  }
-  .score-board {
-    display: flex;
-    justify-content: center;
-    gap: 40px;
-    margin: 12px 0 16px;
-    font-size: 14px;
-    color: #aee8ff;
-  }
+  h1 { font-size: 28px; margin-bottom: 4px; letter-spacing: 2px; }
+  .score-board { display: flex; justify-content: center; gap: 40px; margin: 12px 0 16px; font-size: 14px; color: #aee8ff; }
   .score-board span { color: #ffd54f; font-weight: bold; font-size: 20px; }
-  canvas {
-    background: #0a0f16;
-    border-radius: 12px;
-    border: 2px solid #2c5364;
-    display: block;
-    margin: 0 auto;
-  }
-  .controls {
-    margin-top: 16px;
-    font-size: 14px;
-    color: #8ae;
-  }
-  .btn {
-    margin-top: 12px;
-    padding: 10px 24px;
-    font-size: 16px;
-    border: none;
-    border-radius: 30px;
-    background: linear-gradient(135deg, #ffd54f, #ff9f43);
-    color: #173;
-    font-weight: bold;
-    cursor: pointer;
-    transition: transform 0.1s, box-shadow 0.2s;
-    box-shadow: 0 4px 15px rgba(255, 213, 79, 0.3);
-  }
+  canvas { background: #0a0f16; border-radius: 12px; border: 2px solid #2c5364; display: block; margin: 0 auto; }
+  .controls { margin-top: 16px; font-size: 14px; color: #8ae; }
+  .btn { margin-top: 12px; padding: 10px 24px; font-size: 16px; border: none; border-radius: 30px;
+    background: linear-gradient(135deg, #ffd54f, #ff9f43); color: #173; font-weight: bold; cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.2s; box-shadow: 0 4px 15px rgba(255,213,79,0.3); }
   .btn:hover { transform: translateY(-2px); }
   .btn:active { transform: translateY(0); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-  .game-over {
-    margin-top: 12px;
-    font-size: 18px;
-    color: #ff6b6b;
-    min-height: 26px;
-    font-weight: bold;
-  }
+  .game-over { margin-top: 12px; font-size: 18px; color: #ff6b6b; min-height: 26px; font-weight: bold; }
   #homeBtn { background: linear-gradient(135deg, #74b9ff, #3b82f6); color: #fff; margin-left: 10px; }
+  #leaderboard { margin: 16px auto 0; width: 100%; max-width: 360px; background: rgba(255,255,255,0.05);
+    border-radius: 12px; border: 1px solid #2c5364; padding: 12px; text-align: left; }
+  #leaderboard h2 { font-size: 15px; color: #aee8ff; margin-bottom: 8px; text-align: center; }
+  #leaderboard ol { padding-left: 20px; font-size: 14px; }
+  #leaderboard li { margin: 2px 0; }
+  #leaderboard li::marker { color: #ffd54f; font-weight: bold; }
+  #leaderboard .empty { color: #6a7; text-align: center; padding: 8px; font-size: 13px; }
+  .rank { color: #ff3757; }
 </style>
 </head>
 <body>
@@ -90,14 +59,17 @@
     <p>方向键 / WASD 控制移动，空格或 P 暂停</p>
   </div>
   <div class="game-over" id="gameOver"></div>
-  <button class="btn" id="startBtn">开始游戏</button>
-  <button class="btn" id="homeBtn">返回主页</button>
+  <div>
+    <button class="btn" id="startBtn">开始游戏</button>
+    <button class="btn" id="homeBtn">返回主页</button>
+  </div>
+  <div id="leaderboard"></div>
 </div>
 
 <script>
 (() => {
-  const SIZE = 20;            // 20x20 网格
-  const CELL = 24;            // 每格像素
+  const SIZE = 20;
+  const CELL = 24;
   const canvas = document.getElementById('board');
   const ctx = canvas.getContext('2d');
   canvas.width = SIZE * CELL;
@@ -108,12 +80,78 @@
   const gameOverEl = document.getElementById('gameOver');
   const startBtn = document.getElementById('startBtn');
   const homeBtn = document.getElementById('homeBtn');
+  const boardEl = document.getElementById('leaderboard');
 
   let board, snake, dir, nextDir, food, score, high, state, timer;
-  const SPEED = 130; // 毫秒/步
+  let token = null;          // server-issued game token
+  let name = null;           // player name
+  const SPEED = 130;
 
   high = Number(localStorage.getItem('snakeHighscore') || 0);
   highscoreEl.textContent = high;
+
+  // ---- backend API helpers (with error handling) ----
+  async function apiPost(path, payload) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }
+
+  // Fetch the top-10 leaderboard and render it.
+  async function refreshLeaderboard() {
+    try {
+      const res = await fetch('/api/snake/top?size=' + SIZE);
+      if (!res.ok) return boardEl.innerHTML = '<div class="empty">暂无法加载排行榜</div>';
+      const data = await res.json();
+      const scores = data.scores || [];
+      if (!scores.length) {
+        boardEl.innerHTML = '<h2>🏆 排行榜（无记录）</h2><div class="empty">还没有人上榜，来拿第一！</div>';
+        return;
+      }
+      const items = scores.slice(0, 10).map((s, i) =>
+        `<li><span class="rank">${i + 1}.</span> ${escapeHtml(s.name)} — <b>${s.score}</b></li>`
+      ).join('');
+      boardEl.innerHTML = `<h2>🏆 排行榜 Top 10</h2><ol>${items}</ol>`;
+    } catch (e) {
+      boardEl.innerHTML = '<div class="empty">排行榜服务不可用</div>';
+    }
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function askName() {
+    const saved = localStorage.getItem('snakeName');
+    if (saved) { name = saved; return; }
+    const input = prompt('输入你的昵称（最多16位，只能用字母/数字/下划线）：', '');
+    if (input && /^[A-Za-z0-9_]{1,16}$/.test(input)) {
+      name = input;
+      localStorage.setItem('snakeName', input);
+    } else {
+      name = 'anonymous';
+    }
+  }
+
+  // Start a new game: request a fresh token from the server first.
+  async function start() {
+    askName();
+    try {
+      const data = await apiPost('/api/snake/new', { size: SIZE });
+      token = data.token;   // server authorized this game
+    } catch (e) {
+      token = null;         // offline: play anyway, score just won't be saved
+      console.warn('token fetch failed, playing offline', e);
+    }
+    newGame();
+    state = 'running';
+    timer = setInterval(step, SPEED);
+  }
 
   function newGame() {
     board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
@@ -151,6 +189,18 @@
     } else {
       gameOverEl.textContent = `游戏结束！得分 ${score} 分`;
     }
+    if (token) submitScore();
+    else refreshLeaderboard(); // offline: still refresh what's cached server-side
+  }
+
+  // Submit the final score to the server leaderboard.
+  async function submitScore() {
+    try {
+      await apiPost('/api/snake/score', { token, name, size: SIZE, score });
+    } catch (e) {
+      console.warn('score submit failed', e);
+    }
+    refreshLeaderboard();
   }
 
   function step() {
@@ -158,13 +208,10 @@
     dir = nextDir;
     const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
 
-    // 撞墙
     if (head.x < 0 || head.x >= SIZE || head.y < 0 || head.y >= SIZE) return gameOver();
-    // 撞自己
     if (snake.some(s => s.x === head.x && s.y === head.y)) return gameOver();
 
     snake.unshift(head);
-
     if (head.x === food.x && head.y === food.y) {
       score++;
       scoreEl.textContent = score;
@@ -179,32 +226,23 @@
   function draw() {
     ctx.fillStyle = '#0a0f16';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // 网格线
     ctx.strokeStyle = 'rgba(255,255,255,0.04)';
     ctx.lineWidth = 1;
     for (let i = 1; i < SIZE; i++) {
       ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, canvas.height); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(canvas.width, i * CELL); ctx.stroke();
     }
-
-    // 食物
     if (food) {
       ctx.fillStyle = '#ff4757';
       ctx.beginPath();
       ctx.arc(food.x * CELL + CELL / 2, food.y * CELL + CELL / 2, CELL / 2 - 3, 0, Math.PI * 2);
       ctx.fill();
     }
-
-    // 蛇
     snake.forEach((seg, i) => {
       const x = seg.x * CELL, y = seg.y * CELL;
-      const gradient = i === 0
-        ? '#4ade80'                                          // 蛇头
-        : `hsl(${120 + i * 3 % 40}, 80%, ${50 - (i % 5)}%)`; // 渐变的蛇身
+      const gradient = i === 0 ? '#4ade80' : `hsl(${120 + i * 3 % 40}, 80%, ${50 - (i % 5)}%)`;
       ctx.fillStyle = i === 0 ? '#4ade80' : gradient;
       ctx.fillRect(x + 1.5, y + 1.5, CELL - 3, CELL - 3);
-      // 蛇头眼睛
       if (i === 0) {
         ctx.fillStyle = '#fff';
         if (dir.x === 1) { ctx.fillRect(x + 16, y + 6, 4, 4); ctx.fillRect(x + 16, y + 14, 4, 4); }
@@ -215,7 +253,7 @@
     });
   }
 
-  function pause() {
+  function toggle() {
     if (state === 'running') { state = 'paused'; clearInterval(timer); startBtn.textContent = '继续'; }
     else if (state === 'paused') { state = 'running'; timer = setInterval(step, SPEED); startBtn.textContent = '重新开始'; }
   }
@@ -223,15 +261,13 @@
   document.addEventListener('keydown', (e) => {
     const key = e.key.toLowerCase();
     if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'].includes(key)) e.preventDefault();
-    if (key === ' ' || key === 'p') { pause(); return; }
-
+    if (key === ' ' || key === 'p') { toggle(); return; }
     let d = null;
     if (key === 'arrowup' || key === 'w') d = { x: 0, y: -1 };
     else if (key === 'arrowdown' || key === 's') d = { x: 0, y: 1 };
     else if (key === 'arrowleft' || key === 'a') d = { x: -1, y: 0 };
     else if (key === 'arrowright' || key === 'd') d = { x: 1, y: 0 };
     if (!d || state !== 'running') return;
-    // 不允许原地调头
     if (d.x === -dir.x && d.y === -dir.y) return;
     nextDir = d;
   });
@@ -241,22 +277,14 @@
     start();
   });
 
-  function start() {
-    newGame();
-    state = 'running';
-    timer = setInterval(step, SPEED);
-  }
+  homeBtn.addEventListener('click', () => { window.location.href = '/'; });
 
-  // 返回主页：关闭页面或跳转到服务器根路径
-  homeBtn.addEventListener('click', () => {
-    window.location.href = '/';
-  });
-
-  // 初始展示棋盘（静止状态）
+  // Initial idle board.
   newGame();
   state = 'idle';
   draw();
   startBtn.textContent = '开始游戏';
+  refreshLeaderboard();
 })();
 </script>
 </body>
