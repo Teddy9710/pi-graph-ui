@@ -58,7 +58,13 @@ export class SessionStore {
 		if (this.disabled) return;
 		try {
 			if (this.currentId === null) {
-				this.currentId = new Date().toISOString().replace(/[:.]/g, "-");
+				// Ids are millisecond timestamps; a finalize + append inside the
+				// same ms would collide into one file — de-collide explicitly.
+				const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+				let id = stamp;
+				let n = 2;
+				while (existsSync(this.fileFor(id))) id = `${stamp}-${n++}`;
+				this.currentId = id;
 			}
 			appendFileSync(this.fileFor(this.currentId), JSON.stringify(event) + "\n");
 		} catch (err) {
@@ -119,6 +125,8 @@ export class SessionStore {
 				outputTokens: output,
 			});
 		}
-		return metas.sort((a, b) => b.endedAt - a.endedAt);
+		// Newest first; equal mtimes (same-ms writes) tie-break on the
+		// timestamp id, which sorts lexicographically chronologically.
+		return metas.sort((a, b) => b.endedAt - a.endedAt || b.id.localeCompare(a.id));
 	}
 }

@@ -81,6 +81,12 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
 4. **M4** 子 agent 图：解析 SubagentDetails、并行分支动画、agent 内部工具二级展开、汇总节点
 5. **M5** 持久化与回放：历史会话列表、加载重放成图；steer/abort 控件
 6. **M6+** 增强：多会话画布、导出 PNG/SVG、token 费用统计、elkjs 复杂布局
+7. **M-O 图编排（graph orchestration）**：图从展示层升级为执行模型——
+   - shared：`GraphDef/NodeDef/EdgeDef` + `validateGraph`（含 Kahn 查环，对畸形输入全函数）+ `assemblePrompt`（上游输出 50KB 截断注入）+ `RunEvent` 流与 `foldRunEvent`；内置模板 research-fanout / pipeline / blank
+   - server：`OrchestratorEngine`（纯 DAG 调度器，注入 Executor，AND-join、失败沿下游 BFS 传染 skip、AbortController）→ `RunManager`（全局单 run、150ms 连接式 delta 合并、事件保留至下一次 run 供刷新重放）→ `PiNodeExecutor`（每节点一个 `pi --mode rpc --no-session` 实例，persona 临时文件注入，agent_settled/exit/timeout 三方竞争，必杀进程）→ `RunStore`（`~/.pi-graph-ui/runs/` JSONL）
+   - pi-bridge 加固：win32 `taskkill /T /F` 树杀（修 cmd.exe 壳漏杀 node 子进程的存量缺陷）+ shell 模式参数空格加引号
+   - web：编排页签（可拖拽编辑器 + 模板 + 校验 issue + 运行条/节点面板），`orch-store`（localStorage 持久化），单 WS 复用（hello 携带 run 重放、run_event/run_error 路由）
+   - 环境变量：`ORCH_MAX_PARALLEL`（默认 4）/ `ORCH_MODEL` / `ORCH_NODE_TIMEOUT_MS`（默认 10min）；e2e：`scripts/e2e-orch.mjs`（链式注入/归档/重放 + `ABORT=1` 中止与孤儿进程检查）
 
 ## 风险与对策
 - pi 版本升级改动事件形状 → shared 包用快照测试锁定事件结构，升级时显式更新

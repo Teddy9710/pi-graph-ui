@@ -1,12 +1,14 @@
 /**
- * App shell: header (connection + usage), graph canvas, detail panel,
- * prompt input with abort/steer.
+ * App shell: header (tabs + connection + usage) and two tabs — 实时 (live
+ * trace: graph canvas, detail panel, prompt input) and 编排 (graph
+ * orchestration editor). HistoryDrawer stays mounted at app level.
  */
 
 import { useEffect, useState } from "react";
 import { DetailPanel } from "./DetailPanel.tsx";
 import { GraphCanvas } from "./GraphCanvas.tsx";
 import { HistoryDrawer } from "./HistoryDrawer.tsx";
+import { OrchestratePage } from "./OrchestratePage.tsx";
 import { connect, useStore } from "./store.ts";
 import "./app.css";
 
@@ -16,7 +18,9 @@ function formatTokens(n: number): string {
 	return `${(n / 1000000).toFixed(1)}M`;
 }
 
-function Header() {
+type Tab = "live" | "orch";
+
+function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 	const wsStatus = useStore((s) => s.wsStatus);
 	const session = useStore((s) => s.session);
 	const piExit = useStore((s) => s.piExit);
@@ -34,6 +38,12 @@ function Header() {
 	return (
 		<header className="pg-header">
 			<b>pi-graph</b>
+			<button className={`pg-tab${tab === "live" ? " active" : ""}`} onClick={() => setTab("live")}>
+				实时
+			</button>
+			<button className={`pg-tab${tab === "orch" ? " active" : ""}`} onClick={() => setTab("orch")}>
+				编排
+			</button>
 			{history ? (
 				<span className="pg-history-banner">
 					📜 历史回放
@@ -130,17 +140,24 @@ export default function App() {
 		connect();
 	}, []);
 	const history = useStore((s) => s.history);
+	const [tab, setTab] = useState<Tab>("live");
 	return (
 		<div className="pg-app">
-			<Header />
-			<div className="pg-main">
-				<div className="pg-canvas">
-					{/* History view replays a frozen graph; live view keeps streaming. */}
-					{history ? <GraphCanvas key="history" graphOverride={history.graph} /> : <GraphCanvas key="live" />}
-				</div>
-				<DetailPanel />
-			</div>
-			<PromptBar />
+			<Header tab={tab} setTab={setTab} />
+			{tab === "orch" ? (
+				<OrchestratePage />
+			) : (
+				<>
+					<div className="pg-main">
+						<div className="pg-canvas">
+							{/* History view replays a frozen graph; live view keeps streaming. */}
+							{history ? <GraphCanvas key="history" graphOverride={history.graph} /> : <GraphCanvas key="live" />}
+						</div>
+						<DetailPanel />
+					</div>
+					<PromptBar />
+				</>
+			)}
 			<HistoryDrawer />
 		</div>
 	);

@@ -13,8 +13,13 @@ import {
 	initState,
 	type Graph,
 	type JsonAgentSessionEvent,
+	type RunEvent,
 	type SessionState,
 } from "@pi-graph/shared";
+// Circular import with orch-store.ts is INTENTIONAL and safe: both sides only
+// hold function references that are called at runtime (never during module
+// evaluation), and function declarations are hoisted before any import runs.
+import { applyRunEvent, setOrchError, setRunSnapshot } from "./orch-store.ts";
 
 export type WsStatus = "connecting" | "open" | "closed" | "reconnecting";
 
@@ -59,6 +64,11 @@ let historyReq = 0;
 
 function send(payload: unknown): void {
 	if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+}
+
+/** Public send for sibling stores (orch) that share this socket. */
+export function sendWs(payload: unknown): void {
+	send(payload);
 }
 
 function ingest(store: AppState, events: JsonAgentSessionEvent[]): void {
@@ -168,6 +178,11 @@ export function connect(): void {
 			snapshot?: JsonAgentSessionEvent[];
 			code?: number | null;
 			stderr?: string;
+			/** Orchestration: hello replays the retained run events (RunEvent[]). */
+			run?: unknown;
+			/** Orchestration: run_error payload. */
+			message?: string;
+			issues?: unknown;
 		};
 		try {
 			envelope = JSON.parse(String(msg.data));
@@ -186,6 +201,9 @@ export function connect(): void {
 				ingest(fresh as AppState, envelope.snapshot!);
 				return { ...fresh, eventCount: s.eventCount + envelope.snapshot!.length };
 			});
+			// Orchestration: also restore the retained run snapshot (absent
+			// when the server has never run a graph).
+			setRunSnapshot(envelope.run as RunEvent[] | undefined);
 			return;
 		}
 		if (envelope.type === "event" && envelope.event) {
@@ -193,6 +211,16 @@ export function connect(): void {
 				ingest(s as AppState, [envelope.event!]);
 				return { eventCount: s.eventCount + 1, lastEventAt: Date.now() };
 			});
+			return;
+		}
+		if (envelope.type === "run_event" && envelope.event) {
+			// Orchestration stream: the payload is a shared RunEvent (typed
+			// loosely as JsonAgentSessionEvent in the envelope declaration).
+			applyRunEvent(envelope.event as unknown as RunEvent);
+			return;
+		}
+		if (envelope.type === "run_error") {
+			setOrchError({ message: envelope.message, issues: envelope.issues });
 			return;
 		}
 		if (envelope.type === "pi-exit") {

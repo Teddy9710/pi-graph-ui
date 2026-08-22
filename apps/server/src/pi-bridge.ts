@@ -28,6 +28,13 @@ export interface PiBridgeOptions {
 	noSession?: boolean;
 }
 
+/** Omit<"id"> distributed over the RpcCommand union (plain Omit collapses it). */
+type RpcCommandWithoutId = RpcCommand extends infer T
+	? T extends { id?: string }
+		? Omit<T, "id"> & { id?: string }
+		: never
+	: never;
+
 interface ClassifiedLine {
 	kind: "event" | "response";
 	event?: JsonAgentSessionEvent;
@@ -78,12 +85,14 @@ export class PiBridge extends EventEmitter {
 		args.push("--mode", "rpc");
 		if (this.options.noSession !== false) args.push("--no-session");
 
-		this.proc = spawn(bin, args, {
+		this.proc = spawn(bin, this.shellArgs(bin, args), {
 			cwd: this.options.cwd ?? process.cwd(),
 			stdio: ["pipe", "pipe", "pipe"],
 			// Windows: pi installs as a .cmd shim; Node refuses to spawn .cmd
-			// without a shell. Args are fixed constants here (user text reaches
-			// pi via stdin), so shell quoting is not a concern.
+			// without a shell. Node joins shell args VERBATIM, so any arg with
+			// whitespace (e.g. a persona temp-file path) must carry its own
+			// quotes or cmd.exe would split it. User text still reaches pi via
+			// stdin, never argv (cmd.exe caps a command line at 8191 chars).
 			shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(bin),
 		}) as ChildProcessWithoutNullStreams;
 
@@ -146,7 +155,7 @@ export class PiBridge extends EventEmitter {
 	}
 
 	/** Send an RPC command and await its correlated response. */
-	request(command: Omit<RpcCommand, "id"> & { id?: string }): Promise<RpcResponse> {
+	request(command: RpcCommandWithoutId): Promise<RpcResponse> {
 		if (!this.proc || this.exited) return Promise.reject(new Error("pi bridge is not running"));
 		const id = String(this.nextId++);
 		const full = { ...command, id } as RpcCommand;
@@ -161,7 +170,7 @@ export class PiBridge extends EventEmitter {
 		});
 	}
 
-	/** Terminate the subprocess. */
+	/** Terminate the subprocess (the whole process tree on Windows). */
 	kill(): void {
 		if (this.proc && !this.exited) {
 			try {
@@ -169,7 +178,35 @@ export class PiBridge extends EventEmitter {
 			} catch {
 				/* already closed */
 			}
-			this.proc.kill();
+			if (process.platform === "win32" && this.proc.pid !== undefined) {
+				// We spawn via shell (cmd.exe shim), so this.proc.kill() only
+				// kills the shell and LEAKS the node child running pi. Kill
+				// the entire tree; "close" still fires and finalizes state.
+				try {
+					const killer = spawn("taskkill", ["/pid", String(this.proc.pid), "/T", "/F"], { stdio: "ignore" });
+					// Without a listener a failed taskkill spawn would crash
+					// the server as an unhandled 'error' event.
+					killer.on("error", (err) => {
+						console.error("[pi-bridge] taskkill failed:", err);
+						try {
+							this.proc?.kill();
+						} catch {
+							/* already gone */
+						}
+					});
+				} catch (err) {
+					console.error("[pi-bridge] taskkill failed:", err);
+					this.proc.kill();
+				}
+			} else {
+				this.proc.kill();
+			}
 		}
+	}
+
+	/** Quote args containing whitespace when they'll pass through a shell. */
+	private shellArgs(bin: string, args: string[]): string[] {
+		if (!(process.platform === "win32" && /\.(cmd|bat)$/i.test(bin))) return args;
+		return args.map((a) => (/\s/.test(a) ? `"${a}"` : a));
 	}
 }
