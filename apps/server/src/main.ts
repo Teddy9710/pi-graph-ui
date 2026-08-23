@@ -17,7 +17,8 @@
  *   {type: "command", command: RpcCommand}               - forwarded verbatim
  *   {type: "request", command: RpcCommand}               - forwarded, reply relayed
  *   {type: "run_graph", graph: GraphDef}                 - start an orchestration run
- *   {type: "abort_run"}                                  - abort the active run
+ *   {type: "plan_run", goal: string}                     - plan a goal into a graph, then run it
+ *   {type: "abort_run"}                                  - abort the active run/planning
  *
  * HTTP:
  *   GET /health     - liveness + pi subprocess status
@@ -36,6 +37,7 @@ import { deriveGraph, foldEvent, initState, type GraphDef, type SessionState } f
 import { EventHub } from "./event-hub.ts";
 import { PiBridge } from "./pi-bridge.ts";
 import { PiNodeExecutor } from "./pi-node-executor.ts";
+import { PiPlanner } from "./planner.ts";
 import { RunManager } from "./run-manager.ts";
 import { RunStore } from "./run-store.ts";
 import { SessionStore } from "./session-store.ts";
@@ -52,6 +54,9 @@ const ORCH_MAX_PARALLEL = Math.max(1, Number(process.env.ORCH_MAX_PARALLEL ?? 4)
 const ORCH_MODEL = process.env.ORCH_MODEL ?? "deepseek/deepseek-chat";
 const ORCH_NODE_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_NODE_TIMEOUT_MS ?? 600_000) || 600_000);
 const ORCH_AGENTS_DIR = join(homedir(), ".pi", "agent", "agents");
+/** Auto-orchestration planner (goal → graph); defaults to the node model. */
+const ORCH_PLANNER_MODEL = process.env.ORCH_PLANNER_MODEL ?? ORCH_MODEL;
+const ORCH_PLAN_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_PLAN_TIMEOUT_MS ?? 180_000) || 180_000);
 
 // ============================================================================
 // Bridge + hub wiring
@@ -69,6 +74,7 @@ const runManager = new RunManager({
 		agentsDir: ORCH_AGENTS_DIR,
 		timeoutMs: ORCH_NODE_TIMEOUT_MS,
 	}),
+	planner: new PiPlanner({ bin: PI_BIN, cwd: PI_CWD, model: ORCH_PLANNER_MODEL, timeoutMs: ORCH_PLAN_TIMEOUT_MS }),
 	maxParallel: ORCH_MAX_PARALLEL,
 	store: runStore,
 });
@@ -220,7 +226,7 @@ wss.on("connection", (ws) => {
 	});
 
 	ws.on("message", (data) => {
-		let msg: { type: string; command?: unknown; graph?: unknown };
+		let msg: { type: string; command?: unknown; graph?: unknown; goal?: unknown };
 		try {
 			msg = JSON.parse(String(data));
 		} catch {
@@ -265,6 +271,20 @@ wss.on("connection", (ws) => {
 			}
 			return;
 		}
+		if (msg.type === "plan_run") {
+			// Same defensive shape as run_graph: a malformed goal (missing,
+			// non-string, huge) must not throw out of the handler.
+			try {
+				const goal = typeof msg.goal === "string" ? msg.goal : "";
+				const result = runManager.startPlanned(goal);
+				if (!result.ok) {
+					ws.send(JSON.stringify({ type: "run_error", message: result.error }));
+				}
+			} catch (err) {
+				ws.send(JSON.stringify({ type: "run_error", message: `goal 无法解析: ${(err as Error).message}` }));
+			}
+			return;
+		}
 		if (msg.type === "abort_run") {
 			runManager.abort(); // no-op when idle; run_finished tells the story
 			return;
@@ -292,8 +312,8 @@ bridge.on("response", (response) => {
 
 function shutdown(): void {
 	console.log("\nshutting down...");
-	// Abort first: per-node pi subprocesses must die WITH the server (Windows
-	// taskkill trees), or they orphan and keep burning model tokens.
+	// Abort first: the planner and per-node pi subprocesses must die WITH the
+	// server (Windows taskkill trees), or they orphan and keep burning tokens.
 	runManager.abort();
 	bridge.kill();
 	for (const ws of wsClients()) ws.close();

@@ -43,28 +43,44 @@ function useAgentNames(): string[] {
 function GraphSummary() {
 	const graphDef = useOrchStore((s) => s.graphDef);
 	const issues = useOrchStore((s) => s.issues);
+	const run = useOrchStore((s) => s.run);
+	const view = useOrchStore((s) => s.view);
+	const shown = view === "run" ? run.graph : graphDef;
 	return (
 		<aside className="pg-panel">
 			<header>
-				<b>图概览</b>
+				<b>{view === "run" ? "运行图" : "图概览"}</b>
 				<span className="pg-dim">
-					{graphDef.nodes.length} 节点 · {graphDef.edges.length} 边
+					{shown ? `${shown.nodes.length} 节点 · ${shown.edges.length} 边` : "尚未生成"}
 				</span>
 			</header>
-			<h4>校验（{issues.length} 个问题）</h4>
-			{issues.length === 0 ? (
-				<p className="pg-dim">图有效，可以运行。</p>
-			) : (
-				issues.map((issue, i) => (
-					<div key={i} className="pg-meta pg-error-text">
-						{issue.nodeOrEdge ? `${issue.nodeOrEdge}：` : ""}
-						{issue.message}
-					</div>
-				))
+			{run.goal && (
+				<>
+					<h4>目标</h4>
+					<p className="pg-dim">{run.goal}</p>
+				</>
+			)}
+			{run.planError && <div className="pg-meta pg-error-text">{run.planError}</div>}
+			{view === "editor" && (
+				<>
+					<h4>校验（{issues.length} 个问题）</h4>
+					{issues.length === 0 ? (
+						<p className="pg-dim">图有效，可以运行。</p>
+					) : (
+						issues.map((issue, i) => (
+							<div key={i} className="pg-meta pg-error-text">
+								{issue.nodeOrEdge ? `${issue.nodeOrEdge}：` : ""}
+								{issue.message}
+							</div>
+						))
+					)}
+				</>
 			)}
 			<h4>提示</h4>
 			<p className="pg-dim">
-				点击节点选中后再编辑；从节点右侧圆点拖到另一节点左侧圆点连线（环会被拒绝）；删除键删除选中节点；「自动整理」用 dagre 重排全部节点。
+				{view === "run"
+					? "点击节点查看运行详情；「转入编辑器」把生成图复制到编辑器后可修改再跑。"
+					: "点击节点选中后再编辑；从节点右侧圆点拖到另一节点左侧圆点连线（环会被拒绝）；删除键删除选中节点；「自动整理」用 dagre 重排全部节点。"}
 			</p>
 		</aside>
 	);
@@ -74,15 +90,19 @@ export function OrchNodePanel() {
 	const graphDef = useOrchStore((s) => s.graphDef);
 	const selectedNodeId = useOrchStore((s) => s.selectedNodeId);
 	const run = useOrchStore((s) => s.run);
+	const view = useOrchStore((s) => s.view);
 	const updateNode = useOrchStore((s) => s.updateNode);
 	const deleteNode = useOrchStore((s) => s.deleteNode);
 	const agents = useAgentNames();
 
-	const node = selectedNodeId ? (graphDef.nodes.find((n) => n.id === selectedNodeId) ?? null) : null;
+	// In the run view the inspected node belongs to the GENERATED graph, not
+	// the editor's — fields render read-only there.
+	const source = view === "run" ? run.graph : graphDef;
+	const node = selectedNodeId ? (source?.nodes.find((n) => n.id === selectedNodeId) ?? null) : null;
 	if (!node) return <GraphSummary />;
 
 	const runNode = selectedNodeId ? (run.nodes[selectedNodeId] ?? null) : null;
-	const running = run.status === "running";
+	const editable = view === "editor" && run.status !== "running";
 	const duration =
 		runNode?.startedAt != null && runNode.endedAt != null
 			? ` · ${((runNode.endedAt - runNode.startedAt) / 1000).toFixed(1)}s`
@@ -104,7 +124,7 @@ export function OrchNodePanel() {
 					id="pg-node-label"
 					className="pg-form-input"
 					value={node.label ?? ""}
-					disabled={running}
+					disabled={!editable}
 					onChange={(e) => updateNode(node.id, { label: e.target.value })}
 				/>
 			</div>
@@ -114,7 +134,7 @@ export function OrchNodePanel() {
 					id="pg-node-task"
 					className="pg-form-input"
 					value={node.task}
-					disabled={running}
+					disabled={!editable}
 					onChange={(e) => updateNode(node.id, { task: e.target.value })}
 				/>
 			</div>
@@ -125,7 +145,7 @@ export function OrchNodePanel() {
 					className="pg-form-input"
 					placeholder="deepseek/deepseek-chat"
 					value={node.model ?? ""}
-					disabled={running}
+					disabled={!editable}
 					onChange={(e) => updateNode(node.id, { model: e.target.value })}
 				/>
 			</div>
@@ -136,7 +156,7 @@ export function OrchNodePanel() {
 					className="pg-form-input"
 					list="pg-agents"
 					value={node.agent ?? ""}
-					disabled={running}
+					disabled={!editable}
 					onChange={(e) => updateNode(node.id, { agent: e.target.value })}
 				/>
 				<datalist id="pg-agents">
@@ -145,9 +165,13 @@ export function OrchNodePanel() {
 					))}
 				</datalist>
 			</div>
-			<button className="pg-btn pg-btn-danger" disabled={running} onClick={() => deleteNode(node.id)}>
-				删除节点
-			</button>
+			{editable ? (
+				<button className="pg-btn pg-btn-danger" onClick={() => deleteNode(node.id)}>
+					删除节点
+				</button>
+			) : (
+				<div className="pg-dim">运行视图只读——「转入编辑器」后可修改</div>
+			)}
 
 			{runNode && (
 				<>

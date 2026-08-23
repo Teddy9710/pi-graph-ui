@@ -87,6 +87,12 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
    - pi-bridge 加固：win32 `taskkill /T /F` 树杀（修 cmd.exe 壳漏杀 node 子进程的存量缺陷）+ shell 模式参数空格加引号
    - web：编排页签（可拖拽编辑器 + 模板 + 校验 issue + 运行条/节点面板），`orch-store`（localStorage 持久化），单 WS 复用（hello 携带 run 重放、run_event/run_error 路由）
    - 环境变量：`ORCH_MAX_PARALLEL`（默认 4）/ `ORCH_MODEL` / `ORCH_NODE_TIMEOUT_MS`（默认 10min）；e2e：`scripts/e2e-orch.mjs`（链式注入/归档/重放 + `ABORT=1` 中止与孤儿进程检查）
+8. **M-D 动态编排（goal → 自动拆图 → 自动跑）**：不再手画图——
+   - shared：`RunEvent` 新增 `plan_started/plan_delta/plan_completed/plan_failed`；`RunState` 增加 `status:"planning"`、`goal`、`planText`（尾部 8KB 预览）、`planError`；同一 runId 从 plan 阶段延续到 run_started（goal 保留）
+   - server：`PiPlanner`（`planner.ts`，规划器本身也是一个 `pi --no-session` 实例：严格 JSON 提示词 → `extractGraph` 子串解析 + 字段白名单归一 + `validateGraph`，失败带错误反馈重试一次；流式 delta 经 onDelta 外送；settled/exit/timeout/abort 竞争 + 必杀）；`RunManager.startPlanned(goal)`（规划→同 runId 无缝交给引擎；中止规划 = run_finished aborted；规划器迟到结果不污染下一个 run）；`RunStore.list()` 接受 plan_started 开头的 run
+   - web：目标输入条 + ⚡自动编排；`plan_started` 自动切到只读「运行」视图（生成图 dagre 布局按结构签名 memo，流式期间绝不重排），规划中实时预览 plan JSON 尾部；「转入编辑器」把生成图复制进编辑器可改可重跑；hello 重放仅在自动 run 进行中时恢复运行视图
+   - 环境变量：`ORCH_PLANNER_MODEL`（默认 = ORCH_MODEL）/ `ORCH_PLAN_TIMEOUT_MS`（默认 3min）；e2e 新增 `PLAN=1` 模式（规划流式 → 同 runId 执行 → 全部生成节点完成 → 归档含 plan 事件 → 无孤儿进程）
+   - 边界加固（对抗性评审后）：节点 id 拒绝 JS 保留名（`__proto__` 等）+ 折叠节点表用空原型对象（恶意图绝不触碰原型链）；goal 长度在 WS 边界拦截（≤4000 字符，不回显超长文本）；规划器同步异常也有终态事件、崩溃路径先冲刷 plan 缓冲再发 plan_failed；前端 IME 输入法回车不误触发、重连不再强行拉回运行视图、run 视图按内容签名 memo（改任务重跑不渲染旧图）
 
 ## 风险与对策
 - pi 版本升级改动事件形状 → shared 包用快照测试锁定事件结构，升级时显式更新

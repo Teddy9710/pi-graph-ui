@@ -10,6 +10,7 @@ import { create } from "zustand";
 import {
 	TEMPLATES,
 	edgeId,
+	emptyNodeMap,
 	foldRunEvent,
 	initRunState,
 	validateGraph,
@@ -27,6 +28,11 @@ import { sendWs } from "./store.ts";
 
 const STORAGE_KEY = "pi-graph.orch.graph.v1";
 const PERSIST_DELAY_MS = 300;
+/** planRun's guard is echo-based — run.status only flips when plan_started
+ *  comes back. A second send inside that round-trip would just earn a spurious
+ *  busy run_error (double-click / Enter+click); absorb it locally. */
+const PLAN_SEND_GUARD_MS = 1000;
+let lastPlanSentAt = 0;
 
 interface OrchState {
 	graphDef: GraphDef;
@@ -35,6 +41,9 @@ interface OrchState {
 	issues: GraphValidationIssue[];
 	/** Folded run state (idle until the first run event arrives). */
 	run: RunState;
+	/** "editor" = hand-edit graphDef; "run" = read-only view of run.graph
+	 *  (auto-switched when a planned run starts streaming). */
+	view: "editor" | "run";
 	/** Why the last connection attempt was rejected (cycle/duplicate/self-loop). */
 	connectIssue: string | null;
 	/** Server-side run rejection (run_error envelope); cleared on next run start. */
@@ -58,6 +67,11 @@ interface OrchState {
 	/** Client-side validateGraph gate: issues → never sent. */
 	runGraph: () => void;
 	abortRun: () => void;
+	/** Auto-orchestrate: send the goal, the server plans then runs (plan_run). */
+	planRun: (goal: string) => void;
+	setView: (view: "editor" | "run") => void;
+	/** Copy the generated/executed run graph into the editor for hand-tuning. */
+	importGraphFromRun: () => void;
 }
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -135,6 +149,7 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 	selectedNodeId: null,
 	issues: validateGraph(initialGraph),
 	run: initRunState(),
+	view: "editor",
 	connectIssue: null,
 	orchError: null,
 
@@ -225,7 +240,7 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 
 	runGraph: () => {
 		const s = get();
-		if (s.run.status === "running") return;
+		if (s.run.status === "running" || s.run.status === "planning") return;
 		// Client-side gate: never send a graph that doesn't validate.
 		if (s.issues.length > 0) return;
 		set({ orchError: null });
@@ -233,6 +248,27 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 	},
 
 	abortRun: () => sendWs({ type: "abort_run" }),
+
+	planRun: (goal) => {
+		const s = get();
+		if (s.run.status === "running" || s.run.status === "planning") return;
+		const trimmed = goal.trim();
+		if (!trimmed) return;
+		if (Date.now() - lastPlanSentAt < PLAN_SEND_GUARD_MS) return;
+		lastPlanSentAt = Date.now();
+		set({ orchError: null });
+		// plan_started echoes back and flips the view to "run".
+		sendWs({ type: "plan_run", goal: trimmed });
+	},
+
+	setView: (view) => set({ view }),
+
+	importGraphFromRun: () =>
+		set((s) => {
+			if (!s.run.graph || s.run.status === "running" || s.run.status === "planning") return {};
+			// Fresh positions via auto-layout — generated nodes carry none.
+			return { ...graphState(autoLayoutGraphDef(cloneGraph(s.run.graph))), selectedNodeId: null, view: "editor" };
+		}),
 }));
 
 // ============================================================================
@@ -244,17 +280,31 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 export function setRunSnapshot(events: RunEvent[] | undefined): void {
 	const fresh = initRunState();
 	if (events) for (const event of events) foldRunEvent(fresh, event);
-	useOrchStore.setState({ run: fresh });
+	useOrchStore.setState((s) => ({
+		run: fresh,
+		// Only a COLD session (previous status idle — page load/refresh) is
+		// steered back onto the run view of an in-flight auto run. hello also
+		// fires on every automatic reconnect, and there it must respect an
+		// explicit 返回编辑器 the user clicked mid-run.
+		view:
+			s.run.status === "idle" &&
+			(fresh.status === "planning" || (fresh.status === "running" && fresh.goal !== null))
+				? "run"
+				: s.view,
+	}));
 }
 
 /** Fold one live run event into the run state. foldRunEvent mutates in place,
- *  so clone (state + node records) for zustand reference selectors. */
+ *  so clone (state + node records) for zustand reference selectors. The node
+ *  map clone stays null-prototype (emptyNodeMap) like every other node map. */
 export function applyRunEvent(event: RunEvent): void {
 	useOrchStore.setState((s) => {
-		const next: RunState = { ...s.run, nodes: {} };
+		const next: RunState = { ...s.run, nodes: emptyNodeMap() };
 		for (const [id, node] of Object.entries(s.run.nodes)) next.nodes[id] = { ...node };
 		foldRunEvent(next, event);
-		return { run: next };
+		// An auto-orchestrated run takes over the canvas: the generated graph
+		// only exists in the run state, not in the editor.
+		return { run: next, view: event.type === "plan_started" ? ("run" as const) : s.view };
 	});
 }
 

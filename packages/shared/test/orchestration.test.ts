@@ -54,6 +54,16 @@ describe("validateGraph", () => {
 		expect(issues[0]?.nodeOrEdge).toBe("a b");
 	});
 
+	it("rejects reserved ids that would poison keyed node maps (__proto__ etc.)", () => {
+		// Planner output is untrusted text: a goal can steer the LLM to emit
+		// "__proto__" as an id, and assigning that into a plain object map
+		// fires the prototype setter instead of creating a key.
+		for (const bad of ["__proto__", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty"]) {
+			const issues = validateGraph({ nodes: [{ id: bad, task: "t" }], edges: [] });
+			expect(issues.some((i) => i.nodeOrEdge === bad && i.message.includes("保留名"))).toBe(true);
+		}
+	});
+
 	it("rejects an empty task", () => {
 		const issues = validateGraph({ nodes: [{ id: "a", task: "  " }], edges: [] });
 		expect(issues.some((i) => i.message.includes("为空"))).toBe(true);
@@ -188,6 +198,26 @@ describe("foldRunEvent", () => {
 		expect(Object.values(s.nodes).every((n) => n.status === "pending")).toBe(true);
 	});
 
+	it("folding stays immune to a reserved-id graph (null-prototype node map)", () => {
+		// Backstop for a hostile/buggy server that ships an unvalidated graph:
+		// the node map has no prototype, so "__proto__" becomes a plain own
+		// key and later events fold into it — nothing leaks onto Object.prototype.
+		const adversarial: RunEvent = {
+			type: "run_started",
+			runId: "r9",
+			startedAt: 1,
+			graph: { nodes: [{ id: "__proto__", task: "x" }, { id: "n1", task: "y" }], edges: [] },
+		};
+		const s = foldRunEvent(initRunState(), adversarial);
+		expect(Object.keys(s.nodes).sort()).toEqual(["__proto__", "n1"]);
+		foldRunEvent(s, { type: "node_started", runId: "r9", nodeId: "__proto__", startedAt: 2, assembledPrompt: "PWN" });
+		expect(s.nodes["__proto__"]?.status).toBe("running");
+		expect(s.nodes["__proto__"]?.assembledPrompt).toBe("PWN");
+		// The real prize: no inherited pollution on innocent objects.
+		expect(({} as { status?: string }).status).toBeUndefined();
+		expect(({} as { assembledPrompt?: string }).assembledPrompt).toBeUndefined();
+	});
+
 	it("node lifecycle running → ok records output and usage", () => {
 		const s = initRunState();
 		foldRunEvent(s, started);
@@ -242,6 +272,56 @@ describe("foldRunEvent", () => {
 		const before = JSON.stringify(s.nodes);
 		foldRunEvent(s, { type: "node_started", runId: "r-OTHER", nodeId: "a", startedAt: 5, assembledPrompt: "" });
 		expect(JSON.stringify(s.nodes)).toBe(before);
+	});
+
+	it("plan lifecycle: started → delta → completed → run_started keeps the goal", () => {
+		const s = initRunState();
+		foldRunEvent(s, { type: "plan_started", runId: "r9", goal: "调研三个前端框架", startedAt: 1 });
+		expect(s.status).toBe("planning");
+		expect(s.goal).toBe("调研三个前端框架");
+		expect(s.nodes).toEqual({});
+		foldRunEvent(s, { type: "plan_delta", runId: "r9", delta: '{"nodes":[' });
+		foldRunEvent(s, { type: "plan_delta", runId: "r9", delta: "…]" });
+		expect(s.planText).toContain("…]");
+		const gen: GraphDef = {
+			nodes: [
+				{ id: "n1", task: "a" },
+				{ id: "n2", task: "b" },
+			],
+			edges: [{ id: "n1->n2", source: "n1", target: "n2" }],
+		};
+		foldRunEvent(s, { type: "plan_completed", runId: "r9", graph: gen });
+		expect(s.graph).toBe(gen);
+		expect(Object.keys(s.nodes)).toEqual([]); // nodes materialize on run_started
+		foldRunEvent(s, { type: "run_started", runId: "r9", startedAt: 5, graph: gen });
+		expect(s.status).toBe("running");
+		expect(s.goal).toBe("调研三个前端框架"); // same runId → goal survives
+		expect(Object.keys(s.nodes).sort()).toEqual(["n1", "n2"]);
+	});
+
+	it("plan_failed records the error and leaves no nodes", () => {
+		const s = initRunState();
+		foldRunEvent(s, { type: "plan_started", runId: "r9", goal: "g", startedAt: 1 });
+		foldRunEvent(s, { type: "plan_failed", runId: "r9", error: "JSON 解析失败" });
+		expect(s.status).toBe("failed");
+		expect(s.planError).toBe("JSON 解析失败");
+		expect(s.nodes).toEqual({});
+	});
+
+	it("a manual run after an auto run clears the goal (different runId)", () => {
+		const s = initRunState();
+		foldRunEvent(s, { type: "plan_started", runId: "r-auto", goal: "目标", startedAt: 1 });
+		foldRunEvent(s, { type: "run_started", runId: "r-auto", startedAt: 2, graph: graph() });
+		foldRunEvent(s, started); // runId r1 — a fresh manual run
+		expect(s.goal).toBeNull();
+		expect(Object.keys(s.nodes).sort()).toEqual(["a", "b"]);
+	});
+
+	it("ignores plan deltas from a stale runId", () => {
+		const s = initRunState();
+		foldRunEvent(s, started);
+		foldRunEvent(s, { type: "plan_delta", runId: "r-OTHER", delta: "noise" });
+		expect(s.planText).toBe("");
 	});
 
 	it("a new run_started resets the state (live connection across runs)", () => {

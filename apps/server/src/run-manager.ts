@@ -1,11 +1,16 @@
 /**
  * RunManager - owns the (single) active orchestration run.
  *
- * Bridges OrchestratorEngine events out to WebSocket subscribers and the
- * RunStore archive. node_delta events are coalesced per node on a 150ms
- * window — the buffer CONCATENATES (never latest-wins) so the client preview
- * stays a faithful tail of the node's stream. Structure events flush their
- * node's pending buffer first, preserving delta-before-completion ordering.
+ * Two entry paths share one run lifecycle:
+ *  - start(graph): the editor's hand-composed graph runs directly;
+ *  - startPlanned(goal): a planner instance first decomposes the goal into a
+ *    graph (plan_* events, same runId), then the engine takes over seamlessly.
+ *
+ * Bridges events out to WebSocket subscribers and the RunStore archive.
+ * node_delta and plan_delta events are coalesced on a 150ms window — buffers
+ * CONCATENATE (never latest-wins) so client previews stay faithful tails.
+ * Structure events flush their pending buffer first, preserving
+ * delta-before-completion ordering.
  *
  * Retention: events of the last run stay in memory until the next run starts,
  * so a browser refresh reconnects and replays them from hello.
@@ -13,12 +18,20 @@
 
 import { validateGraph, zeroNodeUsage, type GraphDef, type GraphValidationIssue, type RunEvent } from "@pi-graph/shared";
 import { OrchestratorEngine, type Executor } from "./orchestrator.ts";
+import { MAX_GOAL_CHARS, type PlanOutcome } from "./planner.ts";
 import { RunStore } from "./run-store.ts";
 
 export type StartResult = { ok: true; runId: string } | { ok: false; error: string; issues?: GraphValidationIssue[] };
 
+/** The planner seam RunManager drives (PiPlanner in production, fakes in tests). */
+export interface Planner {
+	plan(goal: string, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<PlanOutcome>;
+}
+
 export interface RunManagerOptions {
 	executor: Executor;
+	/** Enables startPlanned; without it the goal path reports 未配置规划器. */
+	planner?: Planner;
 	maxParallel?: number;
 	store?: RunStore;
 	/** Delta coalescing window (ms). Default 150. */
@@ -28,12 +41,15 @@ export interface RunManagerOptions {
 
 export class RunManager {
 	private readonly executor: Executor;
+	private readonly planner: Planner | null;
 	private readonly maxParallel: number | undefined;
 	private readonly store: RunStore | null;
 	private readonly deltaIntervalMs: number;
 	private readonly now: () => number;
 
 	private engine: OrchestratorEngine | null = null;
+	private planning = false;
+	private plannerAbort: AbortController | null = null;
 	private currentRunId: string | null = null;
 	private retained: RunEvent[] = [];
 	private readonly listeners = new Set<(event: RunEvent) => void>();
@@ -41,10 +57,13 @@ export class RunManager {
 	 *  post-settle tail must never be re-stamped with the next run's id). */
 	private readonly deltaBuffers = new Map<string, { runId: string; text: string }>();
 	private readonly deltaTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private planBuffer: { runId: string; text: string } | null = null;
+	private planTimer: ReturnType<typeof setTimeout> | null = null;
 	private runSeq = 0;
 
 	constructor(options: RunManagerOptions) {
 		this.executor = options.executor;
+		this.planner = options.planner ?? null;
 		this.maxParallel = options.maxParallel;
 		this.store = options.store ?? null;
 		this.deltaIntervalMs = options.deltaIntervalMs ?? 150;
@@ -52,7 +71,7 @@ export class RunManager {
 	}
 
 	get active(): boolean {
-		return this.engine !== null;
+		return this.engine !== null || this.planning;
 	}
 
 	/** Start a run; rejects (returns issues) when busy or the graph is invalid. */
@@ -60,11 +79,122 @@ export class RunManager {
 		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
 		const issues = validateGraph(graph);
 		if (issues.length > 0) return { ok: false, error: "图校验未通过", issues };
+		const runId = this.nextRunId();
+		this.launchEngine(graph, runId);
+		return { ok: true, runId };
+	}
+
+	/**
+	 * Plan a goal into a graph, then execute it under the SAME runId — clients
+	 * see plan_started → plan_delta* → plan_completed → run_started → …
+	 */
+	startPlanned(goal: string): StartResult {
+		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
+		if (!this.planner) return { ok: false, error: "服务器未配置规划器" };
+		const planner = this.planner; // narrowed for the closures below
+		const trimmed = goal.trim();
+		if (!trimmed) return { ok: false, error: "目标不能为空" };
+		// The goal echoes into plan_started (clients, retention, archive) —
+		// bound it here rather than letting the planner's prompt cap be the
+		// only limit on a WS-supplied string.
+		if (trimmed.length > MAX_GOAL_CHARS) {
+			return { ok: false, error: `目标过长（超过 ${MAX_GOAL_CHARS} 字符）` };
+		}
+		const runId = this.nextRunId();
+		this.planning = true;
+		const abort = new AbortController();
+		this.plannerAbort = abort;
+		this.publish({ type: "plan_started", runId, goal: trimmed, startedAt: this.now() });
+
+		// plan() runs SYNCHRONOUSLY up to its first await (early deltas land
+		// before any abort can interleave); a Planner that throws synchronously
+		// (the seam is open to any implementation) must not escape with
+		// planning=true wedged and no terminal event.
+		let planned: Promise<PlanOutcome>;
+		try {
+			planned = planner.plan(trimmed, {
+				onDelta: (delta) => this.retainPlanDelta(runId, delta),
+				signal: abort.signal,
+			});
+		} catch (err) {
+			console.error("[run-manager] planner threw synchronously:", err);
+			this.finishPlanning(runId, `规划器异常: ${(err as Error).message}`);
+			return { ok: true, runId };
+		}
+		planned
+			.then((outcome) => {
+				// Aborted (or superseded): run_finished already told the story;
+				// late planner output must not touch the next run's state.
+				if (!this.planning) return;
+				this.flushPlanDelta();
+				if (outcome.ok && validateGraph(outcome.graph).length === 0) {
+					this.publish({ type: "plan_completed", runId, graph: outcome.graph });
+					this.clearPlanning();
+					this.launchEngine(outcome.graph, runId); // run_started continues the same run
+					return;
+				}
+				const error = outcome.ok ? "规划器返回了无效的图" : outcome.error;
+				this.finishPlanning(runId, error);
+			})
+			.catch((err: Error) => {
+				console.error("[run-manager] planner crashed:", err);
+				if (this.planning) this.finishPlanning(runId, `规划器异常: ${err.message}`);
+			});
+		return { ok: true, runId };
+	}
+
+	/** Abort the active run/planning phase (no-op when idle). */
+	abort(): boolean {
+		if (this.plannerAbort) {
+			const runId = this.currentRunId;
+			this.plannerAbort.abort();
+			this.clearPlanning();
+			this.flushPlanDelta();
+			if (runId) {
+				this.publish({
+					type: "run_finished",
+					runId,
+					finishedAt: this.now(),
+					status: "aborted",
+					ok: 0,
+					failed: 0,
+					skipped: 0,
+					usage: zeroNodeUsage(),
+				});
+			}
+			return true;
+		}
+		if (!this.engine) return false;
+		this.engine.abort();
+		return true;
+	}
+
+	subscribe(listener: (event: RunEvent) => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	retainedEvents(): RunEvent[] {
+		return [...this.retained];
+	}
+
+	// ------------------------------------------------------------------------
+	// Internals
+	// ------------------------------------------------------------------------
+
+	/** Fresh runId + reset retention and any stale delta buffers. */
+	private nextRunId(): string {
 		const runId = `orch-${this.now().toString(36)}-${++this.runSeq}`;
 		// New run: drop the previous run's retention, drain any stale buffers.
 		this.retained = [];
 		this.flushAllDeltas();
+		this.flushPlanDelta();
 		this.currentRunId = runId;
+		return runId;
+	}
+
+	/** Build + run the engine for a validated graph (shared by both paths). */
+	private launchEngine(graph: GraphDef, runId: string): void {
 		const engine = new OrchestratorEngine(graph, this.executor, {
 			runId,
 			maxParallel: this.maxParallel,
@@ -97,28 +227,53 @@ export class RunManager {
 				this.engine = null;
 				this.currentRunId = null;
 			});
-		return { ok: true, runId };
 	}
 
-	/** Abort the active run (no-op when idle). */
-	abort(): boolean {
-		if (!this.engine) return false;
-		this.engine.abort();
-		return true;
+	private clearPlanning(): void {
+		this.planning = false;
+		this.plannerAbort = null;
 	}
 
-	subscribe(listener: (event: RunEvent) => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
+	/** plan_failed + a terminal run_finished (planning counts as a run). */
+	private finishPlanning(runId: string, error: string): void {
+		// Deltas strictly before the terminal events — the .catch path (planner
+		// crash) reaches here with the buffer possibly still armed.
+		this.flushPlanDelta();
+		this.publish({ type: "plan_failed", runId, error });
+		this.publish({
+			type: "run_finished",
+			runId,
+			finishedAt: this.now(),
+			status: "failed",
+			ok: 0,
+			failed: 0,
+			skipped: 0,
+			usage: zeroNodeUsage(),
+		});
+		this.clearPlanning();
+		this.currentRunId = null;
 	}
 
-	retainedEvents(): RunEvent[] {
-		return [...this.retained];
+	private retainPlanDelta(runId: string, delta: string): void {
+		const prev = this.planBuffer;
+		this.planBuffer = { runId: prev?.runId ?? runId, text: (prev?.text ?? "") + delta };
+		if (!this.planTimer) {
+			this.planTimer = setTimeout(() => this.flushPlanDelta(), this.deltaIntervalMs);
+			// Never keep the process alive just for a coalescing flush.
+			(this.planTimer as { unref?: () => void }).unref?.();
+		}
 	}
 
-	// ------------------------------------------------------------------------
-	// Internals
-	// ------------------------------------------------------------------------
+	private flushPlanDelta(): void {
+		if (this.planTimer) {
+			clearTimeout(this.planTimer);
+			this.planTimer = null;
+		}
+		const buffer = this.planBuffer;
+		if (!buffer) return;
+		this.planBuffer = null;
+		this.publish({ type: "plan_delta", runId: buffer.runId, delta: buffer.text });
+	}
 
 	private retain(event: RunEvent): void {
 		if (event.type === "node_delta") {

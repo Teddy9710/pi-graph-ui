@@ -62,6 +62,16 @@ export function edgeId(source: string, target: string): string {
 	return `${source}->${target}`;
 }
 
+/**
+ * Node ids that collide with Object.prototype members when a folded node map
+ * is keyed by id. Assigning `map["__proto__"] = x` on a plain object invokes
+ * the prototype SETTER instead of creating a key, and reading
+ * `map["constructor"]` yields an inherited truthy function — validation
+ * rejects them outright, and folding additionally uses null-prototype maps
+ * (emptyNodeMap) as a backstop for adversarial input.
+ */
+const RESERVED_NODE_IDS = new Set(["__proto__", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty"]);
+
 // ============================================================================
 // Validation
 // ============================================================================
@@ -93,6 +103,11 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 			continue;
 		}
 		if (!NODE_ID_RE.test(n.id)) issues.push({ nodeOrEdge: n.id, message: `节点 id 非法（仅限字母/数字/_/-，1-64 字符）` });
+		// A planner-steerable id must never reach a keyed node map (see
+		// RESERVED_NODE_IDS): "__proto__" would poison the prototype chain.
+		if (RESERVED_NODE_IDS.has(n.id)) {
+			issues.push({ nodeOrEdge: n.id, message: "节点 id 不能使用 JS 保留名（__proto__/constructor 等）" });
+		}
 		if (seen.has(n.id)) issues.push({ nodeOrEdge: n.id, message: "节点 id 重复" });
 		seen.add(n.id);
 		if (!n.task.trim()) issues.push({ nodeOrEdge: n.id, message: "任务 prompt 为空" });
@@ -219,8 +234,18 @@ export function addNodeUsage(total: NodeUsage, delta: NodeUsage): NodeUsage {
 	return total;
 }
 
+/**
+ * Planning phase (auto-orchestration): plan_started → plan_delta* →
+ * plan_completed → run_started (same runId; the engine takes over) — or
+ * plan_failed. The planner decomposes a free-text goal into the GraphDef
+ * that run_started then executes.
+ */
 export type RunEvent =
 	| { type: "run_started"; runId: string; startedAt: number; graph: GraphDef }
+	| { type: "plan_started"; runId: string; goal: string; startedAt: number }
+	| { type: "plan_delta"; runId: string; delta: string }
+	| { type: "plan_completed"; runId: string; graph: GraphDef }
+	| { type: "plan_failed"; runId: string; error: string }
 	| { type: "node_started"; runId: string; nodeId: string; startedAt: number; assembledPrompt: string }
 	| { type: "node_delta"; runId: string; nodeId: string; kind: "text" | "tool"; delta: string }
 	| {
@@ -266,7 +291,13 @@ export interface RunNodeState {
 
 export interface RunState {
 	runId: string | null;
-	status: "idle" | RunStatus;
+	/** "planning" = the planner phase of an auto-orchestrated run. */
+	status: "idle" | "planning" | RunStatus;
+	/** The goal an auto run was planned from (null for manual editor runs). */
+	goal: string | null;
+	/** Tail-capped planner output stream (the plan JSON being drafted). */
+	planText: string;
+	planError: string | null;
 	/** The graph that was executed (captured at run_started — not the live editor graph). */
 	graph: GraphDef | null;
 	nodes: Record<string, RunNodeState>;
@@ -282,8 +313,11 @@ export function initRunState(): RunState {
 	return {
 		runId: null,
 		status: "idle",
+		goal: null,
+		planText: "",
+		planError: null,
 		graph: null,
-		nodes: {},
+		nodes: emptyNodeMap(),
 		startedAt: null,
 		finishedAt: null,
 		ok: 0,
@@ -291,6 +325,16 @@ export function initRunState(): RunState {
 		skipped: 0,
 		usage: zeroNodeUsage(),
 	};
+}
+
+/**
+ * Node maps key by id with NO prototype — `map["__proto__"] = x` creates a
+ * plain own key instead of firing the Object.prototype setter, and inherited
+ * lookups (`map["constructor"]`) yield undefined instead of truthy members.
+ * Validation rejects reserved ids; this keeps folding total regardless.
+ */
+export function emptyNodeMap(): Record<string, RunNodeState> {
+	return Object.create(null);
 }
 
 function initNode(id: string): RunNodeState {
@@ -315,12 +359,47 @@ function initNode(id: string): RunNodeState {
  * unknown-nodeId events are ignored, so replay + live share one path.
  */
 export function foldRunEvent(state: RunState, event: RunEvent): RunState {
-	// Stale-runId guard — EXCEPT run_started: a new run starting on a live
-	// connection must RESET the state, not be ignored as stale (otherwise a
-	// browser that stays connected across two runs shows the first run forever).
-	if (event.type !== "run_started" && state.runId !== null && event.runId !== state.runId) return state;
+	// Stale-runId guard — EXCEPT the two reset points (run_started /
+	// plan_started): a new run starting on a live connection must RESET the
+	// state, not be ignored as stale (otherwise a browser that stays connected
+	// across two runs shows the first run forever).
+	if (event.type !== "run_started" && event.type !== "plan_started" && state.runId !== null && event.runId !== state.runId) {
+		return state;
+	}
 	switch (event.type) {
+		case "plan_started": {
+			state.runId = event.runId;
+			state.status = "planning";
+			state.goal = event.goal;
+			state.planText = "";
+			state.planError = null;
+			state.graph = null;
+			state.nodes = emptyNodeMap();
+			state.startedAt = event.startedAt;
+			state.finishedAt = null;
+			state.ok = 0;
+			state.failed = 0;
+			state.skipped = 0;
+			state.usage = zeroNodeUsage();
+			return state;
+		}
+		case "plan_delta": {
+			state.planText = (state.planText + event.delta).slice(-PREVIEW_CAP);
+			return state;
+		}
+		case "plan_completed": {
+			state.graph = event.graph; // nodes materialize on run_started
+			return state;
+		}
+		case "plan_failed": {
+			state.planError = event.error;
+			state.status = "failed";
+			return state;
+		}
 		case "run_started": {
+			// Same runId = continuation of the plan phase (keep goal/planText);
+			// different runId = fresh manual run (clear the previous goal).
+			if (state.runId !== event.runId) state.goal = null;
 			state.runId = event.runId;
 			state.status = "running";
 			state.graph = event.graph;
@@ -330,8 +409,12 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			state.failed = 0;
 			state.skipped = 0;
 			state.usage = zeroNodeUsage();
-			state.nodes = {};
-			for (const n of event.graph.nodes) state.nodes[n.id] = initNode(n.id);
+			state.nodes = emptyNodeMap();
+			for (const n of event.graph.nodes) {
+				// Total on adversarial graphs: a reserved id that slipped past
+				// validation becomes a plain own key on the null-prototype map.
+				state.nodes[n.id] = initNode(n.id);
+			}
 			return state;
 		}
 		case "node_started": {

@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RunManager } from "../src/run-manager.ts";
+import { RunManager, type Planner } from "../src/run-manager.ts";
 import { RunStore } from "../src/run-store.ts";
 import type { Executor, ExecutorCall, NodeResult } from "../src/orchestrator.ts";
-import type { GraphDef, RunEvent } from "@pi-graph/shared";
+import type { PlanOutcome } from "../src/planner.ts";
+import { MAX_GOAL_CHARS } from "../src/planner.ts";
+import { foldRunEvent, initRunState, type GraphDef, type RunEvent } from "@pi-graph/shared";
 
 type Ctx = { onDelta: (kind: "text" | "tool", delta: string) => void; signal: AbortSignal };
 
@@ -20,6 +22,28 @@ function fakeExecutor(script: (call: ExecutorCall, ctx: Ctx) => Promise<NodeResu
 
 function singleNodeGraph(task = "做点事"): GraphDef {
 	return { name: "test", nodes: [{ id: "a", task }], edges: [] };
+}
+
+/** Gated fake planner: emits scripted deltas, resolves when told to. */
+class FakePlanner implements Planner {
+	readonly goals: string[] = [];
+	readonly signals: AbortSignal[] = [];
+	private resolve: ((o: PlanOutcome) => void) | null = null;
+
+	constructor(private readonly deltas: string[] = []) {}
+
+	plan(goal: string, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<PlanOutcome> {
+		this.goals.push(goal);
+		this.signals.push(ctx.signal);
+		for (const d of this.deltas) ctx.onDelta(d);
+		return new Promise<PlanOutcome>((res) => {
+			this.resolve = res;
+		});
+	}
+
+	settle(outcome: PlanOutcome): void {
+		this.resolve?.(outcome);
+	}
 }
 
 describe("RunManager", () => {
@@ -161,6 +185,253 @@ describe("RunManager", () => {
 		expect(again.ok).toBe(true);
 		manager.abort();
 		await vi.advanceTimersByTimeAsync(0);
+	});
+});
+
+describe("RunManager.startPlanned", () => {
+	let dir: string;
+	let store: RunStore;
+
+	const plannedGraph: GraphDef = {
+		name: "generated",
+		nodes: [
+			{ id: "n1", task: "查资料" },
+			{ id: "n2", task: "汇总" },
+		],
+		edges: [{ id: "n1->n2", source: "n1", target: "n2" }],
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(tmpdir(), "runs-test-"));
+		store = new RunStore(dir);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("plans then runs under one runId; replay folds to a kept goal", async () => {
+		const planner = new FakePlanner(['{"nodes"']);
+		const calls: ExecutorCall[] = [];
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => {
+				calls.push(call);
+				return ok(`结果:${call.node.id}`);
+			}),
+			planner,
+			store,
+		});
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const started = manager.startPlanned("  调研三个前端框架  ");
+		expect(started.ok).toBe(true);
+		expect(manager.active).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.map((e) => e.type)).toEqual(["plan_started"]); // still planning
+		planner.settle({ ok: true, graph: plannedGraph });
+		await vi.advanceTimersByTimeAsync(0);
+		const types = seen.map((e) => e.type);
+		expect(types).toEqual([
+			"plan_started",
+			"plan_delta",
+			"plan_completed",
+			"run_started",
+			"node_started",
+			"node_completed",
+			"node_started",
+			"node_completed",
+			"run_finished",
+		]);
+		// One runId across the plan and execution phases.
+		const planId = seen[0]!.type === "plan_started" ? seen[0]!.runId : "";
+		const runId = seen.find((e) => e.type === "run_started")?.runId;
+		expect(runId).toBe(planId);
+		expect(planner.goals).toEqual(["调研三个前端框架"]); // trimmed
+		expect(manager.active).toBe(false);
+		// Upstream injection through the generated chain.
+		expect(calls[1]!.assembledPrompt).toContain("结果:n1");
+		// Retained events fold to a finished run that still knows its goal.
+		const folded = initRunState();
+		for (const e of manager.retainedEvents()) foldRunEvent(folded, e);
+		expect(folded.status).toBe("completed");
+		expect(folded.goal).toBe("调研三个前端框架");
+		expect(folded.planText).toBe('{"nodes"');
+	});
+
+	it("plan failure → plan_failed + run_finished failed, then a new run works", async () => {
+		const planner = new FakePlanner();
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		manager.startPlanned("目标");
+		await vi.advanceTimersByTimeAsync(0);
+		planner.settle({ ok: false, error: "JSON 解析失败" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.map((e) => e.type)).toEqual(["plan_started", "plan_failed", "run_finished"]);
+		const fin = seen[2]!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("failed");
+		expect(manager.active).toBe(false);
+		// A plan-only failure is still listed in the archive (no run_started).
+		const list = await store.list();
+		expect(list).toHaveLength(1);
+		expect(list[0]!.status).toBe("failed");
+		// Restart immediately.
+		const again = manager.startPlanned("再来一次");
+		expect(again.ok).toBe(true);
+		planner.settle({ ok: false, error: "还是失败" });
+		await vi.advanceTimersByTimeAsync(0);
+	});
+
+	it("rejects a plan/graph start while planning, and bad goals", async () => {
+		const planner = new FakePlanner();
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const first = manager.startPlanned("目标");
+		expect(first.ok).toBe(true);
+		expect(manager.startPlanned("另一个").ok).toBe(false); // busy
+		expect(manager.start(singleNodeGraph()).ok).toBe(false); // busy
+		planner.settle({ ok: false, error: "x" });
+		await vi.advanceTimersByTimeAsync(0);
+		const empty = manager.startPlanned("   ");
+		expect(empty.ok).toBe(false);
+		if (!empty.ok) expect(empty.error).toContain("目标不能为空");
+	});
+
+	it("without a planner configured the goal path reports it", () => {
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), store });
+		const result = manager.startPlanned("目标");
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain("未配置规划器");
+	});
+
+	it("abort during planning: aborted run_finished, planner signal fired, late resolve ignored", async () => {
+		const planner = new FakePlanner(["草稿"]);
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const started = manager.startPlanned("目标");
+		expect(started.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(manager.abort()).toBe(true);
+		expect(planner.signals[0]!.aborted).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		// plan_delta flushed before the terminal event; no plan_failed here.
+		expect(seen.map((e) => e.type)).toEqual(["plan_started", "plan_delta", "run_finished"]);
+		const fin = seen[2]!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("aborted");
+		expect(manager.active).toBe(false);
+		// A late planner resolution must not start an engine for the dead run.
+		planner.settle({ ok: true, graph: plannedGraph });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.filter((e) => e.type === "run_started")).toHaveLength(0);
+		// …and the manager is immediately reusable.
+		const again = manager.startPlanned("新目标");
+		expect(again.ok).toBe(true);
+		planner.settle({ ok: false, error: "收尾" });
+		await vi.advanceTimersByTimeAsync(0);
+		const after = seen.filter((e) => again.ok && e.runId === again.runId);
+		// The reused FakePlanner replays its scripted delta on the second call.
+		expect(after.map((e) => e.type)).toEqual(["plan_started", "plan_delta", "plan_failed", "run_finished"]);
+	});
+
+	it("coalesces plan deltas on the 150ms window and flushes before plan_completed", async () => {
+		const planner = new FakePlanner(["第一段", "第二段"]);
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		manager.startPlanned("目标");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.filter((e) => e.type === "plan_delta")).toHaveLength(0); // buffered
+		await vi.advanceTimersByTimeAsync(200);
+		const deltas = seen.filter((e) => e.type === "plan_delta");
+		expect(deltas).toHaveLength(1);
+		expect(deltas[0]!.type === "plan_delta" ? deltas[0]!.delta : "").toBe("第一段第二段");
+		planner.settle({ ok: true, graph: singleNodeGraph() });
+		await vi.advanceTimersByTimeAsync(0);
+		const idxDelta = seen.findIndex((e) => e.type === "plan_delta");
+		const idxCompleted = seen.findIndex((e) => e.type === "plan_completed");
+		expect(idxDelta).toBeGreaterThan(-1);
+		expect(idxDelta).toBeLessThan(idxCompleted);
+	});
+
+	it("a planner crash is reported as plan_failed, not a hung run", async () => {
+		const planner: Planner = {
+			plan: () => Promise.reject(new Error("planner blew up")),
+		};
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		manager.startPlanned("目标");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.map((e) => e.type)).toEqual(["plan_started", "plan_failed", "run_finished"]);
+		expect(manager.active).toBe(false);
+	});
+
+	it("a planner that THROWS synchronously still gets a terminal event (no permanent busy)", async () => {
+		// The Planner seam is open to any implementation; a sync throw after
+		// planning=true must not escape startPlanned with the manager wedged.
+		const planner: Planner = {
+			plan: () => {
+				throw new Error("sync boom");
+			},
+		};
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const result = manager.startPlanned("目标");
+		expect(result.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.map((e) => e.type)).toEqual(["plan_started", "plan_failed", "run_finished"]);
+		if (seen[1]!.type === "plan_failed") expect(seen[1].error).toContain("sync boom");
+		expect(manager.active).toBe(false);
+	});
+
+	it("flushes buffered plan deltas BEFORE plan_failed on the crash path", async () => {
+		// Crash after streaming: the coalescing buffer may still be armed when
+		// the rejection lands — finishPlanning must flush it ahead of the
+		// terminal events (deltas strictly before terminal, same contract as
+		// node_completed).
+		const planner: Planner = {
+			plan: (_goal, ctx) => {
+				ctx.onDelta('{"nodes": [');
+				return Promise.reject(new Error("mid-stream crash"));
+			},
+		};
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		manager.startPlanned("目标");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.map((e) => e.type)).toEqual(["plan_started", "plan_delta", "plan_failed", "run_finished"]);
+	});
+
+	it("rejects a goal beyond MAX_GOAL_CHARS at the boundary (echo bounded)", async () => {
+		const planner = new FakePlanner();
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const result = manager.startPlanned("长".repeat(MAX_GOAL_CHARS + 1));
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toContain("目标过长");
+		expect(seen).toHaveLength(0); // nothing echoed to clients/disk
+		expect(planner.goals).toHaveLength(0); // planner never spawned
+		expect(manager.active).toBe(false);
+	});
+
+	it("a planner graph that fails validation is rejected defensively", async () => {
+		const planner = new FakePlanner();
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner, store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		manager.startPlanned("目标");
+		await vi.advanceTimersByTimeAsync(0);
+		// Cycle → the .then guard must catch it (a fake planner bypassed extractGraph).
+		planner.settle({ ok: true, graph: { nodes: [{ id: "a", task: "x" }], edges: [{ id: "a->a", source: "a", target: "a" }] } });
+		await vi.advanceTimersByTimeAsync(0);
+		const failed = seen.find((e) => e.type === "plan_failed");
+		expect(failed).toBeDefined();
+		expect(seen.some((e) => e.type === "run_started")).toBe(false);
+		expect(manager.active).toBe(false);
 	});
 });
 

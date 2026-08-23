@@ -297,6 +297,36 @@ body {
 	min-height: 41px;
 	box-sizing: border-box;
 }
+
+/* 目标 bar: the auto-orchestration entry (goal → plan → run) */
+.pg-orch-goal {
+	gap: 8px;
+}
+.pg-orch-goal-input {
+	flex: 1;
+	min-width: 280px;
+}
+.pg-orch-plan-tail {
+	font-family: ui-monospace, Consolas, monospace;
+	font-size: 11px;
+	opacity: 0.5;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 420px;
+}
+
+/* run-view placeholder (planning before the graph materializes) */
+.pg-orch-empty {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--pg-dim, #8b93a5);
+	font-size: 13px;
+	opacity: 0.7;
+}
 .pg-orch-bar select {
 	background: #0e1013;
 	border: 1px solid var(--pg-border);

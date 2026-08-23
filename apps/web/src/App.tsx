@@ -108,6 +108,9 @@ function PromptBar() {
 				placeholder={running ? "运行中… 输入内容可插入转向指令 (steer)" : "给 pi agent 发一个任务…"}
 				onChange={(e) => setText(e.target.value)}
 				onKeyDown={(e) => {
+					// IME composition Enter (committing pinyin candidates, Safari
+					// reports it as key="Enter") must not submit the prompt.
+					if (e.nativeEvent.isComposing) return;
 					if (e.key === "Enter" && text.trim()) {
 						if (running) steer(text.trim());
 						else sendPrompt(text.trim());
