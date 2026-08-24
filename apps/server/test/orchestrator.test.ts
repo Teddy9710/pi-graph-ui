@@ -67,7 +67,12 @@ function harness(): Harness {
 }
 
 const node = (id: string, task = `task ${id}`) => ({ id, task });
-const edge = (source: string, target: string) => ({ id: `${source}->${target}`, source, target });
+const edge = (source: string, target: string, label?: string) => ({
+	id: `${source}->${target}`,
+	source,
+	target,
+	...(label ? { label } : {}),
+});
 
 // ============================================================================
 // Tests
@@ -88,6 +93,22 @@ describe("OrchestratorEngine", () => {
 		expect(callB.assembledPrompt).toContain("## 上游输入");
 		expect(callC.assembledPrompt).toContain("out:b");
 		expect(callC.assembledPrompt).not.toContain("out:a"); // only direct upstreams
+	});
+
+	it("edge relation labels annotate the upstream injection (semantic edges)", async () => {
+		const h = harness();
+		const graph: GraphDef = {
+			nodes: [node("a"), node("b"), node("c")],
+			edges: [edge("a", "b", "提供初稿"), edge("b", "c")],
+		};
+		const summary = await h.run(graph);
+		expect(summary.status).toBe("completed");
+		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
+		const callC = h.executor.calls.find((c) => c.node.id === "c")!;
+		expect(callB.assembledPrompt).toContain("### from a —— 关系：提供初稿");
+		expect(callB.upstream[0]?.label).toBe("提供初稿");
+		// A bare edge keeps the plain header — no empty relation suffix.
+		expect(callC.assembledPrompt).toContain("### from b\nout:b");
 	});
 
 	it("caps root concurrency at maxParallel", async () => {

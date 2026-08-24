@@ -20,6 +20,7 @@ import {
 	type Connection,
 	type Edge,
 	type EdgeChange,
+	type EdgeMouseHandler,
 	type Node,
 	type NodeChange,
 	type NodeMouseHandler,
@@ -30,16 +31,41 @@ import "@xyflow/react/dist/style.css";
 import { orchNodeTypes } from "./orch-nodes.tsx";
 import { autoLayoutGraphDef } from "./orch-layout.ts";
 import { useOrchStore } from "./orch-store.ts";
+import type { EdgeDef } from "@pi-graph/shared";
 
-function edgeStyle(e: { id: string; source: string; target: string }): Edge {
+/** RF renders a string label as ONE unwrapped SVG <text> line — a label near
+ *  the 100-char cap would draw a ~1000px band across the endpoint nodes.
+ *  The canvas shows a prefix; the full text lives in the edge panel. */
+const EDGE_LABEL_DISPLAY_CHARS = 20;
+
+function edgeStyle(e: EdgeDef, opts: { selected?: boolean } = {}): Edge {
+	const selected = opts.selected === true;
 	return {
 		id: e.id,
 		source: e.source,
 		target: e.target,
-		// No edge-selection UI; opting out also avoids RF's default gray
-		// selected stroke overriding our colors (same reasoning as GraphCanvas).
+		// The edge's relation label rides directly on the arrow — the graph
+		// shows WHY nodes depend on each other, not just that they do.
+		label: e.label
+			? e.label.length > EDGE_LABEL_DISPLAY_CHARS
+				? `${e.label.slice(0, EDGE_LABEL_DISPLAY_CHARS)}…`
+				: e.label
+			: undefined,
+		labelStyle: { fill: "#8b93a5", fontSize: 11 },
+		labelBgStyle: { fill: "#16181d" },
+		labelBgPadding: [6, 3] as [number, number],
+		labelBgBorderRadius: 4,
+		// No RF edge-selection (its default gray selected stroke fights our
+		// colors — same reasoning as GraphCanvas); click handlers + our own
+		// selected stroke drive the editor's edge selection instead.
 		selectable: false,
-		markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#9aa3b5" },
+		style: selected ? { stroke: "#3b82f6", strokeWidth: 2 } : undefined,
+		markerEnd: {
+			type: MarkerType.ArrowClosed,
+			width: 16,
+			height: 16,
+			color: selected ? "#3b82f6" : "#9aa3b5",
+		},
 	};
 }
 
@@ -47,11 +73,13 @@ function Canvas() {
 	const graphDef = useOrchStore((s) => s.graphDef);
 	const run = useOrchStore((s) => s.run);
 	const selectedNodeId = useOrchStore((s) => s.selectedNodeId);
+	const selectedEdgeId = useOrchStore((s) => s.selectedEdgeId);
 	const updateNodePosition = useOrchStore((s) => s.updateNodePosition);
 	const deleteNode = useOrchStore((s) => s.deleteNode);
 	const deleteEdge = useOrchStore((s) => s.deleteEdge);
 	const connectEdge = useOrchStore((s) => s.connectEdge);
 	const select = useOrchStore((s) => s.select);
+	const selectEdge = useOrchStore((s) => s.selectEdge);
 	const running = run.status === "running";
 
 	// Ephemeral positions while a drag is in flight. In a controlled flow,
@@ -71,7 +99,10 @@ function Canvas() {
 		[graphDef, run, selectedNodeId, dragPositions],
 	);
 
-	const edges = useMemo<Edge[]>(() => graphDef.edges.map(edgeStyle), [graphDef]);
+	const edges = useMemo<Edge[]>(
+		() => graphDef.edges.map((e) => edgeStyle(e, { selected: e.id === selectedEdgeId })),
+		[graphDef, selectedEdgeId],
+	);
 
 	const onNodesChange: OnNodesChange = (changes: NodeChange[]) => {
 		for (const change of changes) {
@@ -109,6 +140,11 @@ function Canvas() {
 		select(node.id === selectedNodeId ? null : node.id);
 	};
 
+	// Clicking an edge selects it for label editing (node selection clears).
+	const onEdgeClick: EdgeMouseHandler = (_, edge) => {
+		selectEdge(edge.id === selectedEdgeId ? null : edge.id);
+	};
+
 	return (
 		<ReactFlow
 			nodes={nodes}
@@ -118,6 +154,7 @@ function Canvas() {
 			onEdgesChange={onEdgesChange}
 			onConnect={onConnect}
 			onNodeClick={onNodeClick}
+			onEdgeClick={onEdgeClick}
 			onPaneClick={() => select(null)}
 			deleteKeyCode={["Backspace", "Delete"]}
 			nodesDraggable={!running}
@@ -145,10 +182,10 @@ function RunCanvas() {
 	// and run_started each deliver their own copy of the same graph (re-running
 	// dagre on the twin would rebuild identical positions), while run/status
 	// updates must never reflow. Ids ALONE are not enough — after 转入编辑器 a
-	// manual rerun can swap in an EDITED graph with the same ids, and the memo
-	// would keep rendering the stale bodies.
+	// manual rerun can swap in an EDITED graph with the same ids (tasks OR edge
+	// labels), and the memo would keep rendering the stale bodies.
 	const signature = graph
-		? `${graph.nodes.map((n) => `${n.id}${n.label ?? ""}${n.task}${n.model ?? ""}${n.agent ?? ""}`).join(",")}|${graph.edges.map((e) => e.id).join(",")}`
+		? `${graph.nodes.map((n) => `${n.id}${n.label ?? ""}${n.task}${n.model ?? ""}${n.agent ?? ""}`).join(",")}|${graph.edges.map((e) => `${e.id}${e.label ?? ""}`).join(",")}`
 		: "";
 	const laid = useMemo(
 		() => (graph && signature ? autoLayoutGraphDef(graph) : null),
@@ -169,7 +206,7 @@ function RunCanvas() {
 				: [],
 		[laid, run, selectedNodeId],
 	);
-	const edges = useMemo<Edge[]>(() => (laid ? laid.edges.map(edgeStyle) : []), [laid]);
+	const edges = useMemo<Edge[]>(() => (laid ? laid.edges.map((e) => edgeStyle(e)) : []), [laid]);
 
 	const onNodeClick: NodeMouseHandler = (_, node) => {
 		select(node.id === selectedNodeId ? null : node.id);

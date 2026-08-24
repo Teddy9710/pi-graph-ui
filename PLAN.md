@@ -93,6 +93,12 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
    - web：目标输入条 + ⚡自动编排；`plan_started` 自动切到只读「运行」视图（生成图 dagre 布局按结构签名 memo，流式期间绝不重排），规划中实时预览 plan JSON 尾部；「转入编辑器」把生成图复制进编辑器可改可重跑；hello 重放仅在自动 run 进行中时恢复运行视图
    - 环境变量：`ORCH_PLANNER_MODEL`（默认 = ORCH_MODEL）/ `ORCH_PLAN_TIMEOUT_MS`（默认 3min）；e2e 新增 `PLAN=1` 模式（规划流式 → 同 runId 执行 → 全部生成节点完成 → 归档含 plan 事件 → 无孤儿进程）
    - 边界加固（对抗性评审后）：节点 id 拒绝 JS 保留名（`__proto__` 等）+ 折叠节点表用空原型对象（恶意图绝不触碰原型链）；goal 长度在 WS 边界拦截（≤4000 字符，不回显超长文本）；规划器同步异常也有终态事件、崩溃路径先冲刷 plan 缓冲再发 plan_failed；前端 IME 输入法回车不误触发、重连不再强行拉回运行视图、run 视图按内容签名 memo（改任务重跑不渲染旧图）
+9. **M-S 语义边（edge label = 节点间关系说明）**：边不再只是数据流向——
+   - shared：`EdgeDef.label?`（≤100 字符，`MAX_EDGE_LABEL_CHARS` + validateGraph 校验）；`assemblePrompt` 的上游分节标题带关系（`### from n1 —— 关系：提供调研数据`），`UpstreamInput` 导出
+   - server：规划器提示词要求每条边必带简短 label 并尽量显式连边（关系表达为图结构）；`extractGraph` 白名单保留/截断 label；引擎按 `source->target` 预查边 label 注入 `UpstreamInput`
+   - web：两条画布的边直接渲染 label（RF label + labelBg）；编辑器点击边选中（与节点选中互斥），面板可改关系标签/删边；空标签即清除
+   - e2e：链式图带 label 断言注入标题；PLAN 模式断言生成边全部带 label 且下游 prompt 含「—— 关系：」，且边数 ≥2（无边的图不得静默通过）
+   - 边界加固（对抗性评审后）：label 拒绝换行/控制字符（防伪造 `### from` 分节头，planner 侧归一为单行不浪费重试）；validateGraph 拒绝同向重边（防双份注入 + label 错配）；画布 label 截断 ~20 字符显示（SVG 单行不换行，全长在边面板）；plan_started 清空编辑器选区防泄漏到运行视图；run 视图布局签名纳入边 label
 
 ## 风险与对策
 - pi 版本升级改动事件形状 → shared 包用快照测试锁定事件结构，升级时显式更新

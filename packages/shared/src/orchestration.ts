@@ -30,6 +30,15 @@ export const AGENT_RE = NODE_ID_RE;
 export const MAX_INJECTED_OUTPUT_BYTES = 50 * 1024;
 /** Client/server streamed preview accumulation cap per node (chars). */
 export const PREVIEW_CAP = 8 * 1024;
+/** Edge labels describe the RELATION between two nodes (graph-engineering
+ *  semantics, not just wiring); they are short prose, so a generous cap. */
+export const MAX_EDGE_LABEL_CHARS = 100;
+/**
+ * Labels ride INSIDE prompt section headers (`### from n1 —— 关系：<label>`);
+ * a newline would let a label forge another `### from …` header that neither
+ * the edge input nor the canvas label can visually audit. Single line only.
+ */
+const EDGE_LABEL_UNSAFE_RE = /[\u0000-\u001f\u007f]/;
 
 export interface NodeDef {
 	id: string;
@@ -50,6 +59,9 @@ export interface EdgeDef {
 	id: string;
 	source: string;
 	target: string;
+	/** What flows across the edge / why the dependency exists (e.g.
+	 *  "提供调研数据供汇总"). Optional — plain data-flow edges stay bare. */
+	label?: string;
 }
 
 export interface GraphDef {
@@ -119,6 +131,7 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		}
 	}
 	const edgeSeen = new Set<string>();
+	const pairSeen = new Set<string>();
 	for (const e of def.edges) {
 		if (typeof e !== "object" || e === null || typeof e.source !== "string" || typeof e.target !== "string") {
 			issues.push({ message: "存在畸形边（缺少字符串 source/target）" });
@@ -129,8 +142,23 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 			continue;
 		}
 		if (e.source === e.target) issues.push({ nodeOrEdge: e.id, message: "不允许自环" });
+		if (e.label !== undefined && (typeof e.label !== "string" || e.label.length > MAX_EDGE_LABEL_CHARS)) {
+			issues.push({ nodeOrEdge: e.id, message: `边 label 非法（字符串，≤${MAX_EDGE_LABEL_CHARS} 字符）` });
+		}
+		// A label with newlines could forge another "### from n3" section header
+		// inside the assembled prompt — unauditable from the single-line UI.
+		if (typeof e.label === "string" && EDGE_LABEL_UNSAFE_RE.test(e.label)) {
+			issues.push({ nodeOrEdge: e.id, message: "边 label 不能包含换行或控制字符" });
+		}
 		if (edgeSeen.has(e.id)) issues.push({ nodeOrEdge: e.id, message: "边重复" });
 		edgeSeen.add(e.id);
+		// One edge per direction: duplicates would double-inject the upstream
+		// output and smear one edge's relation label onto its sibling.
+		const pair = `${e.source}->${e.target}`;
+		if (pairSeen.has(pair)) {
+			issues.push({ nodeOrEdge: e.id, message: `节点 ${e.source}→${e.target} 之间已有一条边，不允许重复连线` });
+		}
+		pairSeen.add(pair);
 	}
 	// Kahn's algorithm: nodes whose indegree never reaches 0 are on/behind a cycle.
 	const indegree = new Map<string, number>();
@@ -175,16 +203,26 @@ export function truncateBytes(text: string, maxBytes: number): { text: string; c
 	return { text: cut, capped: true };
 }
 
+/** One upstream contribution to a node's assembled prompt. */
+export interface UpstreamInput {
+	nodeId: string;
+	text: string;
+	/** The edge's relation label, when the graph describes one. */
+	label?: string;
+}
+
 /**
  * Assemble a node's full prompt: its task, then every upstream output under a
  * deterministic header (graph node order), each capped at
- * MAX_INJECTED_OUTPUT_BYTES.
+ * MAX_INJECTED_OUTPUT_BYTES. An edge's relation label annotates its section
+ * header so the executor knows WHY the input arrives, not just from whom.
  */
-export function assemblePrompt(node: NodeDef, upstream: Array<{ nodeId: string; text: string }>): string {
+export function assemblePrompt(node: NodeDef, upstream: UpstreamInput[]): string {
 	if (upstream.length === 0) return node.task;
-	const sections = upstream.map(({ nodeId, text }) => {
+	const sections = upstream.map(({ nodeId, text, label }) => {
 		const { text: capped, capped: wasCapped } = truncateBytes(text, MAX_INJECTED_OUTPUT_BYTES);
-		return `### from ${nodeId}\n${capped}${wasCapped ? "\n\n（输出过长，已截断）" : ""}`;
+		const relation = label ? ` —— 关系：${label}` : "";
+		return `### from ${nodeId}${relation}\n${capped}${wasCapped ? "\n\n（输出过长，已截断）" : ""}`;
 	});
 	return `${node.task}\n\n---\n## 上游输入\n\n${sections.join("\n\n")}`;
 }

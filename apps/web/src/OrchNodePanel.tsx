@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { MAX_EDGE_LABEL_CHARS, type EdgeDef } from "@pi-graph/shared";
 import { API_BASE } from "./store.ts";
 import { useOrchStore } from "./orch-store.ts";
 
@@ -38,6 +39,43 @@ function useAgentNames(): string[] {
 		};
 	}, []);
 	return agents;
+}
+
+/** Edge inspector: the relation label (the semantic payload of the edge) and
+ *  deletion. Read-only wherever the graph isn't editable (run view, mid-run). */
+function EdgePanel({ edge, editable }: { edge: EdgeDef; editable: boolean }) {
+	const updateEdgeLabel = useOrchStore((s) => s.updateEdgeLabel);
+	const deleteEdge = useOrchStore((s) => s.deleteEdge);
+	return (
+		<aside className="pg-panel">
+			<header>
+				<b>边</b>
+				<code className="pg-dim">
+					{edge.source} → {edge.target}
+				</code>
+			</header>
+			<div className="pg-form-row">
+				<label htmlFor="pg-edge-label">关系标签（说明这条边传递什么、为什么依赖）</label>
+				<input
+					id="pg-edge-label"
+					className="pg-form-input"
+					placeholder="如：提供调研数据供汇总"
+					maxLength={MAX_EDGE_LABEL_CHARS}
+					value={edge.label ?? ""}
+					disabled={!editable}
+					onChange={(e) => updateEdgeLabel(edge.id, e.target.value)}
+				/>
+			</div>
+			<p className="pg-dim">运行时该说明会随上游输出一起注入下游任务的 prompt。</p>
+			{editable ? (
+				<button className="pg-btn pg-btn-danger" onClick={() => deleteEdge(edge.id)}>
+					删除边
+				</button>
+			) : (
+				<div className="pg-dim">当前视图只读——「转入编辑器」后可修改</div>
+			)}
+		</aside>
+	);
 }
 
 function GraphSummary() {
@@ -79,8 +117,8 @@ function GraphSummary() {
 			<h4>提示</h4>
 			<p className="pg-dim">
 				{view === "run"
-					? "点击节点查看运行详情；「转入编辑器」把生成图复制到编辑器后可修改再跑。"
-					: "点击节点选中后再编辑；从节点右侧圆点拖到另一节点左侧圆点连线（环会被拒绝）；删除键删除选中节点；「自动整理」用 dagre 重排全部节点。"}
+					? "点击节点查看运行详情，边上的文字说明节点间关系；「转入编辑器」把生成图复制到编辑器后可修改再跑。"
+					: "点击节点选中后编辑，点击边可查看/修改关系标签；从节点右侧圆点拖到另一节点左侧圆点连线（环会被拒绝）；删除键删除选中节点；「自动整理」用 dagre 重排全部节点。"}
 			</p>
 		</aside>
 	);
@@ -89,6 +127,7 @@ function GraphSummary() {
 export function OrchNodePanel() {
 	const graphDef = useOrchStore((s) => s.graphDef);
 	const selectedNodeId = useOrchStore((s) => s.selectedNodeId);
+	const selectedEdgeId = useOrchStore((s) => s.selectedEdgeId);
 	const run = useOrchStore((s) => s.run);
 	const view = useOrchStore((s) => s.view);
 	const updateNode = useOrchStore((s) => s.updateNode);
@@ -99,6 +138,10 @@ export function OrchNodePanel() {
 	// the editor's — fields render read-only there.
 	const source = view === "run" ? run.graph : graphDef;
 	const node = selectedNodeId ? (source?.nodes.find((n) => n.id === selectedNodeId) ?? null) : null;
+	if (!node && selectedEdgeId) {
+		const edge = source?.edges.find((e) => e.id === selectedEdgeId) ?? null;
+		if (edge) return <EdgePanel edge={edge} editable={view === "editor" && run.status !== "running"} />;
+	}
 	if (!node) return <GraphSummary />;
 
 	const runNode = selectedNodeId ? (run.nodes[selectedNodeId] ?? null) : null;

@@ -76,7 +76,7 @@ const graph = ABORT
 				{ id: "a", task: "只输出数字 7，不要任何其他文字。" },
 				{ id: "b", task: "上游输入里有一个数字。把它加 1，只输出最终数字。" },
 			],
-			edges: [{ id: "a->b", source: "a", target: "b" }],
+			edges: [{ id: "a->b", source: "a", target: "b", label: "传递上游数字" }],
 		};
 
 const events = [];
@@ -157,10 +157,23 @@ async function finish(fin) {
 		if (fin.ok !== gen.nodes.length || fin.failed !== 0) {
 			fail(`generated ${gen.nodes.length} nodes but finished ok=${fin.ok} failed=${fin.failed}`);
 		}
-		// Any edge means at least one downstream prompt carried upstream output.
+		// The GOAL mandates a serial 3-task chain — an edgeless plan must fail
+		// loudly, not pass vacuously past the label assertions below.
+		if (gen.edges.length < 2) {
+			fail(`goal mandates a serial 3-task chain but the plan has ${gen.edges.length} edge(s)`);
+		}
+		// Any edge means at least one downstream prompt carried upstream input,
+		// and every generated edge carries its relation label (the prompt
+		// mandates one) which annotates the injected section header.
 		if (gen.edges.length > 0) {
 			const injected = byType("node_started").some((e) => e.assembledPrompt.includes("## 上游输入"));
 			if (!injected) fail("edges exist but no node prompt contains upstream input");
+			const unlabeled = gen.edges.filter((e) => typeof e.label !== "string" || !e.label.trim());
+			if (unlabeled.length > 0) {
+				fail(`generated edges without relation labels: ${unlabeled.map((e) => e.id).join(",")}`);
+			}
+			const labeledHeader = byType("node_started").some((e) => e.assembledPrompt.includes("—— 关系："));
+			if (!labeledHeader) fail("edge labels exist but no assembledPrompt carries the relation header");
 		}
 		// Archive keeps the full plan→run story, replays on reconnect.
 		const runs = await (await fetch(`${HTTP}/api/runs`)).json();
@@ -199,6 +212,10 @@ async function finish(fin) {
 	if (!startedB) fail("node b never started");
 	// THE core contract: a's output reached b's prompt.
 	if (!startedB.assembledPrompt.includes("7")) fail("b's assembledPrompt does not contain a's output (7)");
+	// Semantic edge: the relation label annotates the injected section header.
+	if (!startedB.assembledPrompt.includes("—— 关系：传递上游数字")) {
+		fail("b's assembledPrompt does not carry the edge relation label");
+	}
 	const completedB = byType("node_completed").find((e) => e.nodeId === "b");
 	if (!completedB) fail("node b never completed");
 	// The model's arithmetic is nondeterministic (observed 7→"9" once); only

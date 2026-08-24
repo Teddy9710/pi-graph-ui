@@ -37,6 +37,9 @@ let lastPlanSentAt = 0;
 interface OrchState {
 	graphDef: GraphDef;
 	selectedNodeId: string | null;
+	/** The selected edge (relation-label editing); mutually exclusive with
+	 *  selectedNodeId — one panel, one subject. */
+	selectedEdgeId: string | null;
 	/** validateGraph(graphDef) — recomputed on every mutation. */
 	issues: GraphValidationIssue[];
 	/** Folded run state (idle until the first run event arrives). */
@@ -64,6 +67,10 @@ interface OrchState {
 	/** Recompute positions for ALL nodes via dagre. */
 	autoArrange: () => void;
 	select: (id: string | null) => void;
+	/** Select an edge (null clears). Clears the node selection. */
+	selectEdge: (id: string | null) => void;
+	/** Set/clear an edge's relation label (empty input clears it). */
+	updateEdgeLabel: (id: string, label: string) => void;
 	/** Client-side validateGraph gate: issues → never sent. */
 	runGraph: () => void;
 	abortRun: () => void;
@@ -147,6 +154,7 @@ const initialGraph = loadGraph();
 export const useOrchStore = create<OrchState>((set, get) => ({
 	graphDef: initialGraph,
 	selectedNodeId: null,
+	selectedEdgeId: null,
 	issues: validateGraph(initialGraph),
 	run: initRunState(),
 	view: "editor",
@@ -165,7 +173,7 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 				task: "",
 				position: { x: 60 + (n % 5) * 260, y: 60 + Math.floor(n / 5) * 140 },
 			};
-			return { ...graphState({ ...s.graphDef, nodes: [...s.graphDef.nodes, node] }), selectedNodeId: node.id };
+			return { ...graphState({ ...s.graphDef, nodes: [...s.graphDef.nodes, node] }), selectedNodeId: node.id, selectedEdgeId: null };
 		}),
 
 	updateNode: (id, patch) =>
@@ -192,15 +200,16 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		}),
 
 	deleteNode: (id) =>
-		set((s) => ({
-			...graphState({
-				...s.graphDef,
-				nodes: s.graphDef.nodes.filter((n) => n.id !== id),
-				// Prune every edge that touched the node.
-				edges: s.graphDef.edges.filter((e) => e.source !== id && e.target !== id),
-			}),
-			selectedNodeId: s.selectedNodeId === id ? null : s.selectedNodeId,
-		})),
+		set((s) => {
+			// Prune every edge that touched the node.
+			const edges = s.graphDef.edges.filter((e) => e.source !== id && e.target !== id);
+			return {
+				...graphState({ ...s.graphDef, nodes: s.graphDef.nodes.filter((n) => n.id !== id), edges }),
+				selectedNodeId: s.selectedNodeId === id ? null : s.selectedNodeId,
+				// A pruned edge must not stay selected.
+				selectedEdgeId: edges.some((e) => e.id === s.selectedEdgeId) ? s.selectedEdgeId : null,
+			};
+		}),
 
 	connectEdge: (source, target) =>
 		set((s) => {
@@ -222,21 +231,45 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		}),
 
 	deleteEdge: (id) =>
-		set((s) => graphState({ ...s.graphDef, edges: s.graphDef.edges.filter((e) => e.id !== id) })),
+		set((s) => ({
+			...graphState({ ...s.graphDef, edges: s.graphDef.edges.filter((e) => e.id !== id) }),
+			selectedEdgeId: s.selectedEdgeId === id ? null : s.selectedEdgeId,
+		})),
 
 	applyTemplate: (key) =>
 		set((s) => {
 			const tpl = TEMPLATES.find((t) => t.key === key);
 			if (!tpl) return {};
 			// Templates are module constants — clone, then assign positions.
-			return { ...graphState(autoLayoutGraphDef(cloneGraph(tpl.graph))), selectedNodeId: null };
+			return {
+				...graphState(autoLayoutGraphDef(cloneGraph(tpl.graph))),
+				selectedNodeId: null,
+				selectedEdgeId: null,
+			};
 		}),
 
-	clearCanvas: () => set((s) => ({ ...graphState({ nodes: [], edges: [] }), selectedNodeId: null })),
+	clearCanvas: () =>
+		set((s) => ({ ...graphState({ nodes: [], edges: [] }), selectedNodeId: null, selectedEdgeId: null })),
 
 	autoArrange: () => set((s) => graphState(autoLayoutGraphDef(s.graphDef))),
 
-	select: (id) => set({ selectedNodeId: id }),
+	select: (id) => set({ selectedNodeId: id, selectedEdgeId: null }),
+
+	selectEdge: (id) => set({ selectedEdgeId: id, selectedNodeId: null }),
+
+	updateEdgeLabel: (id, label) =>
+		set((s) => {
+			if (!s.graphDef.edges.some((e) => e.id === id)) return {};
+			// Trimmed-empty clears the label (undefined → dropped from JSON);
+			// the input's maxLength enforces MAX_EDGE_LABEL_CHARS.
+			const clean = label.trim() ? label : undefined;
+			const edges = s.graphDef.edges.map((e) => {
+				if (e.id !== id) return e;
+				const { label: _old, ...rest } = e;
+				return clean ? { ...rest, label: clean } : rest;
+			});
+			return graphState({ ...s.graphDef, edges });
+		}),
 
 	runGraph: () => {
 		const s = get();
@@ -267,7 +300,12 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		set((s) => {
 			if (!s.run.graph || s.run.status === "running" || s.run.status === "planning") return {};
 			// Fresh positions via auto-layout — generated nodes carry none.
-			return { ...graphState(autoLayoutGraphDef(cloneGraph(s.run.graph))), selectedNodeId: null, view: "editor" };
+			return {
+				...graphState(autoLayoutGraphDef(cloneGraph(s.run.graph))),
+				selectedNodeId: null,
+				selectedEdgeId: null,
+				view: "editor",
+			};
 		}),
 }));
 
@@ -303,8 +341,13 @@ export function applyRunEvent(event: RunEvent): void {
 		for (const [id, node] of Object.entries(s.run.nodes)) next.nodes[id] = { ...node };
 		foldRunEvent(next, event);
 		// An auto-orchestrated run takes over the canvas: the generated graph
-		// only exists in the run state, not in the editor.
-		return { run: next, view: event.type === "plan_started" ? ("run" as const) : s.view };
+		// only exists in the run state, not in the editor — and the editor's
+		// selections reference that graph, so they must not leak into the run
+		// view's panel (ids can coincide).
+		if (event.type === "plan_started") {
+			return { run: next, view: "run" as const, selectedNodeId: null, selectedEdgeId: null };
+		}
+		return { run: next, view: s.view };
 	});
 }
 

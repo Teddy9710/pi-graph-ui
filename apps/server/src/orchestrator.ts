@@ -23,6 +23,7 @@ import {
 	type NodeUsage,
 	type RunEvent,
 	type RunStatus,
+	type UpstreamInput,
 } from "@pi-graph/shared";
 
 // ============================================================================
@@ -42,7 +43,7 @@ export interface ExecutorCall {
 	node: NodeDef;
 	/** Task + injected upstream outputs (what actually gets sent to pi). */
 	assembledPrompt: string;
-	upstream: Array<{ nodeId: string; text: string }>;
+	upstream: UpstreamInput[];
 }
 
 export interface Executor {
@@ -80,6 +81,9 @@ export class OrchestratorEngine {
 	private readonly remaining = new Map<string, number>();
 	private readonly status = new Map<string, NodeRunStatus>();
 	private readonly outputs = new Map<string, string>();
+	/** Edge relation labels keyed `${source}->${target}` (first edge wins on
+	 *  duplicates — validation already rejects them, this is just defensive). */
+	private readonly edgeLabels = new Map<string, string>();
 	private readonly inflight = new Map<string, Promise<void>>();
 	private ready: string[] = [];
 
@@ -183,6 +187,8 @@ export class OrchestratorEngine {
 			if (e.source === e.target) throw new Error(`edge ${e.id}: self-loop`);
 			this.downstreams.get(e.source)!.push(e.target);
 			this.upstreams.get(e.target)!.push(e.source);
+			const pairKey = `${e.source}->${e.target}`;
+			if (e.label && !this.edgeLabels.has(pairKey)) this.edgeLabels.set(pairKey, e.label);
 			this.remaining.set(e.target, this.remaining.get(e.target)! + 1);
 		}
 		this.validate();
@@ -192,9 +198,12 @@ export class OrchestratorEngine {
 
 	private launch(id: string): void {
 		const node = this.nodeById.get(id)!;
-		const upstream = (this.upstreams.get(id) ?? []).map((uid) => ({
+		const upstream: UpstreamInput[] = (this.upstreams.get(id) ?? []).map((uid) => ({
 			nodeId: uid,
 			text: this.outputs.get(uid) ?? "",
+			// The edge's relation label tells the executor WHY this input
+			// arrives (semantic edge), not just from whom.
+			label: this.edgeLabels.get(`${uid}->${id}`),
 		}));
 		const assembledPrompt = assemblePrompt(node, upstream);
 		const startedAt = this.now();

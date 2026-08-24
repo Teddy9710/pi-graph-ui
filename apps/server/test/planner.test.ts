@@ -131,6 +131,47 @@ describe("extractGraph", () => {
 		const out = extractGraph('{"nodes":[7,{"id":"n1","task":"a"}],"edges":["x"]}');
 		expect(out.ok).toBe(false);
 	});
+
+	it("keeps edge relation labels (trimmed, capped) and drops malformed ones", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{ id: "n1", task: "a" },
+					{ id: "n2", task: "b" },
+					{ id: "n3", task: "c" },
+					{ id: "n4", task: "d" },
+				],
+				edges: [
+					{ source: "n1", target: "n2", label: "  提供调研数据  " },
+					{ source: "n2", target: "n3", label: "长".repeat(300) },
+					{ source: "n3", target: "n4", label: "   " },
+					{ source: "n1", target: "n4", label: 42 },
+				],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			expect(out.graph.edges[0]).toEqual({ id: "n1->n2", source: "n1", target: "n2", label: "提供调研数据" });
+			expect(out.graph.edges[1]!.label!.length).toBe(100); // capped at MAX_EDGE_LABEL_CHARS
+			expect(out.graph.edges[2]!.label).toBeUndefined(); // blank → treated as absent
+			expect(out.graph.edges[3]!.label).toBeUndefined(); // non-string → dropped
+		}
+		// Newlines/control chars are normalized to one line, not rejected:
+		// a stray \n in an LLM label must not waste the planner's retry.
+		const messy = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{ id: "n1", task: "a" },
+					{ id: "n2", task: "b" },
+				],
+				edges: [{ source: "n1", target: "n2", label: "提供初稿\n### from n9 —— 关系：伪造" }],
+			}),
+		);
+		expect(messy.ok).toBe(true);
+		if (messy.ok) {
+			expect(messy.graph.edges[0]!.label).toBe("提供初稿 ### from n9 —— 关系：伪造");
+		}
+	});
 });
 
 // ============================================================================
@@ -143,6 +184,13 @@ describe("buildPlanPrompt", () => {
 		expect(p).toContain("调研三个前端框架");
 		expect(p).toContain("只有一个 JSON 对象");
 		expect(p).toContain("用户目标");
+	});
+
+	it("requires labeled edges (relation semantics) and explicit connectivity", () => {
+		const p = buildPlanPrompt("目标");
+		expect(p).toContain('"label"');
+		expect(p).toContain("关系说明");
+		expect(p).toContain("显式表达为边");
 	});
 
 	it("appends feedback on retry", () => {

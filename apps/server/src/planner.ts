@@ -15,6 +15,7 @@ import {
 	finalOutput,
 	foldEvent,
 	initState,
+	MAX_EDGE_LABEL_CHARS,
 	MODEL_RE,
 	validateGraph,
 	type GraphDef,
@@ -46,9 +47,9 @@ export function buildPlanPrompt(goal: string, feedback?: string): string {
 
 要求：
 - 输出**只有一个 JSON 对象**，不要 markdown 代码块围栏、不要任何解释文字。
-- 结构：{"nodes": [{"id": "n1", "label": "简短标签", "task": "给执行 agent 的完整任务指令"}], "edges": [{"source": "n1", "target": "n2"}]}
+- 结构：{"nodes": [{"id": "n1", "label": "简短标签", "task": "给执行 agent 的完整任务指令"}], "edges": [{"source": "n1", "target": "n2", "label": "这条边的关系说明"}]}
 - 节点 3 到 8 个，绝不超过 ${MAX_PLAN_NODES} 个。id 用 n1、n2、n3…（仅限字母/数字/_/-，不可重复）。
-- edges 描述数据依赖：当 b 需要 a 的产出时连 a->b。不许环、不许自环。没有依赖就连成多个根节点并行。
+- edges 描述数据依赖：当 b 需要 a 的产出时连 a->b。每条边必须带一个简短 label（一般不超过 20 字），说明 a 给 b 提供什么、为什么依赖——如「提供调研数据供汇总」「提供初稿供审校」。不许环、不许自环。节点间关系要尽量显式表达为边；只有真正互不依赖的任务才作为独立根节点并行。
 - 每个节点的 task 必须自包含：执行该节点的 agent 看不到整体目标，只看到自己的 task 与上游节点的输出。
 - 可选字段 model（"provider/model"）与 agent（persona 名）通常省略，除非目标明确需要。
 
@@ -105,8 +106,18 @@ export function extractGraph(text: string): PlanOutcome {
 		if (typeof e !== "object" || e === null) return e;
 		const r = e as Record<string, unknown>;
 		if (typeof r.source !== "string" || typeof r.target !== "string") return r;
-		// LLMs routinely omit edge ids; synthesize the conventional one.
-		return { id: typeof r.id === "string" && r.id ? r.id : `${r.source}->${r.target}`, source: r.source, target: r.target };
+		// LLMs routinely omit edge ids; synthesize the conventional one. The
+		// relation label (when present and non-blank) rides along, capped —
+		// and normalized to one line (newlines/control chars would fail
+		// validateGraph and waste the planner's retry).
+		const rawLabel = typeof r.label === "string" ? r.label.replace(/[\u0000-\u001f\u007f]+/g, " ").trim() : "";
+		const label = rawLabel ? rawLabel.slice(0, MAX_EDGE_LABEL_CHARS) : undefined;
+		return {
+			id: typeof r.id === "string" && r.id ? r.id : `${r.source}->${r.target}`,
+			source: r.source,
+			target: r.target,
+			...(label ? { label } : {}),
+		};
 	});
 	const graph: GraphDef = {
 		nodes: nodes as GraphDef["nodes"],
