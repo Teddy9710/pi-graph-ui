@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OrchestratorEngine, type Executor, type ExecutorCall, type NodeResult } from "../src/orchestrator.ts";
-import type { GraphDef, RunEvent } from "@pi-graph/shared";
+import type { EdgeType, GraphDef, RunEvent } from "@pi-graph/shared";
 
 // ============================================================================
 // Fakes & helpers
@@ -67,10 +67,11 @@ function harness(): Harness {
 }
 
 const node = (id: string, task = `task ${id}`) => ({ id, task });
-const edge = (source: string, target: string, label?: string) => ({
+const edge = (source: string, target: string, type?: EdgeType, label?: string) => ({
 	id: `${source}->${target}`,
 	source,
 	target,
+	...(type ? { type } : {}),
 	...(label ? { label } : {}),
 });
 
@@ -95,20 +96,21 @@ describe("OrchestratorEngine", () => {
 		expect(callC.assembledPrompt).not.toContain("out:a"); // only direct upstreams
 	});
 
-	it("edge relation labels annotate the upstream injection (semantic edges)", async () => {
+	it("typed edges annotate the upstream injection (badge + optional note)", async () => {
 		const h = harness();
 		const graph: GraphDef = {
 			nodes: [node("a"), node("b"), node("c")],
-			edges: [edge("a", "b", "提供初稿"), edge("b", "c")],
+			edges: [edge("a", "b", "review", "提供初稿"), edge("b", "c")],
 		};
 		const summary = await h.run(graph);
 		expect(summary.status).toBe("completed");
 		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
 		const callC = h.executor.calls.find((c) => c.node.id === "c")!;
-		expect(callB.assembledPrompt).toContain("### from a —— 关系：提供初稿");
+		expect(callB.assembledPrompt).toContain("### from a —— 审校（提供初稿）");
+		expect(callB.upstream[0]?.type).toBe("review");
 		expect(callB.upstream[0]?.label).toBe("提供初稿");
-		// A bare edge keeps the plain header — no empty relation suffix.
-		expect(callC.assembledPrompt).toContain("### from b\nout:b");
+		// A bare edge carries the DEFAULT badge — no bare headers anymore.
+		expect(callC.assembledPrompt).toContain("### from b —— 输入\nout:b");
 	});
 
 	it("caps root concurrency at maxParallel", async () => {

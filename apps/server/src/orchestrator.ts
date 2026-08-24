@@ -17,6 +17,7 @@ import {
 	addNodeUsage,
 	assemblePrompt,
 	zeroNodeUsage,
+	type EdgeType,
 	type GraphDef,
 	type NodeDef,
 	type NodeRunStatus,
@@ -81,8 +82,9 @@ export class OrchestratorEngine {
 	private readonly remaining = new Map<string, number>();
 	private readonly status = new Map<string, NodeRunStatus>();
 	private readonly outputs = new Map<string, string>();
-	/** Edge relation labels keyed `${source}->${target}` (first edge wins on
+	/** Edge TYPE + note keyed `${source}->${target}` (first wins on
 	 *  duplicates — validation already rejects them, this is just defensive). */
+	private readonly edgeTypes = new Map<string, EdgeType>();
 	private readonly edgeLabels = new Map<string, string>();
 	private readonly inflight = new Map<string, Promise<void>>();
 	private ready: string[] = [];
@@ -188,6 +190,7 @@ export class OrchestratorEngine {
 			this.downstreams.get(e.source)!.push(e.target);
 			this.upstreams.get(e.target)!.push(e.source);
 			const pairKey = `${e.source}->${e.target}`;
+			if (e.type && !this.edgeTypes.has(pairKey)) this.edgeTypes.set(pairKey, e.type);
 			if (e.label && !this.edgeLabels.has(pairKey)) this.edgeLabels.set(pairKey, e.label);
 			this.remaining.set(e.target, this.remaining.get(e.target)! + 1);
 		}
@@ -201,8 +204,9 @@ export class OrchestratorEngine {
 		const upstream: UpstreamInput[] = (this.upstreams.get(id) ?? []).map((uid) => ({
 			nodeId: uid,
 			text: this.outputs.get(uid) ?? "",
-			// The edge's relation label tells the executor WHY this input
-			// arrives (semantic edge), not just from whom.
+			// The edge's TYPE (+ optional note) tells the executor HOW this
+			// input is meant to be used, not just from whom it arrives.
+			type: this.edgeTypes.get(`${uid}->${id}`),
 			label: this.edgeLabels.get(`${uid}->${id}`),
 		}));
 		const assembledPrompt = assemblePrompt(node, upstream);

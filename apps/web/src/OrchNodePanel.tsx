@@ -7,7 +7,13 @@
  */
 
 import { useEffect, useState } from "react";
-import { MAX_EDGE_LABEL_CHARS, type EdgeDef } from "@pi-graph/shared";
+import {
+	EDGE_TYPES,
+	EDGE_TYPE_LABELS,
+	MAX_EDGE_NOTE_CHARS,
+	type EdgeDef,
+	type EdgeType,
+} from "@pi-graph/shared";
 import { API_BASE } from "./store.ts";
 import { useOrchStore } from "./orch-store.ts";
 
@@ -41,9 +47,11 @@ function useAgentNames(): string[] {
 	return agents;
 }
 
-/** Edge inspector: the relation label (the semantic payload of the edge) and
- *  deletion. Read-only wherever the graph isn't editable (run view, mid-run). */
+/** Edge inspector: the TYPE (fixed vocabulary — the edge's execution
+ *  semantics) plus the optional short note and deletion. Read-only wherever
+ *  the graph isn't editable (run view, mid-run). */
 function EdgePanel({ edge, editable }: { edge: EdgeDef; editable: boolean }) {
+	const updateEdgeType = useOrchStore((s) => s.updateEdgeType);
 	const updateEdgeLabel = useOrchStore((s) => s.updateEdgeLabel);
 	const deleteEdge = useOrchStore((s) => s.deleteEdge);
 	return (
@@ -55,18 +63,36 @@ function EdgePanel({ edge, editable }: { edge: EdgeDef; editable: boolean }) {
 				</code>
 			</header>
 			<div className="pg-form-row">
-				<label htmlFor="pg-edge-label">关系标签（说明这条边传递什么、为什么依赖）</label>
+				<label htmlFor="pg-edge-type">类型（这条边的执行语义）</label>
+				{/* value falls back to "input" — old graphs without a type still
+				    show (and keep) the default rather than a blank select. */}
+				<select
+					id="pg-edge-type"
+					className="pg-form-input"
+					value={edge.type ?? "input"}
+					disabled={!editable}
+					onChange={(e) => updateEdgeType(edge.id, e.target.value as EdgeType)}
+				>
+					{EDGE_TYPES.map((t) => (
+						<option key={t} value={t}>
+							{EDGE_TYPE_LABELS[t]}（{t}）
+						</option>
+					))}
+				</select>
+			</div>
+			<div className="pg-form-row">
+				<label htmlFor="pg-edge-label">备注（可选，类型说不清时补充，≤{MAX_EDGE_NOTE_CHARS} 字）</label>
 				<input
 					id="pg-edge-label"
 					className="pg-form-input"
-					placeholder="如：提供调研数据供汇总"
-					maxLength={MAX_EDGE_LABEL_CHARS}
+					placeholder="如：原始数据"
+					maxLength={MAX_EDGE_NOTE_CHARS}
 					value={edge.label ?? ""}
 					disabled={!editable}
 					onChange={(e) => updateEdgeLabel(edge.id, e.target.value)}
 				/>
 			</div>
-			<p className="pg-dim">运行时该说明会随上游输出一起注入下游任务的 prompt。</p>
+			<p className="pg-dim">运行时以「### from 上游id —— 类型徽章（备注）」的头部随上游输出注入下游任务的 prompt。</p>
 			{editable ? (
 				<button className="pg-btn pg-btn-danger" onClick={() => deleteEdge(edge.id)}>
 					删除边
@@ -117,8 +143,8 @@ function GraphSummary() {
 			<h4>提示</h4>
 			<p className="pg-dim">
 				{view === "run"
-					? "点击节点查看运行详情，边上的文字说明节点间关系；「转入编辑器」把生成图复制到编辑器后可修改再跑。"
-					: "点击节点选中后编辑，点击边可查看/修改关系标签；从节点右侧圆点拖到另一节点左侧圆点连线（环会被拒绝）；删除键删除选中节点；「自动整理」用 dagre 重排全部节点。"}
+					? "点击节点查看运行详情，边上的徽章标注依赖语义（输入/参考/审校/修订/汇总/决策）；「转入编辑器」把生成图复制到编辑器后可修改再跑。"
+					: "点击节点选中后编辑，点击边可查看/修改类型与备注；从节点右侧圆点拖到另一节点左侧圆点连线（默认输入类型，环会被拒绝）；删除键删除选中节点；「自动整理」用 dagre 重排全部节点。"}
 			</p>
 		</aside>
 	);

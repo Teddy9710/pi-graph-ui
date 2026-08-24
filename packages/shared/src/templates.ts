@@ -46,9 +46,9 @@ export const TEMPLATES: TemplateDef[] = [
 				},
 			],
 			edges: [
-				{ id: "research-a->summarizer", source: "research-a", target: "summarizer" },
-				{ id: "research-b->summarizer", source: "research-b", target: "summarizer" },
-				{ id: "research-c->summarizer", source: "research-c", target: "summarizer" },
+				{ id: "research-a->summarizer", source: "research-a", target: "summarizer", type: "aggregate" },
+				{ id: "research-b->summarizer", source: "research-b", target: "summarizer", type: "aggregate" },
+				{ id: "research-c->summarizer", source: "research-c", target: "summarizer", type: "aggregate" },
 			],
 		},
 	},
@@ -64,8 +64,8 @@ export const TEMPLATES: TemplateDef[] = [
 				{ id: "polish", label: "审校", task: "审校上游草稿：修正错别字与不通顺的表达，压缩到 500 字以内，不丢失任何要点。" },
 			],
 			edges: [
-				{ id: "outline->draft", source: "outline", target: "draft" },
-				{ id: "draft->polish", source: "draft", target: "polish" },
+				{ id: "outline->draft", source: "outline", target: "draft", type: "input" },
+				{ id: "draft->polish", source: "draft", target: "polish", type: "review" },
 			],
 		},
 	},

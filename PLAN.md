@@ -99,6 +99,14 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
    - web：两条画布的边直接渲染 label（RF label + labelBg）；编辑器点击边选中（与节点选中互斥），面板可改关系标签/删边；空标签即清除
    - e2e：链式图带 label 断言注入标题；PLAN 模式断言生成边全部带 label 且下游 prompt 含「—— 关系：」，且边数 ≥2（无边的图不得静默通过）
    - 边界加固（对抗性评审后）：label 拒绝换行/控制字符（防伪造 `### from` 分节头，planner 侧归一为单行不浪费重试）；validateGraph 拒绝同向重边（防双份注入 + label 错配）；画布 label 截断 ~20 字符显示（SVG 单行不换行，全长在边面板）；plan_started 清空编辑器选区防泄漏到运行视图；run 视图布局签名纳入边 label
+10. **M-T 类型化边（edge = 必选类型 + 可选短备注）**：取代 M-S 的自由文本关系标签（用户反馈「太复杂」，依据 graph engineering 调研：未类型化的边只携带 1 bit 信息，类型化转移才是可推理的知识）——
+   - 词表（shared `EDGE_TYPES`/`EDGE_TYPE_LABELS`，六值封闭枚举）：`input` 输入（产出是直接加工材料，**缺省值**）/ `context` 参考（背景资料）/ `review` 审校（下游检查上游产出）/ `revise` 修订（按反馈改稿）/ `aggregate` 汇总（聚合多上游成结论）/ `decide` 决策（依据产出做选择）
+   - shared：`EdgeDef.type?`（缺省一律按 input：校验对缺省宽容、对非法值报错并回显 id 列表）；备注沿用 `label` 字段名（旧 localStorage 图与已归档 run 零迁移）但上限 100→20（`MAX_EDGE_NOTE_CHARS`，超长旧图标红、缩短后才可运行）；`assemblePrompt` 分节标题改为 `### from n1 —— 输入` / `### from n1 —— 汇总（提供调研数据）`（全角括号）；`UpstreamInput` 携带 type
+   - server：规划器提示词要求每条边必带六选一 type（拿不准用 input）；`extractGraph` 对非法/缺失 type **丢弃而非报错**（缺省 input 兜底，不烧唯一重试；系统性漂移由 e2e 严断言兜底），丢 type 不连带丢备注（独立检查）；引擎按 `source->target` 传递 edgeTypes
+   - web：边面板加类型下拉（`徽章（id）` 文案）+ 备注 maxLength 20；新建边默认 `type:"input"` 显式落盘；画布边至少渲染徽章（`徽章·备注` 合计仍截 20 字符防 SVG 单行溢出）；run 视图布局签名纳入边 type
+   - 模板：research-fanout 三边 `aggregate`、pipeline 大纲→扩写 `input`、扩写→审校 `review`
+   - e2e：链式断言 `—— 输入（传递上游数字）`；PLAN 模式**故意比校验严**——生成边 type 缺失也算失败（锁定规划提示词契约）+ 徽章头正则断言
+
 
 ## 风险与对策
 - pi 版本升级改动事件形状 → shared 包用快照测试锁定事件结构，升级时显式更新

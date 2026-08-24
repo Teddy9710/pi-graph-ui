@@ -8,12 +8,14 @@
 
 import { create } from "zustand";
 import {
+	EDGE_TYPES,
 	TEMPLATES,
 	edgeId,
 	emptyNodeMap,
 	foldRunEvent,
 	initRunState,
 	validateGraph,
+	type EdgeType,
 	type GraphDef,
 	type GraphValidationIssue,
 	type NodeDef,
@@ -37,7 +39,7 @@ let lastPlanSentAt = 0;
 interface OrchState {
 	graphDef: GraphDef;
 	selectedNodeId: string | null;
-	/** The selected edge (relation-label editing); mutually exclusive with
+	/** The selected edge (type/note editing); mutually exclusive with
 	 *  selectedNodeId — one panel, one subject. */
 	selectedEdgeId: string | null;
 	/** validateGraph(graphDef) — recomputed on every mutation. */
@@ -69,7 +71,9 @@ interface OrchState {
 	select: (id: string | null) => void;
 	/** Select an edge (null clears). Clears the node selection. */
 	selectEdge: (id: string | null) => void;
-	/** Set/clear an edge's relation label (empty input clears it). */
+	/** Set an edge's TYPE from the fixed vocabulary. */
+	updateEdgeType: (id: string, type: EdgeType) => void;
+	/** Set/clear an edge's optional note (empty input clears it). */
 	updateEdgeLabel: (id: string, label: string) => void;
 	/** Client-side validateGraph gate: issues → never sent. */
 	runGraph: () => void;
@@ -219,7 +223,11 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 			// Validate the CANDIDATE graph, but only reject for issues this edge
 			// INTRODUCES (cycle/duplicate/self-loop) — pre-existing issues
 			// elsewhere (e.g. an empty task) must not block connecting.
-			const candidate: GraphDef = { ...s.graphDef, edges: [...s.graphDef.edges, { id, source, target }] };
+			// New edges start as the default type "input"; the panel can refine.
+			const candidate: GraphDef = {
+				...s.graphDef,
+				edges: [...s.graphDef.edges, { id, source, target, type: "input" }],
+			};
 			const before = new Set(validateGraph(s.graphDef).map((i) => `${i.nodeOrEdge ?? ""}|${i.message}`));
 			const fresh = validateGraph(candidate).filter((i) => !before.has(`${i.nodeOrEdge ?? ""}|${i.message}`));
 			if (fresh.length > 0) {
@@ -257,11 +265,22 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 
 	selectEdge: (id) => set({ selectedEdgeId: id, selectedNodeId: null }),
 
+	updateEdgeType: (id, type) =>
+		set((s) => {
+			// The select only offers EDGE_TYPES; this guard is just defense.
+			if (!EDGE_TYPES.includes(type)) return {};
+			if (!s.graphDef.edges.some((e) => e.id === id)) return {};
+			// "input" is written EXPLICITLY too — the chosen type must survive
+			// persistence rather than rely on ?? "input" at every read site.
+			const edges = s.graphDef.edges.map((e) => (e.id === id ? { ...e, type } : e));
+			return graphState({ ...s.graphDef, edges });
+		}),
+
 	updateEdgeLabel: (id, label) =>
 		set((s) => {
 			if (!s.graphDef.edges.some((e) => e.id === id)) return {};
-			// Trimmed-empty clears the label (undefined → dropped from JSON);
-			// the input's maxLength enforces MAX_EDGE_LABEL_CHARS.
+			// Trimmed-empty clears the note (undefined → dropped from JSON);
+			// the input's maxLength enforces MAX_EDGE_NOTE_CHARS.
 			const clean = label.trim() ? label : undefined;
 			const edges = s.graphDef.edges.map((e) => {
 				if (e.id !== id) return e;

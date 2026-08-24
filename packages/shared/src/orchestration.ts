@@ -30,15 +30,35 @@ export const AGENT_RE = NODE_ID_RE;
 export const MAX_INJECTED_OUTPUT_BYTES = 50 * 1024;
 /** Client/server streamed preview accumulation cap per node (chars). */
 export const PREVIEW_CAP = 8 * 1024;
-/** Edge labels describe the RELATION between two nodes (graph-engineering
- *  semantics, not just wiring); they are short prose, so a generous cap. */
-export const MAX_EDGE_LABEL_CHARS = 100;
 /**
- * Labels ride INSIDE prompt section headers (`### from n1 —— 关系：<label>`);
+ * Typed-edge vocabulary (graph engineering: an untyped edge carries 1 bit;
+ * a typed edge makes the link reason-able). The id is the wire value
+ * (EdgeDef.type, planner JSON); the label is the Chinese badge shown on the
+ * canvas and injected into prompt headers. Fixed, closed set.
+ */
+export const EDGE_TYPES = ["input", "context", "review", "revise", "aggregate", "decide"] as const;
+export type EdgeType = (typeof EDGE_TYPES)[number];
+export const EDGE_TYPE_LABELS: Record<EdgeType, string> = {
+	input: "输入",
+	context: "参考",
+	review: "审校",
+	revise: "修订",
+	aggregate: "汇总",
+	decide: "决策",
+};
+const EDGE_TYPE_SET = new Set<string>(EDGE_TYPES);
+/**
+ * Optional edge NOTE (rides in the legacy `label` field). Short by design:
+ * the TYPE carries the semantics; the note only disambiguates when two edges
+ * of the same type differ (e.g. two 输入 edges with different materials).
+ */
+export const MAX_EDGE_NOTE_CHARS = 20;
+/**
+ * Notes ride INSIDE prompt section headers (`### from n1 —— 输入（备注）`);
  * a newline would let a label forge another `### from …` header that neither
  * the edge input nor the canvas label can visually audit. Single line only.
  */
-const EDGE_LABEL_UNSAFE_RE = /[\u0000-\u001f\u007f]/;
+const EDGE_NOTE_UNSAFE_RE = /[\u0000-\u001f\u007f]/;
 
 export interface NodeDef {
 	id: string;
@@ -59,8 +79,12 @@ export interface EdgeDef {
 	id: string;
 	source: string;
 	target: string;
-	/** What flows across the edge / why the dependency exists (e.g.
-	 *  "提供调研数据供汇总"). Optional — plain data-flow edges stay bare. */
+	/** Typed relation from EDGE_TYPES; absent = "input" (every reader treats
+	 *  a bare edge as a plain data dependency). */
+	type?: EdgeType;
+	/** Optional short NOTE (≤ MAX_EDGE_NOTE_CHARS) for when the type alone
+	 *  can't tell the two same-typed edges apart. Field name kept from the
+	 *  pre-typing era so persisted graphs / archived runs need no migration. */
 	label?: string;
 }
 
@@ -142,12 +166,19 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 			continue;
 		}
 		if (e.source === e.target) issues.push({ nodeOrEdge: e.id, message: "不允许自环" });
-		if (e.label !== undefined && (typeof e.label !== "string" || e.label.length > MAX_EDGE_LABEL_CHARS)) {
-			issues.push({ nodeOrEdge: e.id, message: `边 label 非法（字符串，≤${MAX_EDGE_LABEL_CHARS} 字符）` });
+		// Typed edge: absent type is LENIENT (every reader defaults it to
+		// "input"), a present-but-unknown one is a hard error — the planner
+		// feedback and the editor issue list both need the valid ids spelled
+		// out, so the message lists ids, not badges.
+		if (e.type !== undefined && (typeof e.type !== "string" || !EDGE_TYPE_SET.has(e.type))) {
+			issues.push({ nodeOrEdge: e.id, message: `边 type 非法（必须是 ${EDGE_TYPES.join("/")} 之一）` });
 		}
-		// A label with newlines could forge another "### from n3" section header
+		if (e.label !== undefined && (typeof e.label !== "string" || e.label.length > MAX_EDGE_NOTE_CHARS)) {
+			issues.push({ nodeOrEdge: e.id, message: `边 label 非法（字符串，≤${MAX_EDGE_NOTE_CHARS} 字符）` });
+		}
+		// A note with newlines could forge another "### from n3" section header
 		// inside the assembled prompt — unauditable from the single-line UI.
-		if (typeof e.label === "string" && EDGE_LABEL_UNSAFE_RE.test(e.label)) {
+		if (typeof e.label === "string" && EDGE_NOTE_UNSAFE_RE.test(e.label)) {
 			issues.push({ nodeOrEdge: e.id, message: "边 label 不能包含换行或控制字符" });
 		}
 		if (edgeSeen.has(e.id)) issues.push({ nodeOrEdge: e.id, message: "边重复" });
@@ -207,22 +238,27 @@ export function truncateBytes(text: string, maxBytes: number): { text: string; c
 export interface UpstreamInput {
 	nodeId: string;
 	text: string;
-	/** The edge's relation label, when the graph describes one. */
+	/** The edge's typed relation; absent = "input". */
+	type?: EdgeType;
+	/** The edge's optional short note. */
 	label?: string;
 }
 
 /**
  * Assemble a node's full prompt: its task, then every upstream output under a
  * deterministic header (graph node order), each capped at
- * MAX_INJECTED_OUTPUT_BYTES. An edge's relation label annotates its section
- * header so the executor knows WHY the input arrives, not just from whom.
+ * MAX_INJECTED_OUTPUT_BYTES. The section header carries the edge's TYPE badge
+ * (with the optional note in full-width parens) so the executor knows HOW the
+ * input is meant to be used, not just from whom it arrives:
+ * `### from n1 —— 输入` / `### from n1 —— 汇总（提供调研数据）`.
  */
 export function assemblePrompt(node: NodeDef, upstream: UpstreamInput[]): string {
 	if (upstream.length === 0) return node.task;
-	const sections = upstream.map(({ nodeId, text, label }) => {
+	const sections = upstream.map(({ nodeId, text, type, label }) => {
 		const { text: capped, capped: wasCapped } = truncateBytes(text, MAX_INJECTED_OUTPUT_BYTES);
-		const relation = label ? ` —— 关系：${label}` : "";
-		return `### from ${nodeId}${relation}\n${capped}${wasCapped ? "\n\n（输出过长，已截断）" : ""}`;
+		const badge = EDGE_TYPE_LABELS[type ?? "input"];
+		const note = label ? `（${label}）` : "";
+		return `### from ${nodeId} —— ${badge}${note}\n${capped}${wasCapped ? "\n\n（输出过长，已截断）" : ""}`;
 	});
 	return `${node.task}\n\n---\n## 上游输入\n\n${sections.join("\n\n")}`;
 }

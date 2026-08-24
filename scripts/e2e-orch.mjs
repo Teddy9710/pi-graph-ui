@@ -33,6 +33,10 @@ const GOAL =
 	process.env.PLAN_GOAL ??
 	"自动编排冒烟测试：请严格拆成三个串行依赖的任务——第一个任务只输出数字 7；第二个任务把上游数字加 1 后只输出结果；第三个任务再把这个数字加 1 后只输出结果。";
 
+/** Mirrors shared EDGE_TYPES — deliberately LOCAL so a vocabulary change that
+ *  forgets this contract shows up as an e2e failure, not a silent pass. */
+const VALID_TYPES = ["input", "context", "review", "revise", "aggregate", "decide"];
+
 function fail(msg) {
 	console.error(`\nE2E FAILED: ${msg}`);
 	process.exit(1);
@@ -76,7 +80,7 @@ const graph = ABORT
 				{ id: "a", task: "只输出数字 7，不要任何其他文字。" },
 				{ id: "b", task: "上游输入里有一个数字。把它加 1，只输出最终数字。" },
 			],
-			edges: [{ id: "a->b", source: "a", target: "b", label: "传递上游数字" }],
+			edges: [{ id: "a->b", source: "a", target: "b", type: "input", label: "传递上游数字" }],
 		};
 
 const events = [];
@@ -163,17 +167,20 @@ async function finish(fin) {
 			fail(`goal mandates a serial 3-task chain but the plan has ${gen.edges.length} edge(s)`);
 		}
 		// Any edge means at least one downstream prompt carried upstream input,
-		// and every generated edge carries its relation label (the prompt
-		// mandates one) which annotates the injected section header.
+		// annotated with a TYPE badge header (输入/参考/审校/修订/汇总/决策).
 		if (gen.edges.length > 0) {
 			const injected = byType("node_started").some((e) => e.assembledPrompt.includes("## 上游输入"));
 			if (!injected) fail("edges exist but no node prompt contains upstream input");
-			const unlabeled = gen.edges.filter((e) => typeof e.label !== "string" || !e.label.trim());
-			if (unlabeled.length > 0) {
-				fail(`generated edges without relation labels: ${unlabeled.map((e) => e.id).join(",")}`);
+			// STRICTER than validateGraph on purpose: an undefined type passes
+			// validation (defaults to input downstream) but fails here — this
+			// locks the planner-prompt contract that every edge is explicitly
+			// typed, so systematic prompt drift is caught loudly.
+			const untyped = gen.edges.filter((e) => typeof e.type !== "string" || !VALID_TYPES.includes(e.type));
+			if (untyped.length > 0) {
+				fail(`generated edges without a valid type: ${untyped.map((e) => `${e.id}=${JSON.stringify(e.type)}`).join(", ")}`);
 			}
-			const labeledHeader = byType("node_started").some((e) => e.assembledPrompt.includes("—— 关系："));
-			if (!labeledHeader) fail("edge labels exist but no assembledPrompt carries the relation header");
+			const badgeHeader = byType("node_started").some((e) => /—— (输入|参考|审校|修订|汇总|决策)/.test(e.assembledPrompt));
+			if (!badgeHeader) fail("edges exist but no assembledPrompt carries a type-badge header");
 		}
 		// Archive keeps the full plan→run story, replays on reconnect.
 		const runs = await (await fetch(`${HTTP}/api/runs`)).json();
@@ -212,9 +219,10 @@ async function finish(fin) {
 	if (!startedB) fail("node b never started");
 	// THE core contract: a's output reached b's prompt.
 	if (!startedB.assembledPrompt.includes("7")) fail("b's assembledPrompt does not contain a's output (7)");
-	// Semantic edge: the relation label annotates the injected section header.
-	if (!startedB.assembledPrompt.includes("—— 关系：传递上游数字")) {
-		fail("b's assembledPrompt does not carry the edge relation label");
+	// Typed edge: the badge + optional note annotate the injected section header
+	// (full-width parens — same template shared/assemblePrompt renders).
+	if (!startedB.assembledPrompt.includes("—— 输入（传递上游数字）")) {
+		fail("b's assembledPrompt does not carry the typed-edge badge + note header");
 	}
 	const completedB = byType("node_completed").find((e) => e.nodeId === "b");
 	if (!completedB) fail("node b never completed");

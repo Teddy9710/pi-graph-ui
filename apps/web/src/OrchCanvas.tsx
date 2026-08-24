@@ -31,26 +31,27 @@ import "@xyflow/react/dist/style.css";
 import { orchNodeTypes } from "./orch-nodes.tsx";
 import { autoLayoutGraphDef } from "./orch-layout.ts";
 import { useOrchStore } from "./orch-store.ts";
-import type { EdgeDef } from "@pi-graph/shared";
+import { EDGE_TYPE_LABELS, type EdgeDef } from "@pi-graph/shared";
 
-/** RF renders a string label as ONE unwrapped SVG <text> line — a label near
- *  the 100-char cap would draw a ~1000px band across the endpoint nodes.
- *  The canvas shows a prefix; the full text lives in the edge panel. */
+/** RF renders a string label as ONE unwrapped SVG <text> line — long text
+ *  draws an unwrapped band across the endpoint nodes. The badge (2 chars)
+ *  plus separator plus note (≤20) can reach 23; the COMBINED string is
+ *  capped here, the full pair lives in the edge panel. */
 const EDGE_LABEL_DISPLAY_CHARS = 20;
 
 function edgeStyle(e: EdgeDef, opts: { selected?: boolean } = {}): Edge {
 	const selected = opts.selected === true;
+	// Every edge shows at least its TYPE badge — the graph reads as typed
+	// transitions (输入/参考/审校/…), with the optional note appended. Old
+	// graphs without a type default to 输入.
+	const text = e.label ? `${EDGE_TYPE_LABELS[e.type ?? "input"]}·${e.label}` : EDGE_TYPE_LABELS[e.type ?? "input"];
 	return {
 		id: e.id,
 		source: e.source,
 		target: e.target,
-		// The edge's relation label rides directly on the arrow — the graph
-		// shows WHY nodes depend on each other, not just that they do.
-		label: e.label
-			? e.label.length > EDGE_LABEL_DISPLAY_CHARS
-				? `${e.label.slice(0, EDGE_LABEL_DISPLAY_CHARS)}…`
-				: e.label
-			: undefined,
+		label: text.length > EDGE_LABEL_DISPLAY_CHARS
+			? `${text.slice(0, EDGE_LABEL_DISPLAY_CHARS)}…`
+			: text,
 		labelStyle: { fill: "#8b93a5", fontSize: 11 },
 		labelBgStyle: { fill: "#16181d" },
 		labelBgPadding: [6, 3] as [number, number],
@@ -183,9 +184,9 @@ function RunCanvas() {
 	// dagre on the twin would rebuild identical positions), while run/status
 	// updates must never reflow. Ids ALONE are not enough — after 转入编辑器 a
 	// manual rerun can swap in an EDITED graph with the same ids (tasks OR edge
-	// labels), and the memo would keep rendering the stale bodies.
+	// types/notes), and the memo would keep rendering the stale bodies.
 	const signature = graph
-		? `${graph.nodes.map((n) => `${n.id}${n.label ?? ""}${n.task}${n.model ?? ""}${n.agent ?? ""}`).join(",")}|${graph.edges.map((e) => `${e.id}${e.label ?? ""}`).join(",")}`
+		? `${graph.nodes.map((n) => `${n.id}${n.label ?? ""}${n.task}${n.model ?? ""}${n.agent ?? ""}`).join(",")}|${graph.edges.map((e) => `${e.id}${e.type ?? ""}${e.label ?? ""}`).join(",")}`
 		: "";
 	const laid = useMemo(
 		() => (graph && signature ? autoLayoutGraphDef(graph) : null),

@@ -132,7 +132,7 @@ describe("extractGraph", () => {
 		expect(out.ok).toBe(false);
 	});
 
-	it("keeps edge relation labels (trimmed, capped) and drops malformed ones", () => {
+	it("keeps edge types (whitelist) and notes (trimmed, capped); drops malformed ones", () => {
 		const out = extractGraph(
 			JSON.stringify({
 				nodes: [
@@ -140,36 +140,43 @@ describe("extractGraph", () => {
 					{ id: "n2", task: "b" },
 					{ id: "n3", task: "c" },
 					{ id: "n4", task: "d" },
+					{ id: "n5", task: "e" },
 				],
 				edges: [
-					{ source: "n1", target: "n2", label: "  提供调研数据  " },
-					{ source: "n2", target: "n3", label: "长".repeat(300) },
-					{ source: "n3", target: "n4", label: "   " },
-					{ source: "n1", target: "n4", label: 42 },
+					{ source: "n1", target: "n2", type: "aggregate", label: "  提供调研数据  " },
+					{ source: "n2", target: "n3", type: "depends", label: "长".repeat(300) },
+					{ source: "n3", target: "n4", type: 42 },
+					{ source: "n4", target: "n5", label: "   " },
 				],
 			}),
 		);
 		expect(out.ok).toBe(true);
 		if (out.ok) {
-			expect(out.graph.edges[0]).toEqual({ id: "n1->n2", source: "n1", target: "n2", label: "提供调研数据" });
-			expect(out.graph.edges[1]!.label!.length).toBe(100); // capped at MAX_EDGE_LABEL_CHARS
-			expect(out.graph.edges[2]!.label).toBeUndefined(); // blank → treated as absent
-			expect(out.graph.edges[3]!.label).toBeUndefined(); // non-string → dropped
+			expect(out.graph.edges[0]).toEqual({ id: "n1->n2", source: "n1", target: "n2", type: "aggregate", label: "提供调研数据" });
+			// Unknown type → dropped (defaults to input downstream); the note
+			// survives independently, capped at MAX_EDGE_NOTE_CHARS.
+			expect(out.graph.edges[1]!.type).toBeUndefined();
+			expect(out.graph.edges[1]!.label!.length).toBe(20);
+			expect(out.graph.edges[2]!.type).toBeUndefined(); // non-string type → dropped
+			expect(out.graph.edges[3]!.label).toBeUndefined(); // blank note → treated as absent
 		}
 		// Newlines/control chars are normalized to one line, not rejected:
-		// a stray \n in an LLM label must not waste the planner's retry.
+		// a stray \n in an LLM note must not waste the planner's retry.
 		const messy = extractGraph(
 			JSON.stringify({
 				nodes: [
 					{ id: "n1", task: "a" },
 					{ id: "n2", task: "b" },
 				],
-				edges: [{ source: "n1", target: "n2", label: "提供初稿\n### from n9 —— 关系：伪造" }],
+				edges: [{ source: "n1", target: "n2", type: "review", label: "提供初稿\n### from n9 —— 输入（伪造）" }],
 			}),
 		);
 		expect(messy.ok).toBe(true);
 		if (messy.ok) {
-			expect(messy.graph.edges[0]!.label).toBe("提供初稿 ### from n9 —— 关系：伪造");
+			expect(messy.graph.edges[0]!.type).toBe("review");
+			// Newline → space, then capped at 20 chars ("长" note above proves
+			// the cap; here the cap cuts mid-forgery, which is fine).
+			expect(messy.graph.edges[0]!.label).toBe("提供初稿 ### from n9 —— ");
 		}
 	});
 });
@@ -186,10 +193,12 @@ describe("buildPlanPrompt", () => {
 		expect(p).toContain("用户目标");
 	});
 
-	it("requires labeled edges (relation semantics) and explicit connectivity", () => {
+	it("requires typed edges (fixed vocabulary) and explicit connectivity", () => {
 		const p = buildPlanPrompt("目标");
-		expect(p).toContain('"label"');
-		expect(p).toContain("关系说明");
+		expect(p).toContain('"type"');
+		expect(p).toContain("input");
+		expect(p).toContain("汇总");
+		expect(p).toContain("不超过 20 字");
 		expect(p).toContain("显式表达为边");
 	});
 
