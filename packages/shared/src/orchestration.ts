@@ -54,11 +54,11 @@ const EDGE_TYPE_SET = new Set<string>(EDGE_TYPES);
  */
 export const MAX_EDGE_NOTE_CHARS = 20;
 /**
- * Notes ride INSIDE prompt section headers (`### from n1 —— 输入（备注）`);
+ * Notes AND node labels ride INSIDE prompt section headers (`### from n1 —— 输入（备注）`);
  * a newline would let a label forge another `### from …` header that neither
  * the edge input nor the canvas label can visually audit. Single line only.
  */
-const EDGE_NOTE_UNSAFE_RE = /[\u0000-\u001f\u007f]/;
+const LABEL_UNSAFE_RE = /[\u0000-\u001f\u007f]/;
 
 export interface NodeDef {
 	id: string;
@@ -153,6 +153,11 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		if (n.agent !== undefined && (typeof n.agent !== "string" || !AGENT_RE.test(n.agent))) {
 			issues.push({ nodeOrEdge: n.id, message: "agent 名非法（仅限字母/数字/_/-，1-64 字符）" });
 		}
+		// Node labels ride in buildSynthPrompt section headers (### nodeId —— 标签)
+		// on chat runs — same header-forgery rule as edge notes.
+		if (typeof n.label === "string" && LABEL_UNSAFE_RE.test(n.label)) {
+			issues.push({ nodeOrEdge: n.id, message: "节点 label 不能包含换行或控制字符" });
+		}
 	}
 	const edgeSeen = new Set<string>();
 	const pairSeen = new Set<string>();
@@ -178,7 +183,7 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		}
 		// A note with newlines could forge another "### from n3" section header
 		// inside the assembled prompt — unauditable from the single-line UI.
-		if (typeof e.label === "string" && EDGE_NOTE_UNSAFE_RE.test(e.label)) {
+		if (typeof e.label === "string" && LABEL_UNSAFE_RE.test(e.label)) {
 			issues.push({ nodeOrEdge: e.id, message: "边 label 不能包含换行或控制字符" });
 		}
 		if (edgeSeen.has(e.id)) issues.push({ nodeOrEdge: e.id, message: "边重复" });
@@ -261,6 +266,98 @@ export function assemblePrompt(node: NodeDef, upstream: UpstreamInput[]): string
 		return `### from ${nodeId} —— ${badge}${note}\n${capped}${wasCapped ? "\n\n（输出过长，已截断）" : ""}`;
 	});
 	return `${node.task}\n\n---\n## 上游输入\n\n${sections.join("\n\n")}`;
+}
+
+// ============================================================================
+// Chat-triggered orchestration: post-run synthesis prompt
+// ============================================================================
+
+/**
+ * Line-1 marker of the results-injection prompt sent to the MAIN session
+ * after a chat-triggered run completes. The chat UI matches user messages
+ * starting with this to render the collapsed "编排结果已注入" card instead
+ * of a (potentially 120KB) raw bubble.
+ */
+export const ORCH_RESULTS_SENTINEL = "[pi-graph:orch-results]";
+/** Byte budget for ALL node outputs combined in one synthesis prompt. */
+export const ORCH_SYNTH_TOTAL_MAX_BYTES = 120 * 1024;
+/** Per-node floor so a many-node run doesn't shrink every section to nothing. */
+export const ORCH_SYNTH_NODE_MIN_BYTES = 2048;
+
+/** One finished node's contribution to the synthesis prompt. */
+export interface OrchResultNode {
+	nodeId: string;
+	label?: string;
+	text: string;
+}
+
+/** Round-tripped metadata carried on line 2 of the injection prompt. */
+export interface OrchSynthMeta {
+	runId: string;
+	goal: string;
+	nodeCount: number;
+}
+
+/**
+ * Build the prompt injected into the MAIN session when a chat-triggered
+ * orchestrated run completes. Layout (line 1 sentinel + line 2 one-line JSON
+ * so the UI can parse the meta without loading the body):
+ *
+ *   [pi-graph:orch-results]
+ *   {"runId":"…","goal":"…","nodeCount":N}
+ *   (blank)
+ *   用户的原始目标：…
+ *   …integration instructions…
+ *   ### n1 —— label
+ *   …output…
+ *
+ * Node outputs share a total byte budget (ORCH_SYNTH_TOTAL_MAX_BYTES) with a
+ * per-node floor (ORCH_SYNTH_NODE_MIN_BYTES), truncated head-first like
+ * assemblePrompt. Total on any input.
+ */
+export function buildSynthPrompt(goal: string, runId: string, nodes: readonly OrchResultNode[]): string {
+	const perNode =
+		nodes.length > 0
+			? Math.max(ORCH_SYNTH_NODE_MIN_BYTES, Math.min(MAX_INJECTED_OUTPUT_BYTES, Math.floor(ORCH_SYNTH_TOTAL_MAX_BYTES / nodes.length)))
+			: MAX_INJECTED_OUTPUT_BYTES;
+	const meta: OrchSynthMeta = { runId, goal, nodeCount: nodes.length };
+	const sections = nodes.map(({ nodeId, label, text }) => {
+		const { text: capped, capped: wasCapped } = truncateBytes(text, perNode);
+		// Backstop: labels ride in this header — a newline could forge another
+		// section (validateGraph + extractGraph reject those upstream; this
+		// guarantees it where the headers are actually built).
+		const safeLabel = (label || nodeId).replace(/[\u0000-\u001f\u007f]+/g, " ").trim() || nodeId;
+		return `### ${nodeId} —— ${safeLabel}\n${capped}${wasCapped ? "\n\n（输出过长，已截断）" : ""}`;
+	});
+	return [
+		ORCH_RESULTS_SENTINEL,
+		JSON.stringify(meta),
+		"",
+		`用户的原始目标：\n${goal}`,
+		"",
+		`系统已通过「自动编排」把该目标拆成 ${nodes.length} 个子任务并全部执行完成，下面是各节点的产出（超长部分已截断）。请结合本会话之前的对话内容，把这些结果整合成对用户的最终回答：先给结论，再给必要细节；重复内容去重，冲突处说明取舍；不要逐条复述节点输出。`,
+		"",
+		...sections,
+	].join("\n");
+}
+
+/**
+ * Parse the metadata line of an injection prompt. Returns null for anything
+ * that is not a sentinel-prefixed, well-formed payload (total; the chat UI
+ * treats null as "render the raw text as a plain user message").
+ */
+export function parseOrchSynthMeta(content: string): OrchSynthMeta | null {
+	if (!content.startsWith(ORCH_RESULTS_SENTINEL)) return null;
+	const line = content.split("\n")[1] ?? "";
+	try {
+		const parsed: unknown = JSON.parse(line);
+		if (typeof parsed !== "object" || parsed === null) return null;
+		const r = parsed as { runId?: unknown; goal?: unknown; nodeCount?: unknown };
+		if (typeof r.runId !== "string" || typeof r.goal !== "string" || typeof r.nodeCount !== "number") return null;
+		return { runId: r.runId, goal: r.goal, nodeCount: r.nodeCount };
+	} catch {
+		return null;
+	}
 }
 
 /**

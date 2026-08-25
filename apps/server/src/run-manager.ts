@@ -16,12 +16,27 @@
  * so a browser refresh reconnects and replays them from hello.
  */
 
-import { validateGraph, zeroNodeUsage, type GraphDef, type GraphValidationIssue, type RunEvent } from "@pi-graph/shared";
+import {
+	validateGraph,
+	zeroNodeUsage,
+	type GraphDef,
+	type GraphValidationIssue,
+	type OrchResultNode,
+	type RunEvent,
+} from "@pi-graph/shared";
 import { OrchestratorEngine, type Executor } from "./orchestrator.ts";
 import { MAX_GOAL_CHARS, type PlanOutcome } from "./planner.ts";
 import { RunStore } from "./run-store.ts";
 
 export type StartResult = { ok: true; runId: string } | { ok: false; error: string; issues?: GraphValidationIssue[] };
+
+/** What the chat-complete hook receives: the goal + per-node outputs
+ *  (labels from the run graph) in completion order. */
+export interface ChatRunResult {
+	runId: string;
+	goal: string;
+	nodes: OrchResultNode[];
+}
 
 /** The planner seam RunManager drives (PiPlanner in production, fakes in tests). */
 export interface Planner {
@@ -37,6 +52,10 @@ export interface RunManagerOptions {
 	/** Delta coalescing window (ms). Default 150. */
 	deltaIntervalMs?: number;
 	now?: () => number;
+	/** Fired ONCE when a chat-flagged planned run completes successfully
+	 *  (main.ts injects the compiled results into the session agent).
+	 *  Failed/aborted runs and planner failures never fire it. */
+	onChatRunComplete?: (result: ChatRunResult) => void;
 }
 
 export class RunManager {
@@ -46,6 +65,7 @@ export class RunManager {
 	private readonly store: RunStore | null;
 	private readonly deltaIntervalMs: number;
 	private readonly now: () => number;
+	private readonly onChatRunComplete: ((result: ChatRunResult) => void) | undefined;
 
 	private engine: OrchestratorEngine | null = null;
 	private planning = false;
@@ -68,6 +88,7 @@ export class RunManager {
 		this.store = options.store ?? null;
 		this.deltaIntervalMs = options.deltaIntervalMs ?? 150;
 		this.now = options.now ?? Date.now;
+		this.onChatRunComplete = options.onChatRunComplete;
 	}
 
 	get active(): boolean {
@@ -87,8 +108,10 @@ export class RunManager {
 	/**
 	 * Plan a goal into a graph, then execute it under the SAME runId — clients
 	 * see plan_started → plan_delta* → plan_completed → run_started → …
+	 * opts.chat marks a chat-first run: on completion the onChatRunComplete
+	 * hook fires with the compiled node outputs for session-agent injection.
 	 */
-	startPlanned(goal: string): StartResult {
+	startPlanned(goal: string, opts?: { chat?: boolean }): StartResult {
 		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
 		if (!this.planner) return { ok: false, error: "服务器未配置规划器" };
 		const planner = this.planner; // narrowed for the closures below
@@ -130,7 +153,7 @@ export class RunManager {
 				if (outcome.ok && validateGraph(outcome.graph).length === 0) {
 					this.publish({ type: "plan_completed", runId, graph: outcome.graph });
 					this.clearPlanning();
-					this.launchEngine(outcome.graph, runId); // run_started continues the same run
+					this.launchEngine(outcome.graph, runId, opts?.chat ? { goal: trimmed } : undefined); // run_started continues the same run
 					return;
 				}
 				const error = outcome.ok ? "规划器返回了无效的图" : outcome.error;
@@ -193,8 +216,9 @@ export class RunManager {
 		return runId;
 	}
 
-	/** Build + run the engine for a validated graph (shared by both paths). */
-	private launchEngine(graph: GraphDef, runId: string): void {
+	/** Build + run the engine for a validated graph (shared by both paths).
+	 *  `chat` requests the chat-complete hook for planned chat-first runs. */
+	private launchEngine(graph: GraphDef, runId: string, chat?: { goal: string }): void {
 		const engine = new OrchestratorEngine(graph, this.executor, {
 			runId,
 			maxParallel: this.maxParallel,
@@ -204,6 +228,13 @@ export class RunManager {
 		this.engine = engine;
 		void engine
 			.run()
+			.then((summary) => {
+				// Timing guarantees: run_finished was published synchronously
+				// INSIDE run() (clients flip the card to 完成 before injection
+				// begins), and .finally below runs AFTER this .then — engine
+				// bookkeeping is still set, so the runId can never be stale.
+				if (chat && summary.status === "completed") this.fireChatComplete(runId, chat.goal);
+			})
 			.catch((err: Error) => {
 				// The engine validates defensively; reaching here means a bug.
 				// Emit a synthetic terminal event so clients don't hang on "running".
@@ -232,6 +263,38 @@ export class RunManager {
 	private clearPlanning(): void {
 		this.planning = false;
 		this.plannerAbort = null;
+	}
+
+	/**
+	 * Compile the completed run's node outputs and hand them to the chat hook.
+	 * Retention still holds THIS run's events (cleared only when the next run
+	 * starts); node labels come from the run_started graph, outputs from
+	 * node_completed events in completion order.
+	 */
+	private fireChatComplete(runId: string, goal: string): void {
+		const runStarted = this.retained.find(
+			(e): e is Extract<RunEvent, { type: "run_started" }> => e.type === "run_started" && e.runId === runId,
+		);
+		const labelById = new Map<string, string>();
+		if (runStarted) {
+			for (const node of runStarted.graph.nodes) {
+				if (node.label) labelById.set(node.id, node.label);
+			}
+		}
+		const nodes: OrchResultNode[] = [];
+		for (const e of this.retained) {
+			if (e.type === "node_completed" && e.runId === runId) {
+				nodes.push({ nodeId: e.nodeId, label: labelById.get(e.nodeId), text: e.output.text });
+			}
+		}
+		if (nodes.length === 0) return;
+		// Hook failures must not poison the run lifecycle (a throw here would
+		// otherwise land in the .catch below and emit a bogus failed summary).
+		try {
+			this.onChatRunComplete?.({ runId, goal, nodes });
+		} catch (err) {
+			console.error("[run-manager] chat-complete hook threw:", err);
+		}
 	}
 
 	/** plan_failed + a terminal run_finished (planning counts as a run). */

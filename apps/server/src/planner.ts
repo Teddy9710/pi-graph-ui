@@ -99,7 +99,13 @@ export function extractGraph(text: string): PlanOutcome {
 		const out: Record<string, string> = {};
 		if (typeof r.id === "string") out.id = r.id.slice(0, 64);
 		if (typeof r.task === "string") out.task = r.task.slice(0, MAX_TASK_CHARS);
-		if (typeof r.label === "string" && r.label.trim()) out.label = r.label.slice(0, MAX_LABEL_CHARS);
+		// Label rides in prompt section headers downstream (buildSynthPrompt
+		// ### nodeId —— 标签) — normalize to one line like edge notes, so a
+		// hostile planner label can neither forge headers nor fail validation.
+		if (typeof r.label === "string") {
+			const rawLabel = r.label.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+			if (rawLabel) out.label = rawLabel.slice(0, MAX_LABEL_CHARS);
+		}
 		if (typeof r.model === "string" && r.model.trim()) out.model = r.model.slice(0, 128);
 		if (typeof r.agent === "string" && r.agent.trim()) out.agent = r.agent.slice(0, 64);
 		return out;

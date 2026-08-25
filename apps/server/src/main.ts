@@ -17,7 +17,10 @@
  *   {type: "command", command: RpcCommand}               - forwarded verbatim
  *   {type: "request", command: RpcCommand}               - forwarded, reply relayed
  *   {type: "run_graph", graph: GraphDef}                 - start an orchestration run
- *   {type: "plan_run", goal: string}                     - plan a goal into a graph, then run it
+ *   {type: "plan_run", goal: string, chat?: true}        - plan a goal into a graph, then run it;
+ *          chat: true = on completion the node outputs are compiled into one
+ *          prompt and injected into the MAIN session agent, whose streamed
+ *          reply lands in the chat panel
  *   {type: "abort_run"}                                  - abort the active run/planning
  *
  * HTTP:
@@ -33,7 +36,7 @@ import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { WebSocketServer, type WebSocket } from "ws";
-import { deriveGraph, foldEvent, initState, type GraphDef, type SessionState } from "@pi-graph/shared";
+import { buildSynthPrompt, deriveGraph, foldEvent, initState, type GraphDef, type SessionState } from "@pi-graph/shared";
 import { EventHub } from "./event-hub.ts";
 import { PiBridge } from "./pi-bridge.ts";
 import { PiNodeExecutor } from "./pi-node-executor.ts";
@@ -77,6 +80,21 @@ const runManager = new RunManager({
 	planner: new PiPlanner({ bin: PI_BIN, cwd: PI_CWD, model: ORCH_PLANNER_MODEL, timeoutMs: ORCH_PLAN_TIMEOUT_MS }),
 	maxParallel: ORCH_MAX_PARALLEL,
 	store: runStore,
+	// Chat-first runs: when the graph completes, compile the node outputs and
+	// inject them into the MAIN session agent (bridge declared above), which
+	// folds them with the conversation and streams the final answer back into
+	// the chat panel. Broadcast, archive and hello-replay all come free via
+	// bridge.on("event") below.
+	onChatRunComplete: ({ runId, goal, nodes }) => {
+		try {
+			bridge.send({ type: "prompt", message: buildSynthPrompt(goal, runId, nodes) });
+			console.log(`[chat] injected orchestration results for ${runId} (${nodes.length} nodes)`);
+		} catch (err) {
+			// pi died (send throws) — the chat shows the completed card but no
+			// integrated answer; the run lifecycle is unaffected.
+			console.error("[chat] failed to inject orchestration results:", err);
+		}
+	},
 });
 let session: SessionState = initState();
 
@@ -226,7 +244,7 @@ wss.on("connection", (ws) => {
 	});
 
 	ws.on("message", (data) => {
-		let msg: { type: string; command?: unknown; graph?: unknown; goal?: unknown };
+		let msg: { type: string; command?: unknown; graph?: unknown; goal?: unknown; chat?: unknown };
 		try {
 			msg = JSON.parse(String(data));
 		} catch {
@@ -276,7 +294,7 @@ wss.on("connection", (ws) => {
 			// non-string, huge) must not throw out of the handler.
 			try {
 				const goal = typeof msg.goal === "string" ? msg.goal : "";
-				const result = runManager.startPlanned(goal);
+				const result = runManager.startPlanned(goal, { chat: msg.chat === true });
 				if (!result.ok) {
 					ws.send(JSON.stringify({ type: "run_error", message: result.error }));
 				}

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RunManager, type Planner } from "../src/run-manager.ts";
+import { RunManager, type ChatRunResult, type Planner } from "../src/run-manager.ts";
 import { RunStore } from "../src/run-store.ts";
 import type { Executor, ExecutorCall, NodeResult } from "../src/orchestrator.ts";
 import type { PlanOutcome } from "../src/planner.ts";
@@ -432,6 +432,159 @@ describe("RunManager.startPlanned", () => {
 		expect(failed).toBeDefined();
 		expect(seen.some((e) => e.type === "run_started")).toBe(false);
 		expect(manager.active).toBe(false);
+	});
+});
+
+describe("RunManager chat hook (onChatRunComplete)", () => {
+	let dir: string;
+	let store: RunStore;
+
+	const labeledGraph: GraphDef = {
+		name: "chat-plan",
+		nodes: [
+			{ id: "n1", task: "查资料", label: "调研" },
+			{ id: "n2", task: "汇总", label: "汇总结论" },
+		],
+		edges: [{ id: "n1->n2", source: "n1", target: "n2" }],
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(tmpdir(), "runs-test-"));
+		store = new RunStore(dir);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("fires once on a completed chat run: trimmed goal, labeled nodes in completion order, after run_finished", async () => {
+		const planner = new FakePlanner();
+		const seen: RunEvent[] = [];
+		const results: ChatRunResult[] = [];
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => ok(`结果:${call.node.id}`)),
+			planner,
+			store,
+			onChatRunComplete: (result) => {
+				// Timing contract: the card already flipped 完成 (run_finished is
+				// the LAST broadcast) before the hook hands results to the caller.
+				const last = seen[seen.length - 1];
+				if (last?.type !== "run_finished") throw new Error("hook ran before run_finished broadcast");
+				results.push(result);
+			},
+		});
+		manager.subscribe((e) => seen.push(e));
+		manager.startPlanned("  调研并汇总  ", { chat: true });
+		await vi.advanceTimersByTimeAsync(0);
+		planner.settle({ ok: true, graph: labeledGraph });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(results).toHaveLength(1);
+		expect(results[0]!.goal).toBe("调研并汇总"); // trimmed
+		expect(results[0]!.nodes).toEqual([
+			{ nodeId: "n1", label: "调研", text: "结果:n1" },
+			{ nodeId: "n2", label: "汇总结论", text: "结果:n2" },
+		]);
+		expect(results[0]!.runId).toBe(seen.find((e) => e.type === "run_started")?.runId);
+		expect(manager.active).toBe(false);
+	});
+
+	it("never fires without the chat flag", async () => {
+		const planner = new FakePlanner();
+		const results: ChatRunResult[] = [];
+		const manager = new RunManager({
+			executor: fakeExecutor(async () => ok("x")),
+			planner,
+			store,
+			onChatRunComplete: (r) => results.push(r),
+		});
+		manager.startPlanned("目标");
+		await vi.advanceTimersByTimeAsync(0);
+		planner.settle({ ok: true, graph: labeledGraph });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(results).toHaveLength(0);
+	});
+
+	it("never fires on node failure, abort, or plan failure", async () => {
+		// node failure
+		{
+			const planner = new FakePlanner();
+			const results: ChatRunResult[] = [];
+			const manager = new RunManager({
+				executor: fakeExecutor(async () => ({ ok: false, text: "", error: "boom" })),
+				planner,
+				store,
+				onChatRunComplete: (r) => results.push(r),
+			});
+			manager.startPlanned("目标", { chat: true });
+			await vi.advanceTimersByTimeAsync(0);
+			planner.settle({ ok: true, graph: labeledGraph });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(results).toHaveLength(0);
+		}
+		// abort mid-run
+		{
+			const planner = new FakePlanner();
+			const results: ChatRunResult[] = [];
+			const manager = new RunManager({
+				executor: fakeExecutor(hangOnAbort),
+				planner,
+				store,
+				onChatRunComplete: (r) => results.push(r),
+			});
+			manager.startPlanned("目标", { chat: true });
+			await vi.advanceTimersByTimeAsync(0);
+			planner.settle({ ok: true, graph: labeledGraph });
+			await vi.advanceTimersByTimeAsync(0);
+			manager.abort();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(results).toHaveLength(0);
+		}
+		// plan failure
+		{
+			const planner = new FakePlanner();
+			const results: ChatRunResult[] = [];
+			const manager = new RunManager({
+				executor: fakeExecutor(async () => ok("x")),
+				planner,
+				store,
+				onChatRunComplete: (r) => results.push(r),
+			});
+			manager.startPlanned("目标", { chat: true });
+			await vi.advanceTimersByTimeAsync(0);
+			planner.settle({ ok: false, error: "解析失败" });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(results).toHaveLength(0);
+		}
+	});
+
+	it("a throwing hook does not wedge the manager or fake a failed summary", async () => {
+		const planner = new FakePlanner();
+		const seen: RunEvent[] = [];
+		const manager = new RunManager({
+			executor: fakeExecutor(async () => ok("x")),
+			planner,
+			store,
+			onChatRunComplete: () => {
+				throw new Error("bridge died");
+			},
+		});
+		manager.subscribe((e) => seen.push(e));
+		manager.startPlanned("目标", { chat: true });
+		await vi.advanceTimersByTimeAsync(0);
+		planner.settle({ ok: true, graph: labeledGraph });
+		await vi.advanceTimersByTimeAsync(0);
+		// Exactly one terminal event — the real completed one; the throw must
+		// not surface as a synthetic run_finished(failed).
+		const finished = seen.filter((e) => e.type === "run_finished");
+		expect(finished).toHaveLength(1);
+		expect(finished[0]!.type === "run_finished" ? finished[0]!.status : "").toBe("completed");
+		expect(manager.active).toBe(false);
+		// The next run proceeds normally.
+		const again = manager.startPlanned("再来", { chat: true });
+		expect(again.ok).toBe(true);
+		manager.abort();
+		await vi.advanceTimersByTimeAsync(0);
 	});
 });
 

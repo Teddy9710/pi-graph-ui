@@ -1,14 +1,17 @@
 /**
- * App shell: header (tabs + connection + usage) and two tabs — 实时 (live
- * trace: graph canvas, detail panel, prompt input) and 编排 (graph
- * orchestration editor). HistoryDrawer stays mounted at app level.
+ * App shell: header (tabs + connection + usage) and two tabs — 实时 (chat-first
+ * live page: conversation as the main area, node details + a mini live-trace
+ * graph in the side column) and 编排 (graph orchestration editor).
+ * HistoryDrawer stays mounted at app level.
  */
 
 import { useEffect, useState } from "react";
+import { ChatPanel } from "./ChatPanel.tsx";
 import { DetailPanel } from "./DetailPanel.tsx";
 import { GraphCanvas } from "./GraphCanvas.tsx";
 import { HistoryDrawer } from "./HistoryDrawer.tsx";
 import { OrchestratePage } from "./OrchestratePage.tsx";
+import { useOrchStore } from "./orch-store.ts";
 import { connect, useStore } from "./store.ts";
 import "./app.css";
 
@@ -78,15 +81,33 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 	);
 }
 
+/**
+ * Prompt input with the ⚡ auto-orchestration toggle.
+ *
+ * Decision matrix (deliberate, see PLAN.md M-C):
+ *  - ⚡ OFF → exactly the historical behavior (send / steer / abort).
+ *  - ⚡ ON  → Enter/「⚡ 编排」 sends the text as a plan_run goal (chat: true);
+ *    the orchestration card + the integrated answer land in the chat column.
+ *  - ⚡ ON while a SESSION run is active is allowed: the post-run injection
+ *    prompt queues behind the current turn (pi's own queue_update), so the
+ *    user can fire a goal without waiting for the session agent to settle.
+ *  - ⚡ ON while an ORCHESTRATION is busy → input disabled (single-run
+ *    server contract);「⏹ 中止编排」 aborts it.
+ */
 function PromptBar() {
 	const [text, setText] = useState("");
+	const [bolt, setBolt] = useState(false);
 	const session = useStore((s) => s.session);
 	const sendPrompt = useStore((s) => s.sendPrompt);
 	const steer = useStore((s) => s.steer);
 	const abort = useStore((s) => s.abort);
 	const newSession = useStore((s) => s.newSession);
 	const history = useStore((s) => s.history);
+	const run = useOrchStore((s) => s.run);
+	const planRun = useOrchStore((s) => s.planRun);
+	const abortRun = useOrchStore((s) => s.abortRun);
 	const running = session.agentStatus === "running";
+	const orchBusy = run.status === "running" || run.status === "planning";
 
 	if (history) {
 		return (
@@ -96,29 +117,65 @@ function PromptBar() {
 		);
 	}
 
+	const placeholder = bolt
+		? orchBusy
+			? "编排进行中… 可中止后重新发起"
+			: "描述一个目标，⚡ 自动拆图编排并执行…"
+		: running
+			? "运行中… 输入内容可插入转向指令 (steer)"
+			: "给 pi agent 发一个任务…";
+
+	const submit = () => {
+		const trimmed = text.trim();
+		if (!trimmed) return;
+		if (bolt) {
+			// Busy: keep the text — the guard is silent and the user typed
+			// something worth not losing (abort first, then re-send).
+			if (orchBusy) return;
+			planRun(trimmed, { chat: true });
+		} else if (running) {
+			steer(trimmed);
+		} else {
+			sendPrompt(trimmed);
+		}
+		setText("");
+	};
+
 	return (
 		<footer className="pg-input-bar">
-			{!running && (
+			<button
+				className={`pg-btn pg-btn-ghost${bolt ? " pg-bolt-on" : ""}`}
+				aria-pressed={bolt}
+				title={bolt ? "⚡ 开启中：发送的内容将作为编排目标" : "开启 ⚡ 自动编排：发送目标 → 自动拆图执行 → 结果整理回对话"}
+				onClick={() => setBolt((v) => !v)}
+			>
+				⚡
+			</button>
+			{!running && !bolt && (
 				<button className="pg-btn pg-btn-ghost" title="清空当前会话，开始全新任务（pi 上下文一并重置）" onClick={newSession}>
 					＋ 新任务
 				</button>
 			)}
 			<input
 				value={text}
-				placeholder={running ? "运行中… 输入内容可插入转向指令 (steer)" : "给 pi agent 发一个任务…"}
+				placeholder={placeholder}
 				onChange={(e) => setText(e.target.value)}
 				onKeyDown={(e) => {
 					// IME composition Enter (committing pinyin candidates, Safari
 					// reports it as key="Enter") must not submit the prompt.
 					if (e.nativeEvent.isComposing) return;
-					if (e.key === "Enter" && text.trim()) {
-						if (running) steer(text.trim());
-						else sendPrompt(text.trim());
-						setText("");
-					}
+					if (e.key === "Enter") submit();
 				}}
 			/>
-			{running ? (
+			{orchBusy && bolt ? (
+				<button className="pg-btn pg-btn-danger" onClick={abortRun}>
+					⏹ 中止编排
+				</button>
+			) : bolt ? (
+				<button className="pg-btn" disabled={!text.trim() || orchBusy} onClick={submit}>
+					⚡ 编排
+				</button>
+			) : running ? (
 				<button className="pg-btn pg-btn-danger" onClick={abort}>
 					abort
 				</button>
@@ -152,11 +209,28 @@ export default function App() {
 			) : (
 				<>
 					<div className="pg-main">
-						<div className="pg-canvas">
-							{/* History view replays a frozen graph; live view keeps streaming. */}
-							{history ? <GraphCanvas key="history" graphOverride={history.graph} /> : <GraphCanvas key="live" />}
+						{/* Chat is the PRIMARY surface (对话为主); history replay has no
+						    conversation to mirror, so the frozen graph takes the main area. */}
+						{history ? (
+							<div className="pg-canvas">
+								<GraphCanvas key="history" graphOverride={history.graph} />
+							</div>
+						) : (
+							<ChatPanel onOpenOrch={() => setTab("orch")} />
+						)}
+						{/* Side column: node details on top, live trace graph as a small
+						    block in the bottom-right corner (迷你实时图). */}
+						<div className="pg-side">
+							<DetailPanel />
+							{!history && (
+								<div className="pg-mini">
+									<div className="pg-mini-header">实时图</div>
+									<div className="pg-mini-canvas">
+										<GraphCanvas key="live" />
+									</div>
+								</div>
+							)}
 						</div>
-						<DetailPanel />
 					</div>
 					<PromptBar />
 				</>

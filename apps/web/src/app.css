@@ -451,3 +451,194 @@ textarea.pg-form-input {
 	opacity: 0.75;
 	white-space: nowrap;
 }
+
+/* ============================================================================
+ * Live page layout (对话为主): chat is the main column; the side column stacks
+ * node details (top) over a small live-trace graph (bottom-right corner).
+ * ========================================================================== */
+.pg-side {
+	width: 400px;
+	flex-shrink: 0;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	border-left: 1px solid var(--pg-border);
+	background: var(--pg-panel-bg);
+}
+
+/* DetailPanel fills the top of the side column (its own .pg-panel width is
+   for the old right-edge layout — override, and drop its border since the
+   column already draws one). */
+.pg-side .pg-panel {
+	width: auto;
+	flex: 1 1 55%;
+	border-left: none;
+	min-height: 0;
+}
+
+/* Mini live graph — the small bottom-right block. */
+.pg-mini {
+	flex: 1 1 45%;
+	min-height: 160px;
+	display: flex;
+	flex-direction: column;
+	border-top: 1px solid var(--pg-border);
+}
+
+.pg-mini-header {
+	padding: 6px 12px;
+	font-size: 11.5px;
+	text-transform: uppercase;
+	opacity: 0.6;
+}
+
+.pg-mini-canvas {
+	flex: 1;
+	min-height: 0;
+	position: relative;
+}
+
+.pg-chat {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	background: var(--pg-bg);
+}
+
+.pg-chat-header {
+	font-size: 11.5px;
+	text-transform: uppercase;
+	opacity: 0.6;
+	padding: 10px 12px 6px;
+}
+
+.pg-chat-list {
+	flex: 1;
+	overflow-y: auto;
+	padding: 6px 12px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.pg-chat-empty {
+	font-size: 12px;
+	margin-top: 16px;
+	line-height: 1.7;
+}
+
+.pg-chat-row {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 4px;
+}
+
+.pg-chat-row-assistant {
+	align-items: flex-start;
+}
+
+.pg-chat-bubble {
+	max-width: 92%;
+	background: #0e1013;
+	border: 1px solid var(--pg-border);
+	border-radius: 10px;
+	padding: 7px 10px;
+	font-size: 12.5px;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.pg-chat-bubble-user {
+	background: var(--pg-blue);
+	border-color: var(--pg-blue);
+	color: #fff;
+}
+
+.pg-chat-tools {
+	font-size: 11px;
+	opacity: 0.55;
+}
+
+/* streaming reply cursor */
+.pg-chat-cursor {
+	display: inline-block;
+	width: 7px;
+	height: 14px;
+	margin-left: 2px;
+	vertical-align: -2px;
+	background: var(--pg-green);
+	animation: pg-chat-blink 1s steps(2, start) infinite;
+}
+
+@keyframes pg-chat-blink {
+	to {
+		visibility: hidden;
+	}
+}
+
+/* orchestration exchange card (goal bubble + dashed status card) */
+.pg-chat-orch-card {
+	width: 92%;
+	border: 1px dashed var(--pg-border);
+	border-radius: 10px;
+	padding: 8px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	font-size: 12px;
+}
+
+.pg-chat-status {
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.pg-chat-status-planning {
+	color: #fbbf24;
+}
+
+.pg-chat-status-running {
+	color: var(--pg-blue);
+}
+
+.pg-chat-status-done {
+	color: var(--pg-green);
+}
+
+.pg-chat-status-failed {
+	color: var(--pg-red);
+}
+
+.pg-chat-chips {
+	display: flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+/* collapsed results-injection details */
+.pg-chat-injected {
+	font-size: 11.5px;
+	border-left: 2px solid var(--pg-border);
+	padding-left: 8px;
+}
+
+.pg-chat-injected summary {
+	cursor: pointer;
+	opacity: 0.75;
+	user-select: none;
+}
+
+.pg-chat-injected .pg-pre {
+	max-height: 240px;
+	font-size: 10.5px;
+}
+
+/* ⚡ toggle active state (prompt bar) */
+.pg-bolt-on {
+	color: var(--pg-blue);
+	border-color: var(--pg-blue);
+}

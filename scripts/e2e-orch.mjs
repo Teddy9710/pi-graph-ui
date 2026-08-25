@@ -16,9 +16,18 @@
  * into run_started with the generated graph, every generated node completes,
  * the archive keeps the plan events, and the planner bridge left no orphans.
  *
+ * CHAT=1 mode: chat-first orchestration - plan_run with chat:true. Runs the
+ * full PLAN-mode assertion set, then KEEPS the socket open: the server must
+ * inject the compiled node outputs into the main session agent as a
+ * sentinel-prefixed user message (line 2 JSON nodeCount === run_finished.ok),
+ * and the agent must stream a non-empty integrated answer afterwards
+ * (assistant message_end + agent_settled). Finally a fresh connection's hello
+ * must replay both the sentinel message and the run events.
+ *
  * Usage: node scripts/e2e-orch.mjs        (normal)
  *        ABORT=1 node scripts/e2e-orch.mjs
  *        PLAN=1  node scripts/e2e-orch.mjs
+ *        CHAT=1  node scripts/e2e-orch.mjs
  */
 
 import { execFileSync } from "node:child_process";
@@ -29,6 +38,7 @@ const URL = process.env.WS_URL ?? "ws://localhost:8787";
 const HTTP = URL.replace(/^ws/, "http");
 const ABORT = process.env.ABORT === "1";
 const PLAN = process.env.PLAN === "1";
+const CHAT = process.env.CHAT === "1";
 const GOAL =
 	process.env.PLAN_GOAL ??
 	"自动编排冒烟测试：请严格拆成三个串行依赖的任务——第一个任务只输出数字 7；第二个任务把上游数字加 1 后只输出结果；第三个任务再把这个数字加 1 后只输出结果。";
@@ -36,6 +46,8 @@ const GOAL =
 /** Mirrors shared EDGE_TYPES — deliberately LOCAL so a vocabulary change that
  *  forgets this contract shows up as an e2e failure, not a silent pass. */
 const VALID_TYPES = ["input", "context", "review", "revise", "aggregate", "decide"];
+/** Mirrors shared ORCH_RESULTS_SENTINEL (same reasoning as VALID_TYPES). */
+const SENTINEL = "[pi-graph:orch-results]";
 
 function fail(msg) {
 	console.error(`\nE2E FAILED: ${msg}`);
@@ -85,14 +97,52 @@ const graph = ABORT
 
 const events = [];
 const ws = await connect();
-const mode = PLAN ? "PLAN mode" : ABORT ? "ABORT mode" : "chain mode";
+const mode = CHAT ? "CHAT mode" : PLAN ? "PLAN mode" : ABORT ? "ABORT mode" : "chain mode";
 console.log(`connected to ${URL} (${mode})`);
 
-const timeout = setTimeout(() => fail("run did not finish in 240s"), 240_000);
+const timeout = setTimeout(() => fail("run did not finish in time"), CHAT ? 480_000 : 240_000);
 
 let aborted = false;
+// --- CHAT-mode session tracking -------------------------------------------
+// Only trust session events observed AFTER plan_run actually left the wire:
+// the hello snapshot replays this server's whole session history, so a
+// sentinel from an EARLIER chat run would otherwise satisfy the check
+// vacuously. (The snapshot itself is type "hello", never "event".)
+let planSent = false;
+let injectedNodeCount = null;
+let assistantTextAfterInjection = null;
+let settledAfterReply = false;
+let chatFin = null;
+
+function textOf(message) {
+	if (typeof message.content === "string") return message.content;
+	return (message.content ?? []).filter((b) => b && b.type === "text").map((b) => b.text).join("\n");
+}
+
 ws.onmessage = (msg) => {
 	const envelope = JSON.parse(String(msg.data));
+	// CHAT: watch the live session stream for the injection + integrated reply.
+	if (envelope.type === "event" && CHAT && planSent) {
+		const e = envelope.event ?? {};
+		if (e.type === "message_end" && e.message?.role === "user") {
+			// pi echoes prompts with BLOCK content — textOf normalizes both shapes.
+			const text = textOf(e.message);
+			if (text.startsWith(SENTINEL)) {
+				try {
+					injectedNodeCount = JSON.parse(text.split("\n")[1]).nodeCount;
+					console.log(`  [chat] results injected into session (${injectedNodeCount} nodes)`);
+				} catch {
+					fail("injected sentinel message has no parseable meta line");
+				}
+			}
+		}
+		if (e.type === "message_end" && e.message?.role === "assistant" && injectedNodeCount !== null) {
+			const text = textOf(e.message).trim();
+			if (text) assistantTextAfterInjection = text;
+		}
+		if (e.type === "agent_settled" && assistantTextAfterInjection !== null) settledAfterReply = true;
+		return;
+	}
 	if (envelope.type !== "run_event") return;
 	const e = envelope.event;
 	events.push(e);
@@ -111,14 +161,22 @@ ws.onmessage = (msg) => {
 	if (e.type === "node_skipped") console.log(`  [node] ${e.nodeId} skipped (${e.reason})`);
 	if (e.type === "run_finished") {
 		clearTimeout(timeout);
-		ws.close();
+		if (!CHAT) {
+			ws.close();
+			finish(e).catch((err) => fail(err.message));
+			return;
+		}
+		// CHAT: PLAN assertions first (same contract), socket STAYS open —
+		// the injection + integrated reply are still to come; chatWait polls.
+		chatFin = e;
 		finish(e).catch((err) => fail(err.message));
 	}
 };
 
-if (PLAN) {
-	ws.send(JSON.stringify({ type: "plan_run", goal: GOAL }));
-	console.log("plan_run sent");
+if (PLAN || CHAT) {
+	ws.send(JSON.stringify({ type: "plan_run", goal: GOAL, chat: CHAT }));
+	planSent = true;
+	console.log(`plan_run sent${CHAT ? " (chat: true)" : ""}`);
 } else {
 	ws.send(JSON.stringify({ type: "run_graph", graph }));
 	console.log("run_graph sent");
@@ -136,7 +194,7 @@ async function finish(fin) {
 	if (!types.includes("run_started")) fail("no run_started event");
 	if (byType("node_delta").length === 0) fail("no node_delta events streamed");
 
-	if (PLAN) {
+	if (PLAN || CHAT) {
 		if (fin.status !== "completed") fail(`expected status "completed", got "${fin.status}"`);
 		// Plan phase: streamed a draft and completed with a generated graph.
 		const planStarted = byType("plan_started")[0];
@@ -195,8 +253,14 @@ async function finish(fin) {
 		await new Promise((r) => setTimeout(r, 3000));
 		const leaked = countPiProcesses();
 		if (leaked > 0) fail(`${leaked} orphaned pi process(es) after plan run`);
-		console.log(`\nE2E OK (plan): ${gen.nodes.length} generated nodes ran to completion under one runId`);
-		process.exit(0);
+		console.log(`\n  [plan] ok: ${gen.nodes.length} generated nodes ran to completion under one runId`);
+		if (!CHAT) {
+			console.log("\nE2E OK (plan)");
+			process.exit(0);
+		}
+		// CHAT: the run part passed; the session-agent part is still pending.
+		chatWait();
+		return;
 	}
 
 	if (ABORT) {
@@ -254,5 +318,47 @@ async function finish(fin) {
 	console.log(`  [replay] hello carries ${hello.run.length} run events`);
 
 	console.log("\nE2E OK (chain): a→b injection, completion, archive, replay all verified");
+	process.exit(0);
+}
+
+/** CHAT tail: poll until injection + integrated reply + settle, then assert. */
+function chatWait() {
+	const chatTimer = setTimeout(() => fail("chat injection / integrated reply did not arrive in 240s"), 240_000);
+	chatTimer.unref?.();
+	const poll = setInterval(() => {
+		if (injectedNodeCount === null || assistantTextAfterInjection === null || !settledAfterReply) return;
+		clearInterval(poll);
+		clearTimeout(chatTimer);
+		chatAssertions().catch((err) => fail(err.message));
+	}, 400);
+}
+
+async function chatAssertions() {
+	// (a) the injected sentinel carries the FULL set of completed nodes.
+	if (injectedNodeCount !== chatFin.ok) {
+		fail(`injected meta nodeCount=${injectedNodeCount} but run_finished.ok=${chatFin.ok}`);
+	}
+	// (b) the session agent produced a non-empty integrated answer.
+	if (!assistantTextAfterInjection) fail("no assistant text after injection");
+	console.log(`  [chat] integrated reply: ${assistantTextAfterInjection.slice(0, 60)}…`);
+	// Refresh replay: a fresh connection's hello carries BOTH the sentinel
+	// message (snapshot) and the retained run events.
+	const ws2 = await connect();
+	const hello = await new Promise((resolve) => {
+		ws2.onmessage = (msg) => {
+			const envelope = JSON.parse(String(msg.data));
+			if (envelope.type === "hello") resolve(envelope);
+		};
+	});
+	ws2.close();
+	const snapHasSentinel = (hello.snapshot ?? []).some(
+		(ev) => ev.type === "message_end" && ev.message?.role === "user" && textOf(ev.message).startsWith(SENTINEL),
+	);
+	if (!snapHasSentinel) fail("hello snapshot does not replay the injected sentinel message");
+	if (!Array.isArray(hello.run) || hello.run.length !== events.length) {
+		fail(`hello replay has ${hello.run?.length} run events, expected ${events.length}`);
+	}
+	console.log(`  [replay] hello carries sentinel + ${hello.run.length} run events`);
+	console.log(`\nE2E OK (chat): injection (${injectedNodeCount} nodes) + integrated reply + replay verified`);
 	process.exit(0);
 }

@@ -78,8 +78,10 @@ interface OrchState {
 	/** Client-side validateGraph gate: issues → never sent. */
 	runGraph: () => void;
 	abortRun: () => void;
-	/** Auto-orchestrate: send the goal, the server plans then runs (plan_run). */
-	planRun: (goal: string) => void;
+	/** Auto-orchestrate: send the goal, the server plans then runs (plan_run).
+	 *  opts.chat = on completion the server injects the compiled node outputs
+	 *  into the main session agent (chat-first orchestration). */
+	planRun: (goal: string, opts?: { chat?: boolean }) => void;
 	setView: (view: "editor" | "run") => void;
 	/** Copy the generated/executed run graph into the editor for hand-tuning. */
 	importGraphFromRun: () => void;
@@ -301,7 +303,7 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 
 	abortRun: () => sendWs({ type: "abort_run" }),
 
-	planRun: (goal) => {
+	planRun: (goal, opts) => {
 		const s = get();
 		if (s.run.status === "running" || s.run.status === "planning") return;
 		const trimmed = goal.trim();
@@ -310,7 +312,7 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		lastPlanSentAt = Date.now();
 		set({ orchError: null });
 		// plan_started echoes back and flips the view to "run".
-		sendWs({ type: "plan_run", goal: trimmed });
+		sendWs({ type: "plan_run", goal: trimmed, chat: opts?.chat === true });
 	},
 
 	setView: (view) => set({ view }),
