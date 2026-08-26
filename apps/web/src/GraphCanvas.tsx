@@ -24,7 +24,12 @@ import { nodeTypes } from "./nodes.tsx";
 import { useStore } from "./store.ts";
 import type { Graph } from "@pi-graph/shared";
 
-function Canvas({ graphOverride }: { graphOverride?: Graph }) {
+/**
+ * @param graphOverride render an archived graph instead of the live one
+ * @param compact strip Controls + MiniMap (the 400px side-column 实时图 IS a
+ *        minimap already — stacking RF chrome inside it just eats canvas)
+ */
+function Canvas({ graphOverride, compact = false }: { graphOverride?: Graph; compact?: boolean }) {
 	const liveGraph = useStore((s) => s.graph);
 	const graph = graphOverride ?? liveGraph;
 	const select = useStore((s) => s.select);
@@ -52,7 +57,7 @@ function Canvas({ graphOverride }: { graphOverride?: Graph }) {
 				const running = target?.data.status === "running";
 				// Arrowheads bake their color into an inline style, so they
 				// must be given the same per-kind color as the CSS stroke.
-				const color = running ? "#3b82f6" : e.kind === "spawn" ? "#7ba4e0" : "#9aa3b5";
+				const color = running ? "#5b9bf8" : e.kind === "spawn" ? "#7ba4e0" : "#8b93a5";
 				return {
 					id: e.id,
 					source: e.source,
@@ -92,21 +97,22 @@ function Canvas({ graphOverride }: { graphOverride?: Graph }) {
 			onNodeClick={onNodeClick}
 			onPaneClick={() => select(null)}
 			nodesDraggable={false}
+			colorMode="dark"
 			fitView
 			minZoom={0.15}
 			maxZoom={2}
 		>
-			<Background gap={22} />
-			<Controls showInteractive={false} />
-			<MiniMap pannable zoomable nodeStrokeWidth={2} />
+			<Background gap={22} color="rgba(255 255 255 / 0.07)" />
+			{!compact && <Controls showInteractive={false} />}
+			{!compact && <MiniMap pannable zoomable nodeStrokeWidth={2} />}
 		</ReactFlow>
 	);
 }
 
-export function GraphCanvas({ graphOverride }: { graphOverride?: Graph }) {
+export function GraphCanvas({ graphOverride, compact }: { graphOverride?: Graph; compact?: boolean }) {
 	return (
 		<ReactFlowProvider>
-			<Canvas graphOverride={graphOverride} />
+			<Canvas graphOverride={graphOverride} compact={compact} />
 		</ReactFlowProvider>
 	);
 }

@@ -2,10 +2,13 @@
  * App shell: header (tabs + connection + usage) and two tabs — 实时 (chat-first
  * live page: conversation as the main area, a mini live-trace graph in the side
  * column; node details appear on demand above it while a node is selected) and
- * 编排 (graph orchestration editor). HistoryDrawer stays mounted at app level.
+ * 编排 (graph orchestration editor). Every pane boundary is user-resizable
+ * (react-resizable-panels, layout remembered in localStorage). HistoryDrawer
+ * stays mounted at app level.
  */
 
 import { useEffect, useState } from "react";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { ChatPanel } from "./ChatPanel.tsx";
 import { DetailPanel } from "./DetailPanel.tsx";
 import { GraphCanvas } from "./GraphCanvas.tsx";
@@ -40,7 +43,7 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 					: "● disconnected";
 	return (
 		<header className="pg-header">
-			<b>pi-graph</b>
+			<b className="pg-logo">pi-graph</b>
 			<button className={`pg-tab${tab === "live" ? " active" : ""}`} onClick={() => setTab("live")}>
 				实时
 			</button>
@@ -63,7 +66,7 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 					<span className="pg-dim">
 						{session.agentStatus === "running" ? "agent running…" : "agent idle"}
 					</span>
-					<span className="pg-dim">
+					<span className="pg-dim pg-usage">
 						↑{formatTokens(session.usageTotal.input)} ↓{formatTokens(session.usageTotal.output)} tok
 					</span>
 				</>
@@ -144,7 +147,7 @@ function PromptBar() {
 	return (
 		<footer className="pg-input-bar">
 			<button
-				className={`pg-btn pg-btn-ghost${bolt ? " pg-bolt-on" : ""}`}
+				className={`pg-btn pg-btn-ghost pg-bolt${bolt ? " pg-bolt-on" : ""}`}
 				aria-pressed={bolt}
 				title={bolt ? "⚡ 开启中：发送的内容将作为编排目标" : "开启 ⚡ 自动编排：发送目标 → 自动拆图执行 → 结果整理回对话"}
 				onClick={() => setBolt((v) => !v)}
@@ -195,24 +198,38 @@ function PromptBar() {
 	);
 }
 
-export default function App() {
-	useEffect(() => {
-		connect();
-	}, []);
+/** Mini live-trace graph (迷你实时图) — bottom of the side column. */
+function MiniGraph() {
+	return (
+		<div className="pg-mini">
+			<div className="pg-mini-header">实时图</div>
+			<div className="pg-mini-canvas">
+				<GraphCanvas key="live" compact />
+			</div>
+		</div>
+	);
+}
+
+/**
+ * 实时 tab: chat is the PRIMARY surface in the main pane (history replay puts
+ * the frozen graph there instead); the side column holds node details (on
+ * demand) over the mini graph. The main/side split and the detail/mini split
+ * are both drag-resizable, with layouts remembered across reloads.
+ */
+function LivePage({ setTab }: { setTab: (t: Tab) => void }) {
 	const history = useStore((s) => s.history);
 	const selectedNodeId = useStore((s) => s.selectedNodeId);
 	const select = useStore((s) => s.select);
-	const [tab, setTab] = useState<Tab>("live");
+	// panelIds: "side" conditionally unmounts (history replay, no selection) —
+	// without this the resulting 1-panel commit would overwrite the saved
+	// main+side split; with it, layouts persist per panel-set under separate keys
+	const mainLayout = useDefaultLayout({ id: "pg-live-main", panelIds: ["main", "side"], storage: localStorage });
+	const sideLayout = useDefaultLayout({ id: "pg-live-side", storage: localStorage });
 	return (
-		<div className="pg-app">
-			<Header tab={tab} setTab={setTab} />
-			{tab === "orch" ? (
-				<OrchestratePage />
-			) : (
-				<>
-					<div className="pg-main">
-						{/* Chat is the PRIMARY surface (对话为主); history replay has no
-						    conversation to mirror, so the frozen graph takes the main area. */}
+		<>
+			<div className="pg-main">
+				<Group orientation="horizontal" className="pg-pgroup" {...mainLayout}>
+					<Panel id="main" className="pg-fill" defaultSize="62" minSize={360}>
 						{history ? (
 							<div className="pg-canvas">
 								<GraphCanvas key="history" graphOverride={history.graph} />
@@ -220,28 +237,50 @@ export default function App() {
 						) : (
 							<ChatPanel onOpenOrch={() => setTab("orch")} />
 						)}
-						{/* Side column: the mini live-trace graph (迷你实时图) fills it by
-						    default; node details mount ON DEMAND above the graph while a
-						    node is selected (再点节点或 × 关闭). History replay has no mini
-						    graph, so the column only exists while a node is selected —
-						    the frozen graph gets the full width otherwise. */}
-						{(!history || selectedNodeId) && (
-							<div className="pg-side">
-								{selectedNodeId && <DetailPanel onClose={() => select(null)} />}
-								{!history && (
-									<div className="pg-mini">
-										<div className="pg-mini-header">实时图</div>
-										<div className="pg-mini-canvas">
-											<GraphCanvas key="live" />
-										</div>
-									</div>
+					</Panel>
+					{/* Side column: the mini graph fills it by default; node details
+					    mount ON DEMAND above the graph while a node is selected (再点
+					    节点或 × 关闭). History replay has no mini graph, so the column
+					    only exists while a node is selected — the frozen graph gets the
+					    full width otherwise. */}
+					{(!history || selectedNodeId) && (
+						<>
+							<Separator className="pg-rh pg-rh-col" />
+							<Panel id="side" className="pg-fill pg-side" defaultSize="38" minSize={280}>
+								{selectedNodeId && !history ? (
+									<Group orientation="vertical" className="pg-pgroup" {...sideLayout}>
+										<Panel id="detail" className="pg-fill" defaultSize="55" minSize={120}>
+											<DetailPanel onClose={() => select(null)} />
+										</Panel>
+										<Separator className="pg-rh pg-rh-row" />
+										<Panel id="mini" className="pg-fill" defaultSize="45" minSize={160}>
+											<MiniGraph />
+										</Panel>
+									</Group>
+								) : selectedNodeId ? (
+									<DetailPanel onClose={() => select(null)} />
+								) : (
+									<MiniGraph />
 								)}
-							</div>
-						)}
-					</div>
-					<PromptBar />
-				</>
-			)}
+							</Panel>
+						</>
+					)}
+				</Group>
+			</div>
+			<PromptBar />
+		</>
+	);
+}
+
+export default function App() {
+	useEffect(() => {
+		connect();
+	}, []);
+	const [tab, setTab] = useState<Tab>("live");
+	return (
+		<div className="pg-app">
+			<Header tab={tab} setTab={setTab} />
+			{tab === "orch" ? <OrchestratePage /> : <LivePage setTab={setTab} />}
 			<HistoryDrawer />
 		</div>
 	);

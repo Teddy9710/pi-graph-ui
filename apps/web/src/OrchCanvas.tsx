@@ -53,19 +53,19 @@ function edgeStyle(e: EdgeDef, opts: { selected?: boolean } = {}): Edge {
 			? `${text.slice(0, EDGE_LABEL_DISPLAY_CHARS)}…`
 			: text,
 		labelStyle: { fill: "#8b93a5", fontSize: 11 },
-		labelBgStyle: { fill: "#16181d" },
+		labelBgStyle: { fill: "#0e1014" },
 		labelBgPadding: [6, 3] as [number, number],
 		labelBgBorderRadius: 4,
 		// No RF edge-selection (its default gray selected stroke fights our
 		// colors — same reasoning as GraphCanvas); click handlers + our own
 		// selected stroke drive the editor's edge selection instead.
 		selectable: false,
-		style: selected ? { stroke: "#3b82f6", strokeWidth: 2 } : undefined,
+		style: selected ? { stroke: "#5b9bf8", strokeWidth: 2 } : undefined,
 		markerEnd: {
 			type: MarkerType.ArrowClosed,
 			width: 16,
 			height: 16,
-			color: selected ? "#3b82f6" : "#9aa3b5",
+			color: selected ? "#5b9bf8" : "#8b93a5",
 		},
 	};
 }
@@ -160,12 +160,13 @@ function Canvas() {
 			deleteKeyCode={["Backspace", "Delete"]}
 			nodesDraggable={!running}
 			nodesConnectable={!running}
+			colorMode="dark"
 			// fitView only fires on init — no refitting while the user edits.
 			fitView
 			minZoom={0.15}
 			maxZoom={2}
 		>
-			<Background gap={22} />
+			<Background gap={22} color="rgba(255 255 255 / 0.07)" />
 			<Controls showInteractive={false} />
 			<MiniMap pannable zoomable nodeStrokeWidth={2} />
 		</ReactFlow>
@@ -232,11 +233,12 @@ function RunCanvas() {
 			nodesDraggable={false}
 			nodesConnectable={false}
 			deleteKeyCode={null}
+			colorMode="dark"
 			fitView
 			minZoom={0.15}
 			maxZoom={2}
 		>
-			<Background gap={22} />
+			<Background gap={22} color="rgba(255 255 255 / 0.07)" />
 			<Controls showInteractive={false} />
 			<MiniMap pannable zoomable nodeStrokeWidth={2} />
 		</ReactFlow>

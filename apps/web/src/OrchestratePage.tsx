@@ -10,6 +10,7 @@
  */
 
 import { useState } from "react";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { TEMPLATES } from "@pi-graph/shared";
 import { OrchCanvas } from "./OrchCanvas.tsx";
 import { OrchNodePanel } from "./OrchNodePanel.tsx";
@@ -183,15 +184,24 @@ function OrchRunBar() {
 }
 
 export function OrchestratePage() {
+	const layout = useDefaultLayout({ id: "pg-orch-main", storage: localStorage });
 	return (
 		<div className="pg-app pg-orch-page">
 			<PlanBar />
 			<OrchRunBar />
 			<div className="pg-main">
-				<div className="pg-canvas">
-					<OrchCanvas />
-				</div>
-				<OrchNodePanel />
+				{/* canvas | node-inspector split is drag-resizable, remembered in localStorage */}
+				<Group orientation="horizontal" className="pg-pgroup" {...layout}>
+					<Panel id="canvas" className="pg-fill" defaultSize="72" minSize={360}>
+						<div className="pg-canvas">
+							<OrchCanvas />
+						</div>
+					</Panel>
+					<Separator className="pg-rh pg-rh-col" />
+					<Panel id="inspector" className="pg-fill" defaultSize="28" minSize={300}>
+						<OrchNodePanel />
+					</Panel>
+				</Group>
 			</div>
 		</div>
 	);

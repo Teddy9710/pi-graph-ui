@@ -112,6 +112,8 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
    - web：**对话为主布局**（聊天占主区；右侧栏=迷你实时图占满整列，节点详情**按需**出现于其上方——点节点弹出、再点/× 关闭；历史回放未选中时整列隐藏、冻结图占满全宽）；`ChatPanel`（气泡 + 工具调用计数 + 注入卡 `<details>` 折叠 + 编排卡片：状态/进度 chips/plan 尾部预览/「查看编排」跳转；尾部跟随滚动，上滚 >40px 停止）；PromptBar ⚡ 开关（aria-pressed；⚡ON=plan_run chat:true，会话运行中允许排队；IME Enter 守卫保留；编排忙时静默保留输入不吞字）
    - e2e：`CHAT=1` 模式——PLAN 全套断言 + socket 保持打开，断言 sentinel 注入消息（第 2 行 nodeCount === run_finished.ok）、其后非空 assistant 回复 + agent_settled、新连接 hello 同时重放 sentinel 与 run 事件
    - 评审修复（对抗性评审后）：节点 label 与边备注同防 `###` 分节头伪造（validateGraph 拒绝换行/控制字符 + planner extractGraph 归一 + buildSynthPrompt safeLabel 三层兜底）；ChatPanel 订阅 session 对象而非 messages 数组（store 浅拷贝但数组引用不变，数组选择器会漏 message_end 追加）
+12. **M-V 视觉打磨（2026-08-26）**：app.css/nodes.css 整体重写为暗色设计系统——四级海拔（bg/panel/node/well）+ 低透明白描边 + 语义色 token；React Flow `colorMode="dark"` + `--xy-*` 非 default 变量接管 controls/minimap（点阵改 `<Background color>` 内联）；节点卡渐变+选中蓝环、状态色边框、handle 悬停光环（**无 transform**——RF 用 translate 定位 handle，transform 会顶掉定位）；聊天气泡方向角、抽屉滑入、细滚动条、统一 focus 语言；编排双 bar 控件统一 30px 高。对抗校验（3 视角）后修复：handle transform 回归、hover 边框被状态类覆盖（0,2,1 提权）、死 CSS 清理（-default 变量/.pg-dim 双定义/orphan 覆盖）、select 焦点环、pg-ws-reconnecting 琥珀色、聊天注入卡与面板折叠箭头统一 ▸。
+13. **M-R 可拖拽分栏（2026-08-26）**：三处死宽度全部改为用户可拖——`react-resizable-panels` v4（新 API `Group/Panel/Separator`，className 落在 Panel 内层 div；Separator 内联 `flexBasis:"auto"`，厚度用 width/height；状态经 `data-separator="hover|active|focus"` 属性暴露）：实时页 聊天|侧栏（水平）+ 详情|实时图（垂直嵌套，仅两者并存时），编排页 画布|节点面板；`useDefaultLayout`（localStorage）记住比例，双击分隔条重置，方向键键盘可调；px 单位 minSize（聊天≥360、侧栏≥280、详情≥120、实时图≥160、画布≥360、检查器≥300）。npm 侧：项目级 `.npmrc` 显式代理 `192.168.1.9:16780`（用户级配的死代理被压掉）；`.gitignore` 挡住 `.npmrc` 与 apps/server 根下全部个人调研文档/脚本（README.md/snake.html 已跟踪者用否定模式保留）。
 
 
 ## 风险与对策

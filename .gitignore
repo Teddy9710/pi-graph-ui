@@ -2,3 +2,16 @@ node_modules/
 dist/
 .pi/
 .env
+
+# 本机代理配置（含局域网 IP，机器相关，不入库）
+.npmrc
+
+# apps/server 根下的个人调研文档/生成脚本——本机私有，绝不 push
+# （README.md 已被跟踪不受影响；新的正式文档如需入库用 git add -f）
+apps/server/*.md
+!apps/server/README.md
+apps/server/*.py
+apps/server/*.docx
+apps/server/*.html
+!apps/server/snake.html
+apps/server/docs/
