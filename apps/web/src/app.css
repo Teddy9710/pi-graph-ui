@@ -476,6 +476,11 @@ textarea.pg-form-input {
 	min-height: 0;
 }
 
+/* × in the on-demand detail header (base button look: .pg-drawer-close). */
+.pg-panel-close {
+	margin-left: auto;
+}
+
 /* Mini live graph — the small bottom-right block. */
 .pg-mini {
 	flex: 1 1 45%;

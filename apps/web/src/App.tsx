@@ -1,8 +1,8 @@
 /**
  * App shell: header (tabs + connection + usage) and two tabs — 实时 (chat-first
- * live page: conversation as the main area, node details + a mini live-trace
- * graph in the side column) and 编排 (graph orchestration editor).
- * HistoryDrawer stays mounted at app level.
+ * live page: conversation as the main area, a mini live-trace graph in the side
+ * column; node details appear on demand above it while a node is selected) and
+ * 编排 (graph orchestration editor). HistoryDrawer stays mounted at app level.
  */
 
 import { useEffect, useState } from "react";
@@ -200,6 +200,8 @@ export default function App() {
 		connect();
 	}, []);
 	const history = useStore((s) => s.history);
+	const selectedNodeId = useStore((s) => s.selectedNodeId);
+	const select = useStore((s) => s.select);
 	const [tab, setTab] = useState<Tab>("live");
 	return (
 		<div className="pg-app">
@@ -218,19 +220,24 @@ export default function App() {
 						) : (
 							<ChatPanel onOpenOrch={() => setTab("orch")} />
 						)}
-						{/* Side column: node details on top, live trace graph as a small
-						    block in the bottom-right corner (迷你实时图). */}
-						<div className="pg-side">
-							<DetailPanel />
-							{!history && (
-								<div className="pg-mini">
-									<div className="pg-mini-header">实时图</div>
-									<div className="pg-mini-canvas">
-										<GraphCanvas key="live" />
+						{/* Side column: the mini live-trace graph (迷你实时图) fills it by
+						    default; node details mount ON DEMAND above the graph while a
+						    node is selected (再点节点或 × 关闭). History replay has no mini
+						    graph, so the column only exists while a node is selected —
+						    the frozen graph gets the full width otherwise. */}
+						{(!history || selectedNodeId) && (
+							<div className="pg-side">
+								{selectedNodeId && <DetailPanel onClose={() => select(null)} />}
+								{!history && (
+									<div className="pg-mini">
+										<div className="pg-mini-header">实时图</div>
+										<div className="pg-mini-canvas">
+											<GraphCanvas key="live" />
+										</div>
 									</div>
-								</div>
-							)}
-						</div>
+								)}
+							</div>
+						)}
 					</div>
 					<PromptBar />
 				</>

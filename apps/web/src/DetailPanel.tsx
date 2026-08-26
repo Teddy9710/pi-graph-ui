@@ -1,6 +1,8 @@
 /**
- * Right-side detail panel: renders the selected node's payload - full
- * message text / tool args+result / subagent task+summary+usage.
+ * On-demand detail panel: renders the selected node's payload - full
+ * message text / tool args+result / subagent task+summary+usage. App only
+ * mounts it while a node is selected (no permanent placeholder); onClose
+ * (×) clears the selection.
  */
 
 import type {
@@ -110,7 +112,7 @@ function AgentDetail({ result }: { result: SubagentSingleResult }) {
 	);
 }
 
-export function DetailPanel() {
+export function DetailPanel({ onClose }: { onClose?: () => void }) {
 	// Resolve node ids against whatever graph the canvas is showing —
 	// in history mode that's the archived graph, not the live one.
 	const graph = useStore((s) => (s.history ? s.history.graph : s.graph));
@@ -128,6 +130,11 @@ export function DetailPanel() {
 				<span className={`pg-dot pg-dot-${data.status}`} />
 				<b>{data.kind}</b>
 				<code className="pg-dim">{node.id}</code>
+				{onClose && (
+					<button className="pg-drawer-close pg-panel-close" title="关闭详情" aria-label="关闭详情" onClick={onClose}>
+						×
+					</button>
+				)}
 			</header>
 			{data.kind === "session" && (
 				<pre className="pg-pre">{JSON.stringify(data.detail, null, 2)}</pre>
