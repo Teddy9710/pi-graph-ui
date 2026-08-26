@@ -47,6 +47,8 @@ interface AppState {
 	history: { meta: SessionMeta; graph: Graph; loading: boolean } | null;
 	historyOpen: boolean;
 	sessions: SessionMeta[];
+	/** Last sessions fetch failed (server down / blocked) — the drawer says so. */
+	sessionsError: boolean;
 	sendPrompt: (message: string) => void;
 	steer: (message: string) => void;
 	abort: () => void;
@@ -95,6 +97,7 @@ export const useStore = create<AppState>((set, get) => ({
 	history: null,
 	historyOpen: false,
 	sessions: [],
+	sessionsError: false,
 
 	sendPrompt: (message) => send({ type: "command", command: { type: "prompt", message } }),
 	steer: (message) => send({ type: "command", command: { type: "steer", message } }),
@@ -105,10 +108,13 @@ export const useStore = create<AppState>((set, get) => ({
 		set({ historyOpen: true });
 		try {
 			const res = await fetch(`${API_BASE}/api/sessions`);
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const sessions: SessionMeta[] = await res.json();
-			set({ sessions });
+			set({ sessions, sessionsError: false });
 		} catch {
-			set({ sessions: [] });
+			// Server down or the response was blocked (e.g. CORS) — say so
+			// instead of masquerading as 「暂无存档」.
+			set({ sessions: [], sessionsError: true });
 		}
 	},
 	loadHistory: async (id) => {
@@ -146,7 +152,7 @@ export const useStore = create<AppState>((set, get) => ({
 				selectedNodeId: null,
 			});
 		} catch {
-			if (req === historyReq) set({ history: null });
+			if (req === historyReq) set({ history: null, sessionsError: true });
 		}
 	},
 	exitHistory: () => {

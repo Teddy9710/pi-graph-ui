@@ -37,11 +37,11 @@ node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1�
 
 | 编号 | P | 类型 | 前置 | 步骤 | 预期 | 代码 |
 |---|---|---|---|---|---|---|
-| LAY-01 | P0 | 手测 | 已连接，非历史回放 | 打开实时页观察主区 | ①主区左列为聊天面板（`.pg-chat` flex:1 占满剩余宽度）；②右列 `.pg-side` 固定 400px 不可压缩（flex-shrink:0），纵向排列带左分隔线；③右列上半为节点详情（`.pg-side .pg-panel` 覆盖为 width:auto、flex:1 1 55%、去左边框）；④右列下半为迷你实时图块 | App.tsx:211-233, app.css:459-477, app.css:501-508 |
-| LAY-02 | P0 | 手测 | 实时页非回放 | 观察右下迷你图块；逐步压缩窗口高度 | ①`.pg-mini` flex:1 1 45% 且 **min-height:160px**——窗口再矮迷你图也不被压没；②顶部有「实时图」小标题（大写样式）；③画布容器 flex:1+min-height:0，ReactFlow 填满剩余高度；④与上方详情间有 1px 分隔线 | App.tsx:226-231, app.css:480-499 |
-| LAY-03 | P0 | 手测 | 迷你图已有节点 | 点击迷你图中一个节点，观察右上详情 | ①节点进入选中态；②右上 DetailPanel 显示该节点状态圆点、kind 与 node id；③按 kind 渲染详情（session/agent-tool→JSON、user/assistant→消息体、tool→args/result、agent→子代理结果）；④selectedNodeId 为全局 store，详情即时联动 | GraphCanvas.tsx:83-85, DetailPanel.tsx:119-148 |
-| LAY-04 | P1 | 手测 | 迷你图有选中节点 | 再次点击同一节点 | 取消选中（select(null)），详情回落占位文案「点击节点查看详情」 | GraphCanvas.tsx:84, DetailPanel.tsx:120-121 |
-| LAY-05 | P1 | 手测 | 迷你图有选中节点 | 点击画布空白处 | selectedNodeId 置 null，详情回到占位文案 | GraphCanvas.tsx:93 |
+| LAY-01 | P0 | 手测 | 已连接，非历史回放 | 打开实时页观察主区 | ①主区左列为聊天面板（`.pg-chat` flex:1 占满剩余宽度）；②右列 `.pg-side` 固定 400px 不可压缩（flex-shrink:0），纵向排列带左分隔线；③**默认整列为迷你实时图**（节点详情不常驻、无占位文案）；④点击节点后右列上方**按需**出现详情面板（`.pg-side .pg-panel` 覆盖 width:auto、flex:1 1 55%），迷你图压至 45%；再点节点或 × 关闭后恢复 | App.tsx 实时页布局, app.css:459-510 |
+| LAY-02 | P0 | 手测 | 实时页非回放 | 观察右列迷你图；逐步压缩窗口高度 | ①`.pg-mini` 为右列唯一子项时占满整列高度；与详情并存时 55/45 分配且 **min-height:160px**——窗口再矮也不被压没；②顶部有「实时图」小标题（大写样式）；③画布容器 flex:1+min-height:0，ReactFlow 填满剩余高度；④详情挂载时与迷你图间有 1px 分隔线 | App.tsx 实时页布局, app.css:480-503 |
+| LAY-03 | P0 | 手测 | 未选中任何节点，迷你图已有节点 | 点击迷你图节点观察右列；点面板 ×；再点该节点 | ①点击前右列无详情面板（仅迷你图）；②点击后详情面板按需挂载于迷你图上方：状态圆点、kind、node id 与右上 × 按钮；③按 kind 渲染详情（session/agent-tool→JSON、user/assistant→消息体、tool→args/result、agent→子代理结果）；④× 或再点节点→select(null)→面板卸载、迷你图恢复整列；⑤selectedNodeId 全局联动 | App.tsx 实时页布局, GraphCanvas.tsx:83-85, DetailPanel.tsx |
+| LAY-04 | P1 | 手测 | 迷你图有选中节点 | 再次点击同一节点 | 取消选中（select(null)），**详情面板卸载**（不显示占位文案），迷你图恢复整列 | GraphCanvas.tsx:84 |
+| LAY-05 | P1 | 手测 | 迷你图有选中节点 | 点击画布空白处 | selectedNodeId 置 null，详情面板卸载、迷你图恢复整列 | GraphCanvas.tsx:93 |
 | LAY-06 | P1 | 契约 | 会话流式运行中 | 发送触发多节点的任务，观察迷你图视口 | ①节点数变化触发 fitView（对比 lastCount）；②fitView 延迟 50ms、动画 300ms、padding 0.15；③节点数不变（仅状态更新）时视口不重置 | GraphCanvas.tsx:73-81 |
 | LAY-07 | P2 | 手测 | 迷你图已渲染 | 迷你图内滚轮缩放、拖节点、操作小地图 | ①缩放范围 0.15–2；②MiniMap 可拖可缩放；③节点拖拽禁用（nodesDraggable=false）、边不可选中 | GraphCanvas.tsx:94-101 |
 | LAY-08 | P2 | 手测 | 有 spawn 边与运行中节点 | 观察边样式 | ①目标节点 running 时入边加 pg-edge-live、animated、箭头 #3b82f6、CSS 加粗 2.5px；②spawn 边虚线(6 4) #7ba4e0 且 smoothstep；spawn 边目标 running 时双 class——描边变蓝但虚线保留；③普通边 #9aa3b5 为**贝塞尔曲线**（default 类型，非直线）；④所有边带闭合箭头且颜色随边 | GraphCanvas.tsx:48-71, app.css:157-178 |
@@ -162,6 +162,7 @@ node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1�
 | SRV-31 | P1 | 契约 | 提交无效图 run_graph | 观察 run_error | message=「图校验未通过」+ **issues 数组**（客户端可展示具体校验问题）；图结构非对象/缺数组报「图结构无效（缺少 nodes/edges 数组）」 | run-manager.ts:101-102, main.ts:284-285, orchestration.ts:128-129 |
 | SRV-32 | P1 | 契约 | 空闲时 abort_run；引擎 finished 后再 abort | 观察事件 | 两处均 no-op：空闲返回 false 无事件；引擎已结束后 abort 不重复发事件 | run-manager.ts:190-192, main.ts:306-308, orchestrator.ts:159-160 |
 | SRV-33 | P1 | 契约 | kill() 后 trickle stdout | 观察事件 | planner/executor 的 post-settle 守卫：kill 后 trickle 事件不再 fold、不再转发 delta（已结算节点不事后补发） | planner.ts:254-257, pi-node-executor.ts:137-140 |
+| SRV-34 | P0 | 契约 | server 运行，带 `Origin: http://localhost:5173` 请求 | `curl -i -H "Origin: …" :8787/api/sessions`（及 `/api/sessions/:id/events`、`/api/agents`、`/api/runs*`） | 响应带 `access-control-allow-origin: *`（web 由 Vite :5173 提供、API 在 :8787，**fetch 跨源**；WS 不受 CORS 限但 fetch 会被浏览器静默拦截——修复前历史抽屉永远显示「暂无存档」）；`/api/snake/*` **不**带（维持同源） | main.ts:142-154 |
 
 ## 6. 失败 / 中止 / 异常（MC-FAIL）
 
@@ -177,12 +178,12 @@ node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1�
 
 | 编号 | P | 类型 | 前置 | 步骤 | 预期 | 代码 |
 |---|---|---|---|---|---|---|
-| HIST-01 | P0 | 手测 | 抽屉已有会话 | 点「历史」→点某会话 | ①主区回落为冻结图（key="history"，graphOverride）；②ChatPanel 完全卸载；③迷你图块不渲染，右列整列由详情占据；④图为归档快照不随实时更新 | App.tsx:212-217,225-232, store.ts:114-147 |
+| HIST-01 | P0 | 手测 | 抽屉已有会话 | 点「历史」→点某会话 | ①主区回落为冻结图（key="history"，graphOverride）；②ChatPanel 完全卸载；③**未选中节点时右列整列隐藏**——冻结图占满全宽；点击冻结图节点后右列按需出现详情（× 关闭回到全宽）；④图为归档快照不随实时更新 | App.tsx 实时页布局, store.ts:114-147 |
 | HIST-02 | P0 | 手测 | 历史回放中 | 观察并尝试输入 | 输入框 disabled「正在查看历史回放，返回实时后可继续对话」；⚡/send 等全不渲染 | App.tsx:112-118 |
 | HIST-03 | P0 | 手测 | 历史回放中 | 观察 header | 琥珀「📜 历史回放」横幅（加载中追加「（加载中…）」）；连接状态点/agent 状态/用量/lastError 全隐藏；横幅内有「返回实时」 | App.tsx:50-71, app.css:202-208 |
 | HIST-04 | P0 | 手测 | 历史回放中 | 点「返回实时」 | history 置 null+清选中（exitHistory 递增 historyReq 取消在途加载）；主区回到聊天布局、迷你图恢复、输入栏可用 | App.tsx:54-56, store.ts:152-155 |
 | HIST-05 | P0 | 手测 | bridge 可用 | 点头部「历史」 | 全屏半透明 overlay+左侧 380px 抽屉；每项显示首条用户文本（无则「(无文本输入)」）+「M-DD HH:mm · N events · ↓N tok」；关闭后不占 DOM | HistoryDrawer.tsx:21-47, store.ts:104-113 |
-| HIST-06 | P1 | 手测 | 无存档/接口失败 | 打开抽屉 | 显示「暂无存档（发过任务后这里会出现）」；fetch 抛错同样置 []，不弹错误 | HistoryDrawer.tsx:32, store.ts:110-112 |
+| HIST-06 | P1 | 手测 | 无存档；另测接口失败（停 server） | 打开抽屉 | ①无存档且 fetch 成功 →「暂无存档（发过任务后这里会出现）」；②fetch 抛错/非 2xx → 红字「历史加载失败 — 检查 bridge server 是否在运行，关掉抽屉重开可重试」（sessionsError 标记，不再把失败伪装成空列表）；loadHistory 失败同样置标（重开抽屉可见） | HistoryDrawer.tsx:32-40, store.ts:107-125 |
 | HIST-07 | P0 | 手测 | 有可加载会话 | 点击会话项 | ①立即进入 history 模式：空图占位+「（加载中…）」；②完成后主区显示冻结图、选中清空；③该会话项 active 蓝框 | store.ts:114-147, HistoryDrawer.tsx:36-44 |
 | HIST-08 | P1 | 手测 | 已加载回放 | 在冻结图点节点 | 可点选/再点取消/点空白清除；详情按**归档图**解析选中 id（非实时图同 id 节点） | GraphCanvas.tsx:27-31, DetailPanel.tsx:114-119 |
 | HIST-09 | P1 | 手测 | 回放中开着抽屉 | 点 overlay 空白 / 点 × | 均只收起抽屉（historyOpen=false），回放横幅与冻结图保留；抽屉面板内点击 stopPropagation 不误关 | HistoryDrawer.tsx:24-30 |
@@ -222,7 +223,7 @@ node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1�
 
 ## 手测冒烟清单（P0 快速过一遍）
 
-1. **布局**：聊天主区 + 右上详情 + 右下迷你图（LAY-01/02）
+1. **布局**：聊天主区 + 右列迷你实时图占满；点节点→详情按需出现、×/再点关闭（LAY-01/02/03）
 2. **普通对话**：发消息→流式回复带光标→工具计数→自动跟随（CHAT-02/04/06/07/10）
 3. **⚡ 触发**：开⚡→发目标→卡片规划中（含 plan 预览）→运行中 chips→完成（BAR-01/04, CARD-10/12/13）
 4. **注入整合**：完成后注入卡（N 节点）→整合回答流式→两处「查看编排」跳转（CARD-01/04, CARD-14）

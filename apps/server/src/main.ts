@@ -35,6 +35,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { WebSocketServer, type WebSocket } from "ws";
 import { buildSynthPrompt, deriveGraph, foldEvent, initState, type GraphDef, type SessionState } from "@pi-graph/shared";
 import { EventHub } from "./event-hub.ts";
@@ -153,6 +154,19 @@ app.use("*", async (c, next) => {
 	}
 	await next();
 });
+
+// ----------------------------------------------------------------------------
+// CORS for the read-only archive APIs the web app fetches cross-origin (Vite
+// serves the app on :5173, this server on :8787; WebSockets are CORS-exempt,
+// fetch is not). Without ACAO the browser silently drops these responses —
+// the history drawer showed 「暂无存档」 even with archives on disk. Scoped
+// to these GET endpoints; the snake sub-API keeps same-origin policy.
+// ----------------------------------------------------------------------------
+app.use("/api/sessions", cors());
+app.use("/api/sessions/*", cors());
+app.use("/api/agents", cors());
+app.use("/api/runs", cors());
+app.use("/api/runs/*", cors());
 
 // Snake game sub-API (leaderboard + token issuance).
 app.route("/api/snake", snakeRoutes({ leaderboard: new Leaderboard() }));

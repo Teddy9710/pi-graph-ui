@@ -79,7 +79,7 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
 2. **M2** 桥接服务：pi rpc 子进程生命周期、WS 双向转发、`prompt/steer/abort` 透传；subagent 扩展安装脚本
 3. **M3** 前端 MVP：画布 + 自动布局 + 节点状态实时同步 + assistant 流式文本 + 工具节点详情
 4. **M4** 子 agent 图：解析 SubagentDetails、并行分支动画、agent 内部工具二级展开、汇总节点
-5. **M5** 持久化与回放：历史会话列表、加载重放成图；steer/abort 控件
+5. **M5** 持久化与回放：历史会话列表、加载重放成图；steer/abort 控件（2026-08-26 修复：web 由 Vite :5173 提供、API 在 :8787，fetch 跨源被浏览器 CORS 静默拦截 → 历史抽屉永远「暂无存档」；server 对 `/api/sessions*`、`/api/agents`、`/api/runs*` 加 `hono/cors`，snake 维持同源；fetch 失败改为显式红字提示而非伪装空列表）
 6. **M6+** 增强：多会话画布、导出 PNG/SVG、token 费用统计、elkjs 复杂布局
 7. **M-O 图编排（graph orchestration）**：图从展示层升级为执行模型——
    - shared：`GraphDef/NodeDef/EdgeDef` + `validateGraph`（含 Kahn 查环，对畸形输入全函数）+ `assemblePrompt`（上游输出 50KB 截断注入）+ `RunEvent` 流与 `foldRunEvent`；内置模板 research-fanout / pipeline / blank
@@ -109,7 +109,7 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
 11. **M-C 对话式编排（chat-first orchestration）**：「实时」页从纯图可视化升级为对话优先——先有对话，⚡ 触发的消息作为目标走 plan_run，编排卡片实时出现在聊天流，完成后主会话 agent 整理结果流式回到聊天——
    - shared：`buildSynthPrompt(goal, runId, nodes)`（sentinel 首行 + 单行 JSON 元信息 + 整合指令 + 逐节点分节，总预算 120KB/每节点下限 2KB 截断）+ `parseOrchSynthMeta`；新 `chat.ts`：`buildChatTimeline`（会话消息 × 编排卡片 × 注入卡合并为一条时间线；同毫秒按 user<orch<injected<assistant 定序；toolResult 跳过；仅最新计划 run 有卡片）
    - server：`RunManager.startPlanned(goal, {chat})` + `launchEngine` 在 `.run()` 与 `.catch()` 之间插 `.then` 钩子（run_finished 同步广播在前、.finally 清理在后，结构性杜绝 stale runId/重复注入）；`fireChatComplete` 从 retained 事件编译节点产出；`onChatRunComplete` → main.ts `bridge.send({type:"prompt"})` 把结果注入**主会话 agent**（广播/落盘/hello 重放免费）
-   - web：**对话为主布局**（聊天占主区；右侧栏上=节点详情、右下=迷你实时图小块，历史回放时主区回落为冻结图）；`ChatPanel`（气泡 + 工具调用计数 + 注入卡 `<details>` 折叠 + 编排卡片：状态/进度 chips/plan 尾部预览/「查看编排」跳转；尾部跟随滚动，上滚 >40px 停止）；PromptBar ⚡ 开关（aria-pressed；⚡ON=plan_run chat:true，会话运行中允许排队；IME Enter 守卫保留；编排忙时静默保留输入不吞字）
+   - web：**对话为主布局**（聊天占主区；右侧栏=迷你实时图占满整列，节点详情**按需**出现于其上方——点节点弹出、再点/× 关闭；历史回放未选中时整列隐藏、冻结图占满全宽）；`ChatPanel`（气泡 + 工具调用计数 + 注入卡 `<details>` 折叠 + 编排卡片：状态/进度 chips/plan 尾部预览/「查看编排」跳转；尾部跟随滚动，上滚 >40px 停止）；PromptBar ⚡ 开关（aria-pressed；⚡ON=plan_run chat:true，会话运行中允许排队；IME Enter 守卫保留；编排忙时静默保留输入不吞字）
    - e2e：`CHAT=1` 模式——PLAN 全套断言 + socket 保持打开，断言 sentinel 注入消息（第 2 行 nodeCount === run_finished.ok）、其后非空 assistant 回复 + agent_settled、新连接 hello 同时重放 sentinel 与 run 事件
    - 评审修复（对抗性评审后）：节点 label 与边备注同防 `###` 分节头伪造（validateGraph 拒绝换行/控制字符 + planner extractGraph 归一 + buildSynthPrompt safeLabel 三层兜底）；ChatPanel 订阅 session 对象而非 messages 数组（store 浅拷贝但数组引用不变，数组选择器会漏 message_end 追加）
 

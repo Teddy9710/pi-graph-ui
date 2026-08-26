@@ -15,6 +15,7 @@ function formatTime(ms: number): string {
 export function HistoryDrawer() {
 	const open = useStore((s) => s.historyOpen);
 	const sessions = useStore((s) => s.sessions);
+	const sessionsError = useStore((s) => s.sessionsError);
 	const loadHistory = useStore((s) => s.loadHistory);
 	const history = useStore((s) => s.history);
 
@@ -29,7 +30,12 @@ export function HistoryDrawer() {
 						×
 					</button>
 				</header>
-				{sessions.length === 0 && <p className="pg-dim">暂无存档（发过任务后这里会出现）</p>}
+				{sessions.length === 0 &&
+					(sessionsError ? (
+						<p className="pg-error-text">历史加载失败 — 检查 bridge server 是否在运行，关掉抽屉重开可重试</p>
+					) : (
+						<p className="pg-dim">暂无存档（发过任务后这里会出现）</p>
+					))}
 				<ul>
 					{sessions.map((s) => (
 						<li key={s.id}>
