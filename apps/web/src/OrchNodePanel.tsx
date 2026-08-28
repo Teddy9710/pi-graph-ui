@@ -15,6 +15,7 @@ import {
 	type EdgeType,
 } from "@pi-graph/shared";
 import { API_BASE } from "./store.ts";
+import { RUN_NODE_STATUS_LABEL } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
 
 /** GET /api/agents → persona names for the agent datalist. Tolerates both
@@ -94,7 +95,7 @@ function EdgePanel({ edge, editable }: { edge: EdgeDef; editable: boolean }) {
 			</div>
 			<p className="pg-dim">运行时以「### from 上游id —— 类型徽章（备注）」的头部随上游输出注入下游任务的 prompt。</p>
 			{editable ? (
-				<button className="pg-btn pg-btn-danger" onClick={() => deleteEdge(edge.id)}>
+				<button className="pg-btn pg-btn-danger pg-btn-sm" onClick={() => deleteEdge(edge.id)}>
 					删除边
 				</button>
 			) : (
@@ -184,6 +185,8 @@ export function OrchNodePanel() {
 			<header>
 				<span className={`pg-dot pg-dot-${runNode?.status ?? "pending"}`} />
 				<b>{node.label || node.id}</b>
+				{/* Status in words, not just the colored dot */}
+				<span className="pg-dim">{RUN_NODE_STATUS_LABEL[runNode?.status ?? "pending"] ?? runNode?.status}</span>
 				{/* The id is the identity every edge references — read-only. */}
 				<code className="pg-dim">{node.id}</code>
 			</header>
@@ -235,7 +238,7 @@ export function OrchNodePanel() {
 				</datalist>
 			</div>
 			{editable ? (
-				<button className="pg-btn pg-btn-danger" onClick={() => deleteNode(node.id)}>
+				<button className="pg-btn pg-btn-danger pg-btn-sm" onClick={() => deleteNode(node.id)}>
 					删除节点
 				</button>
 			) : (

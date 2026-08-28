@@ -9,12 +9,25 @@
  * the read-only generated run graph (run view).
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { TEMPLATES } from "@pi-graph/shared";
 import { OrchCanvas } from "./OrchCanvas.tsx";
 import { OrchNodePanel } from "./OrchNodePanel.tsx";
+import { RUN_STATUS_LABEL } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
+
+/** Ticking `now` while `active` — the elapsed chip freezes otherwise (its
+ *  value only recomputed when a run event arrived). */
+function useNow(active: boolean): number {
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		if (!active) return;
+		const id = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(id);
+	}, [active]);
+	return now;
+}
 
 function PlanBar() {
 	const run = useOrchStore((s) => s.run);
@@ -70,14 +83,18 @@ function PlanBar() {
 					<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={() => setView("editor")}>
 						返回编辑器
 					</button>
-					<button
-						className="pg-btn pg-btn-ghost pg-btn-sm"
-						disabled={busy || !run.graph}
-						title="把生成的图复制到编辑器，可修改后手动重跑"
-						onClick={importGraphFromRun}
+					<span
+						title={busy ? "运行/规划进行中" : run.graph ? "把生成的图复制到编辑器，可修改后手动重跑" : "还没有可转入的运行图"}
+						style={{ display: "inline-flex" }}
 					>
-						转入编辑器
-					</button>
+						<button
+							className="pg-btn pg-btn-ghost pg-btn-sm"
+							disabled={busy || !run.graph}
+							onClick={importGraphFromRun}
+						>
+							转入编辑器
+						</button>
+					</span>
 				</>
 			)}
 			{planning && planTail && (
@@ -102,6 +119,7 @@ function OrchRunBar() {
 	const clearCanvas = useOrchStore((s) => s.clearCanvas);
 	const runGraph = useOrchStore((s) => s.runGraph);
 	const abortRun = useOrchStore((s) => s.abortRun);
+	const select = useOrchStore((s) => s.select);
 	const [tpl, setTpl] = useState("");
 
 	const running = run.status === "running";
@@ -111,7 +129,8 @@ function OrchRunBar() {
 	// they'd edit a canvas the user cannot see.
 	const editLocked = busy || view === "run";
 	const issueTitle = issues.map((i) => (i.nodeOrEdge ? `${i.nodeOrEdge}：` : "") + i.message).join("\n");
-	const elapsed = run.startedAt != null ? ((run.finishedAt ?? Date.now()) - run.startedAt) / 1000 : null;
+	const now = useNow(running);
+	const elapsed = run.startedAt != null ? ((run.finishedAt ?? now) - run.startedAt) / 1000 : null;
 
 	return (
 		<div className="pg-orch-bar">
@@ -143,30 +162,45 @@ function OrchRunBar() {
 				className="pg-btn pg-btn-ghost pg-btn-sm"
 				disabled={editLocked}
 				title="清空画布（不可撤销）"
-				onClick={clearCanvas}
+				onClick={() => {
+					if (window.confirm("清空画布？此操作不可撤销")) clearCanvas();
+				}}
 			>
 				清空
 			</button>
-			<button
-				className="pg-btn pg-btn-sm"
-				disabled={(issues.length > 0 && !running) || busy}
-				title={issueTitle || "运行整张图"}
-				onClick={runGraph}
+			{/* span wrapper: disabled buttons swallow mouse events, so the title
+			    explaining WHY the run is blocked would never show otherwise */}
+			<span
+				title={busy ? "运行/规划进行中" : issues.length > 0 ? issueTitle : "运行整张图"}
+				style={{ display: "inline-flex" }}
 			>
-				▶ 运行
-			</button>
+				<button
+					className="pg-btn pg-btn-sm"
+					disabled={(issues.length > 0 && !running) || busy}
+					onClick={runGraph}
+				>
+					▶ 运行
+				</button>
+			</span>
 			<button className="pg-btn pg-btn-danger pg-btn-sm" disabled={!busy} onClick={abortRun}>
 				⏹ 中止
 			</button>
 			{issues.length > 0 && view === "editor" && (
-				<span className="pg-orch-chip pg-error-text" title={issueTitle}>
+				<span
+					className="pg-orch-chip pg-error-text"
+					title={issueTitle}
+					style={{ cursor: "pointer" }}
+					onClick={() => select(null)}
+				>
 					⚠ {issues.length} 个问题
 				</span>
 			)}
-			{connectIssue && <span className="pg-error-text">{connectIssue}</span>}
+			{connectIssue && <span className="pg-error-text" title={connectIssue}>{connectIssue}</span>}
 			{run.status !== "idle" && (
 				<>
-					<span className="pg-orch-chip">{run.status}</span>
+					<span className={`pg-orch-chip pg-chip-${run.status}`}>
+						{RUN_STATUS_LABEL[run.status] ?? run.status}
+					</span>
 					<span className="pg-orch-chip">
 						ok {run.ok} · 失败 {run.failed} · 跳过 {run.skipped}
 					</span>
@@ -197,7 +231,11 @@ export function OrchestratePage() {
 							<OrchCanvas />
 						</div>
 					</Panel>
-					<Separator className="pg-rh pg-rh-col" />
+					<Separator
+						className="pg-rh pg-rh-col"
+						title="拖拽调整 · 双击复位"
+						aria-label="拖动调整画布与检查器的宽度"
+					/>
 					<Panel id="inspector" className="pg-fill" defaultSize="28" minSize={300}>
 						<OrchNodePanel />
 					</Panel>

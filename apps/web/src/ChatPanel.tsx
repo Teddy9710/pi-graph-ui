@@ -12,25 +12,18 @@
  * details + assistant answers in the transcript (v1, see PLAN.md M-C).
  */
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { buildChatTimeline, type ChatItem } from "@pi-graph/shared";
+import { RUN_STATUS_LABEL, runStatusChatClass } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
 import { useStore } from "./store.ts";
-
-const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
-	planning: { text: "规划中", cls: "pg-chat-status pg-chat-status-planning" },
-	running: { text: "运行中", cls: "pg-chat-status pg-chat-status-running" },
-	completed: { text: "完成", cls: "pg-chat-status pg-chat-status-done" },
-	failed: { text: "失败", cls: "pg-chat-status pg-chat-status-failed" },
-	aborted: { text: "已中止", cls: "pg-chat-status pg-chat-status-planning" },
-};
 
 function Bubble({ item }: { item: Extract<ChatItem, { kind: "user" | "assistant" }> }) {
 	if (item.kind === "user") {
 		return <div className="pg-chat-row"><div className="pg-chat-bubble pg-chat-bubble-user">{item.text}</div></div>;
 	}
 	return (
-		<div className="pg-chat-row pg-chat-row-assistant">
+		<div className="pg-chat-row pg-chat-row-assistant" aria-busy={item.streaming}>
 			<div className="pg-chat-bubble">
 				{item.text || (item.streaming ? "" : <span className="pg-dim">（无文本回复）</span>)}
 				{item.streaming && <span className="pg-chat-cursor" aria-hidden />}
@@ -43,13 +36,17 @@ function Bubble({ item }: { item: Extract<ChatItem, { kind: "user" | "assistant"
 function InjectedCard({ item, onOpenOrch }: { item: Extract<ChatItem, { kind: "injected" }>; onOpenOrch: () => void }) {
 	const count = item.meta?.nodeCount ?? "?";
 	const goal = item.meta?.goal;
+	// The injected payload can reach ~120KB. A closed <details> skips layout,
+	// but React still diffs the whole text node on every timeline rebuild —
+	// mount the <pre> only once opened and the diff becomes trivial.
+	const [open, setOpen] = useState(false);
 	return (
 		<div className="pg-chat-injected">
-			<details>
+			<details onToggle={(e) => setOpen(e.currentTarget.open)}>
 				<summary>
 					⚙ 编排结果已注入会话（{count} 节点）{goal ? ` — ${goal.slice(0, 30)}${goal.length > 30 ? "…" : ""}` : ""}
 				</summary>
-				<pre className="pg-pre">{item.raw}</pre>
+				{open && <pre className="pg-pre">{item.raw}</pre>}
 			</details>
 			<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={onOpenOrch}>
 				查看编排 →
@@ -60,7 +57,8 @@ function InjectedCard({ item, onOpenOrch }: { item: Extract<ChatItem, { kind: "i
 
 function OrchCard({ onOpenOrch }: { onOpenOrch: () => void }) {
 	const run = useOrchStore((s) => s.run);
-	const status = STATUS_LABEL[run.status] ?? { text: run.status, cls: "pg-chat-status" };
+	const statusText = RUN_STATUS_LABEL[run.status] ?? run.status;
+	const statusClass = runStatusChatClass(run.status);
 	const total = run.graph?.nodes.length ?? Object.keys(run.nodes).length;
 	const planTail =
 		run.status === "planning" && run.planText ? run.planText.slice(-120) : null;
@@ -68,7 +66,7 @@ function OrchCard({ onOpenOrch }: { onOpenOrch: () => void }) {
 		<div className="pg-chat-row pg-chat-row-assistant">
 			<div className="pg-chat-bubble pg-chat-bubble-user">{run.goal ?? ""}</div>
 			<div className="pg-chat-orch-card">
-				<div className={status.cls}>⚡ {status.text}</div>
+				<div className={statusClass} aria-live="polite">⚡ {statusText}</div>
 				{run.status !== "planning" && total > 0 && (
 					<div className="pg-chat-chips">
 						<span className="pg-orch-chip">✓ {run.ok} / {total}</span>
@@ -101,21 +99,48 @@ export function ChatPanel({ onOpenOrch }: { onOpenOrch: () => void }) {
 		[session, run],
 	);
 
-	// Follow the tail unless the user scrolled up (>40px from bottom).
+	// Follow the tail unless the user scrolled up (>40px from bottom). The
+	// scroll write rides a rAF so bursts of streaming ticks pay one layout,
+	// and stops entirely once the user has scrolled away; sending a message
+	// re-arms following (you want to see what your prompt triggered).
 	const listRef = useRef<HTMLDivElement | null>(null);
 	const followRef = useRef(true);
+	const [atBottom, setAtBottom] = useState(true);
 	useEffect(() => {
-		const el = listRef.current;
-		if (el && followRef.current) el.scrollTop = el.scrollHeight;
+		const last = items[items.length - 1];
+		if (last?.kind === "user") {
+			followRef.current = true;
+			setAtBottom(true);
+		}
+		if (!followRef.current) return;
+		const id = requestAnimationFrame(() => {
+			const el = listRef.current;
+			if (el) el.scrollTop = el.scrollHeight;
+		});
+		return () => cancelAnimationFrame(id);
 	}, [items]);
+
+	const scrollToEnd = () => {
+		followRef.current = true;
+		setAtBottom(true);
+		const el = listRef.current;
+		if (el) el.scrollTop = el.scrollHeight;
+	};
 
 	return (
 		<aside className="pg-chat">
 			<header className="pg-chat-header">对话</header>
-			<div className="pg-chat-list" ref={listRef}
+			<div
+				className="pg-chat-list"
+				ref={listRef}
+				role="log"
+				aria-label="会话消息"
 				onScroll={() => {
 					const el = listRef.current;
-					if (el) followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
+					if (!el) return;
+					const follow = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
+					followRef.current = follow;
+					setAtBottom(follow);
 				}}
 			>
 				{items.length === 0 && <div className="pg-chat-empty pg-dim">对话还没有开始——在下方输入框发第一条消息，或打开 ⚡ 直接用自动编排。</div>}
@@ -129,6 +154,11 @@ export function ChatPanel({ onOpenOrch }: { onOpenOrch: () => void }) {
 					),
 				)}
 			</div>
+			{!atBottom && (
+				<button className="pg-btn pg-btn-ghost pg-btn-sm pg-scroll-bottom" onClick={scrollToEnd}>
+					↓ 回到最新
+				</button>
+			)}
 		</aside>
 	);
 }

@@ -35,19 +35,27 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 	const exitHistory = useStore((s) => s.exitHistory);
 	const statusText =
 		wsStatus === "open"
-			? "● connected"
+			? "● 已连接"
 			: wsStatus === "reconnecting"
-				? "● reconnecting…"
+				? "● 重连中…"
 				: wsStatus === "connecting"
-					? "● connecting…"
-					: "● disconnected";
+					? "● 连接中…"
+					: "● 已断开";
 	return (
 		<header className="pg-header">
 			<b className="pg-logo">pi-graph</b>
-			<button className={`pg-tab${tab === "live" ? " active" : ""}`} onClick={() => setTab("live")}>
+			<button
+				className={`pg-tab${tab === "live" ? " active" : ""}`}
+				aria-current={tab === "live" ? "page" : undefined}
+				onClick={() => setTab("live")}
+			>
 				实时
 			</button>
-			<button className={`pg-tab${tab === "orch" ? " active" : ""}`} onClick={() => setTab("orch")}>
+			<button
+				className={`pg-tab${tab === "orch" ? " active" : ""}`}
+				aria-current={tab === "orch" ? "page" : undefined}
+				onClick={() => setTab("orch")}
+			>
 				编排
 			</button>
 			{history ? (
@@ -64,14 +72,18 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 			{!history && (
 				<>
 					<span className="pg-dim">
-						{session.agentStatus === "running" ? "agent running…" : "agent idle"}
+						{session.agentStatus === "running" ? "agent 运行中…" : "agent 空闲"}
 					</span>
 					<span className="pg-dim pg-usage">
 						↑{formatTokens(session.usageTotal.input)} ↓{formatTokens(session.usageTotal.output)} tok
 					</span>
 				</>
 			)}
-			{session.lastError && !history && <span className="pg-error-text">{session.lastError.slice(0, 80)}</span>}
+			{session.lastError && !history && (
+				<span className="pg-error-text" title={session.lastError}>
+					{session.lastError.slice(0, 80)}
+				</span>
+			)}
 			{piExit && (
 				<span className="pg-error-text" title={piExit.stderr.slice(-500)}>
 					pi exited (code {piExit.code ?? "?"}) — 检查 bridge server
@@ -101,6 +113,7 @@ function PromptBar() {
 	const [text, setText] = useState("");
 	const [bolt, setBolt] = useState(false);
 	const session = useStore((s) => s.session);
+	const wsStatus = useStore((s) => s.wsStatus);
 	const sendPrompt = useStore((s) => s.sendPrompt);
 	const steer = useStore((s) => s.steer);
 	const abort = useStore((s) => s.abort);
@@ -111,6 +124,7 @@ function PromptBar() {
 	const abortRun = useOrchStore((s) => s.abortRun);
 	const running = session.agentStatus === "running";
 	const orchBusy = run.status === "running" || run.status === "planning";
+	const offline = wsStatus !== "open";
 
 	if (history) {
 		return (
@@ -131,6 +145,10 @@ function PromptBar() {
 	const submit = () => {
 		const trimmed = text.trim();
 		if (!trimmed) return;
+		// send() silently drops payloads on a non-OPEN socket — bailing here
+		// (WITHOUT clearing the input) means no message vanishes without a
+		// trace while disconnected; the offline notice says why.
+		if (offline) return;
 		if (bolt) {
 			// Busy: keep the text — the guard is silent and the user typed
 			// something worth not losing (abort first, then re-send).
@@ -149,13 +167,20 @@ function PromptBar() {
 			<button
 				className={`pg-btn pg-btn-ghost pg-bolt${bolt ? " pg-bolt-on" : ""}`}
 				aria-pressed={bolt}
+				aria-label="自动编排模式"
 				title={bolt ? "⚡ 开启中：发送的内容将作为编排目标" : "开启 ⚡ 自动编排：发送目标 → 自动拆图执行 → 结果整理回对话"}
 				onClick={() => setBolt((v) => !v)}
 			>
 				⚡
 			</button>
 			{!running && !bolt && (
-				<button className="pg-btn pg-btn-ghost" title="清空当前会话，开始全新任务（pi 上下文一并重置）" onClick={newSession}>
+				<button
+					className="pg-btn pg-btn-ghost"
+					title="清空当前会话，开始全新任务（pi 上下文一并重置）"
+					onClick={() => {
+						if (window.confirm("清空当前会话并重置 pi 上下文？此操作不可撤销")) newSession();
+					}}
+				>
 					＋ 新任务
 				</button>
 			)}
@@ -175,25 +200,26 @@ function PromptBar() {
 					⏹ 中止编排
 				</button>
 			) : bolt ? (
-				<button className="pg-btn" disabled={!text.trim() || orchBusy} onClick={submit}>
+				<button className="pg-btn" disabled={!text.trim() || orchBusy || offline} onClick={submit}>
 					⚡ 编排
 				</button>
 			) : running ? (
-				<button className="pg-btn pg-btn-danger" onClick={abort}>
-					abort
-				</button>
+				<>
+					{text.trim() && (
+						<button className="pg-btn" title="把输入作为转向指令插入当前运行" onClick={submit}>
+							↪ 转向
+						</button>
+					)}
+					<button className="pg-btn pg-btn-danger" onClick={abort}>
+						⏹ 中止
+					</button>
+				</>
 			) : (
-				<button
-					className="pg-btn"
-					disabled={!text.trim()}
-					onClick={() => {
-						sendPrompt(text.trim());
-						setText("");
-					}}
-				>
-					send
+				<button className="pg-btn" disabled={!text.trim() || offline} onClick={submit}>
+					发送
 				</button>
 			)}
+			{offline && <span className="pg-error-text">未连接 — 消息不会发出，请等待重连</span>}
 		</footer>
 	);
 }
@@ -245,14 +271,22 @@ function LivePage({ setTab }: { setTab: (t: Tab) => void }) {
 					    full width otherwise. */}
 					{(!history || selectedNodeId) && (
 						<>
-							<Separator className="pg-rh pg-rh-col" />
+							<Separator
+								className="pg-rh pg-rh-col"
+								title="拖拽调整 · 双击复位"
+								aria-label="拖动调整对话与侧栏的宽度"
+							/>
 							<Panel id="side" className="pg-fill pg-side" defaultSize="38" minSize={280}>
 								{selectedNodeId && !history ? (
 									<Group orientation="vertical" className="pg-pgroup" {...sideLayout}>
 										<Panel id="detail" className="pg-fill" defaultSize="55" minSize={120}>
 											<DetailPanel onClose={() => select(null)} />
 										</Panel>
-										<Separator className="pg-rh pg-rh-row" />
+										<Separator
+											className="pg-rh pg-rh-row"
+											title="拖拽调整 · 双击复位"
+											aria-label="拖动调整节点详情与实时图的高度"
+										/>
 										<Panel id="mini" className="pg-fill" defaultSize="45" minSize={160}>
 											<MiniGraph />
 										</Panel>

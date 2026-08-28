@@ -8,9 +8,15 @@
  *    streaming events never reflow positions.
  * Both lock interaction while a run executes. Unlike GraphCanvas (a derived
  * read-only projection of the LIVE session), these own orchestration state.
+ *
+ * Node selection is driven by RF's `select` changes (onNodesChange) — click
+ * AND keyboard Enter/Escape both arrive there, and handleNodeClick runs
+ * before any onNodeClick prop, so a toggle in both would cancel itself out.
+ * Edge selection keeps its click-toggle: edges opt out of RF selection
+ * (selectable: false) to keep our typed-edge colors.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
 	Background,
 	Controls,
@@ -23,15 +29,14 @@ import {
 	type EdgeMouseHandler,
 	type Node,
 	type NodeChange,
-	type NodeMouseHandler,
 	type OnEdgesChange,
 	type OnNodesChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { orchNodeTypes } from "./orch-nodes.tsx";
+import { orchNodeTypes, type OrchNodeData } from "./orch-nodes.tsx";
 import { autoLayoutGraphDef } from "./orch-layout.ts";
 import { useOrchStore } from "./orch-store.ts";
-import { EDGE_TYPE_LABELS, type EdgeDef } from "@pi-graph/shared";
+import { EDGE_TYPE_LABELS, type EdgeDef, type GraphDef, type RunNodeState } from "@pi-graph/shared";
 
 /** RF renders a string label as ONE unwrapped SVG <text> line — long text
  *  draws an unwrapped band across the endpoint nodes. The badge (2 chars)
@@ -70,6 +75,32 @@ function edgeStyle(e: EdgeDef, opts: { selected?: boolean } = {}): Edge {
 	};
 }
 
+/**
+ * Per-id data-object cache: node components only re-render when their node
+ * def or run record actually changed. applyRunEvent clones just the touched
+ * record, so untouched runNode refs stay equal — without this cache every
+ * streamed token would hand every node a fresh data object.
+ */
+function useNodeDataCache(): Map<string, OrchNodeData> {
+	const ref = useRef<Map<string, OrchNodeData> | null>(null);
+	if (ref.current === null) ref.current = new Map();
+	return ref.current;
+}
+
+function cachedData(
+	cache: Map<string, OrchNodeData>,
+	id: string,
+	label: string,
+	node: GraphDef["nodes"][number],
+	runNode: RunNodeState | null,
+): OrchNodeData {
+	const cached = cache.get(id);
+	if (cached && cached.node === node && cached.runNode === runNode) return cached;
+	const data: OrchNodeData = { label, node, runNode };
+	cache.set(id, data);
+	return data;
+}
+
 function Canvas() {
 	const graphDef = useOrchStore((s) => s.graphDef);
 	const run = useOrchStore((s) => s.run);
@@ -82,6 +113,7 @@ function Canvas() {
 	const select = useOrchStore((s) => s.select);
 	const selectEdge = useOrchStore((s) => s.selectEdge);
 	const running = run.status === "running";
+	const dataCache = useNodeDataCache();
 
 	// Ephemeral positions while a drag is in flight. In a controlled flow,
 	// unapplied position changes would snap the node back mid-drag; the store
@@ -94,10 +126,10 @@ function Canvas() {
 				id: n.id,
 				type: "orch",
 				position: dragPositions[n.id] ?? n.position ?? { x: 0, y: 0 },
-				data: { label: n.label || n.id, node: n, runNode: run.nodes[n.id] ?? null },
+				data: cachedData(dataCache, n.id, n.label || n.id, n, run.nodes[n.id] ?? null),
 				selected: n.id === selectedNodeId,
 			})),
-		[graphDef, run, selectedNodeId, dragPositions],
+		[graphDef, run, selectedNodeId, dragPositions, dataCache],
 	);
 
 	const edges = useMemo<Edge[]>(
@@ -106,6 +138,12 @@ function Canvas() {
 	);
 
 	const onNodesChange: OnNodesChange = (changes: NodeChange[]) => {
+		// Selection derives from the whole batch: one click can carry
+		// [new→true, old→false] in any order (RF iterates its lookup map) —
+		// any true wins, all-false clears. store select() also clears the
+		// edge selection (one subject per panel).
+		let selectionTouched = false;
+		let selectedId: string | null = null;
 		for (const change of changes) {
 			if (change.type === "position" && change.position) {
 				const pos = change.position;
@@ -123,8 +161,12 @@ function Canvas() {
 				}
 			} else if (change.type === "remove") {
 				deleteNode(change.id);
+			} else if (change.type === "select") {
+				selectionTouched = true;
+				if (change.selected) selectedId = change.id;
 			}
 		}
+		if (selectionTouched) select(selectedId);
 	};
 
 	const onEdgesChange: OnEdgesChange = (changes: EdgeChange[]) => {
@@ -137,39 +179,39 @@ function Canvas() {
 		connectEdge(source, target);
 	};
 
-	const onNodeClick: NodeMouseHandler = (_, node) => {
-		select(node.id === selectedNodeId ? null : node.id);
-	};
-
 	// Clicking an edge selects it for label editing (node selection clears).
 	const onEdgeClick: EdgeMouseHandler = (_, edge) => {
 		selectEdge(edge.id === selectedEdgeId ? null : edge.id);
 	};
 
 	return (
-		<ReactFlow
-			nodes={nodes}
-			edges={edges}
-			nodeTypes={orchNodeTypes}
-			onNodesChange={onNodesChange}
-			onEdgesChange={onEdgesChange}
-			onConnect={onConnect}
-			onNodeClick={onNodeClick}
-			onEdgeClick={onEdgeClick}
-			onPaneClick={() => select(null)}
-			deleteKeyCode={["Backspace", "Delete"]}
-			nodesDraggable={!running}
-			nodesConnectable={!running}
-			colorMode="dark"
-			// fitView only fires on init — no refitting while the user edits.
-			fitView
-			minZoom={0.15}
-			maxZoom={2}
-		>
-			<Background gap={22} color="rgba(255 255 255 / 0.07)" />
-			<Controls showInteractive={false} />
-			<MiniMap pannable zoomable nodeStrokeWidth={2} />
-		</ReactFlow>
+		<>
+			<ReactFlow
+				nodes={nodes}
+				edges={edges}
+				nodeTypes={orchNodeTypes}
+				onNodesChange={onNodesChange}
+				onEdgesChange={onEdgesChange}
+				onConnect={onConnect}
+				onEdgeClick={onEdgeClick}
+				onPaneClick={() => select(null)}
+				deleteKeyCode={["Backspace", "Delete"]}
+				nodesDraggable={!running}
+				nodesConnectable={!running}
+				colorMode="dark"
+				// fitView only fires on init — no refitting while the user edits.
+				fitView
+				minZoom={0.15}
+				maxZoom={2}
+			>
+				<Background gap={22} color="rgba(255 255 255 / 0.07)" />
+				<Controls showInteractive={false} />
+				<MiniMap pannable zoomable nodeStrokeWidth={2} />
+			</ReactFlow>
+			{nodes.length === 0 && (
+				<div className="pg-orch-empty">画布是空的——从上方选一个模板，或点「＋节点」开始</div>
+			)}
+		</>
 	);
 }
 
@@ -178,6 +220,7 @@ function RunCanvas() {
 	const run = useOrchStore((s) => s.run);
 	const selectedNodeId = useOrchStore((s) => s.selectedNodeId);
 	const select = useOrchStore((s) => s.select);
+	const dataCache = useNodeDataCache();
 
 	const graph = run.graph;
 	// Layout keyed by CONTENT signature, not object identity: plan_completed
@@ -187,7 +230,7 @@ function RunCanvas() {
 	// manual rerun can swap in an EDITED graph with the same ids (tasks OR edge
 	// types/notes), and the memo would keep rendering the stale bodies.
 	const signature = graph
-		? `${graph.nodes.map((n) => `${n.id}${n.label ?? ""}${n.task}${n.model ?? ""}${n.agent ?? ""}`).join(",")}|${graph.edges.map((e) => `${e.id}${e.type ?? ""}${e.label ?? ""}`).join(",")}`
+		? `${graph.nodes.map((n) => `${n.id}${n.label ?? ""}${n.task}${n.model ?? ""}${n.agent ?? ""}`).join(",")}|${graph.edges.map((e) => `${e.id}${e.type ?? ""}${e.label ?? ""}`).join(",")}`
 		: "";
 	const laid = useMemo(
 		() => (graph && signature ? autoLayoutGraphDef(graph) : null),
@@ -202,16 +245,26 @@ function RunCanvas() {
 						id: n.id,
 						type: "orch",
 						position: n.position ?? { x: 0, y: 0 },
-						data: { label: n.label || n.id, node: n, runNode: run.nodes[n.id] ?? null },
+						data: cachedData(dataCache, n.id, n.label || n.id, n, run.nodes[n.id] ?? null),
 						selected: n.id === selectedNodeId,
 					}))
 				: [],
-		[laid, run, selectedNodeId],
+		[laid, run, selectedNodeId, dataCache],
 	);
 	const edges = useMemo<Edge[]>(() => (laid ? laid.edges.map((e) => edgeStyle(e)) : []), [laid]);
 
-	const onNodeClick: NodeMouseHandler = (_, node) => {
-		select(node.id === selectedNodeId ? null : node.id);
+	// Keyboard parity with the editor canvas (mouse clicks share this path).
+	// Batch-derived like the editor's handler — see the comment there.
+	const onNodesChange = (changes: NodeChange[]) => {
+		let touched = false;
+		let selectedId: string | null = null;
+		for (const change of changes) {
+			if (change.type === "select") {
+				touched = true;
+				if (change.selected) selectedId = change.id;
+			}
+		}
+		if (touched) select(selectedId);
 	};
 
 	if (!laid) {
@@ -227,7 +280,7 @@ function RunCanvas() {
 			nodes={nodes}
 			edges={edges}
 			nodeTypes={orchNodeTypes}
-			onNodeClick={onNodeClick}
+			onNodesChange={onNodesChange}
 			onPaneClick={() => select(null)}
 			// Strictly read-only: the generated graph is inspected, never edited.
 			nodesDraggable={false}

@@ -13,6 +13,7 @@ import type {
 	ToolExecutionState,
 	UserMessage,
 } from "@pi-graph/shared";
+import { NODE_KIND_LABEL, NODE_STATUS_LABEL } from "./status.ts";
 import { useStore } from "./store.ts";
 
 function MessageBody({ message }: { message: Message }) {
@@ -124,11 +125,17 @@ export function DetailPanel({ onClose }: { onClose?: () => void }) {
 	}
 	const data: GraphNodeData = node.data;
 
+	const kindMeta = NODE_KIND_LABEL[data.kind] ?? { icon: "", text: data.kind };
 	return (
 		<aside className="pg-panel">
 			<header>
 				<span className={`pg-dot pg-dot-${data.status}`} />
-				<b>{data.kind}</b>
+				{/* icon + Chinese kind + status text — the dot alone is color-only,
+				    invisible to screen readers and red-green color blindness */}
+				<b>
+					{kindMeta.icon} {kindMeta.text}
+				</b>
+				<span className="pg-dim">{NODE_STATUS_LABEL[data.status] ?? data.status}</span>
 				<code className="pg-dim">{node.id}</code>
 				{onClose && (
 					<button className="pg-drawer-close pg-panel-close" title="关闭详情" aria-label="关闭详情" onClick={onClose}>
@@ -148,7 +155,7 @@ export function DetailPanel({ onClose }: { onClose?: () => void }) {
 				(data.detail ? (
 					<AgentDetail result={(data.detail as { result: SubagentSingleResult }).result} />
 				) : (
-					<p className="pg-dim">no details yet</p>
+					<p className="pg-dim">暂无详情（子代理运行结束后回填）</p>
 				))}
 			{data.kind === "agent-tool" && (
 				<pre className="pg-pre">{JSON.stringify(data.detail, null, 2)}</pre>

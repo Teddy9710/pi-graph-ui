@@ -34,9 +34,33 @@
 	opacity: 0.85;
 }
 
+/* orch nodes put the title INSIDE the head row — the body margin would push
+ * it out of vertical center with the spinner/status dot. */
+.pg-node-head .pg-title {
+	margin-top: 0;
+}
+
 .pg-node .pg-title {
 	margin-top: 2px;
 	font-weight: 600;
+}
+
+/* kind icons: emoji and single-glyph marks (·, ✳) mixed in one 11px row read
+ * ragged — pin a consistent slot so every head starts on the same edge. */
+.pg-icon {
+	font-size: 12px;
+	line-height: 1;
+	min-width: 14px;
+	text-align: center;
+}
+
+/* The kind classes on .pg-node finally earn their keep: a quiet left accent
+ * separates tool calls from agent fan-outs at a glance. */
+.pg-node-tool {
+	border-left: 2px solid rgb(91 155 248 / 0.35);
+}
+.pg-node-agent {
+	border-left: 2px solid rgb(63 214 159 / 0.45);
 }
 
 .pg-node .pg-label {
@@ -85,12 +109,17 @@
 	border-color: var(--pg-border-strong);
 }
 
+/* NO global margin-left:auto here: panel headers (DetailPanel/OrchNodePanel)
+ * put a dot FIRST in their flex row — auto would shove the whole title group
+ * off the left edge. Right-alignment belongs to the node head only. */
 .pg-dot {
 	width: 8px;
 	height: 8px;
 	border-radius: 50%;
-	margin-left: auto;
 	flex-shrink: 0;
+}
+.pg-node-head .pg-dot {
+	margin-left: auto;
 }
 .pg-dot-running {
 	background: var(--pg-blue);

@@ -40,6 +40,9 @@
 	--pg-shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px rgb(0 0 0 / 0.35);
 	--pg-shadow-pop: 0 2px 6px rgb(0 0 0 / 0.45), 0 12px 32px rgb(0 0 0 / 0.45);
 	--pg-t: 150ms ease;
+	/* one disabled opacity — 0.38 vs 0.55 in different spots left ghost-button
+	 * text around 3.2:1 contrast; 0.5 keeps cursor as the disabled cue */
+	--pg-disabled: 0.5;
 	--pg-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
@@ -188,6 +191,7 @@ select:focus-visible {
 }
 
 .pg-canvas {
+	position: relative; /* anchors the empty-canvas hint */
 	flex: 1;
 	min-width: 0;
 }
@@ -267,6 +271,16 @@ select:focus-visible {
 	text-overflow: ellipsis;
 }
 
+/* the orch bars wrap — a long plan/connect/orch error would otherwise grow
+ * the bar to multiple lines and shove the whole canvas down (full text stays
+ * in the title attribute, same pattern as the header rule above) */
+.pg-orch-bar .pg-error-text {
+	max-width: 360px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
 /* fold blocks (panel thinking / assembledPrompt + chat injected details)
    share one fold language — custom ▸ arrow everywhere, no native triangles */
 .pg-panel details {
@@ -325,15 +339,17 @@ select:focus-visible {
 	outline: none;
 	transition: border-color var(--pg-t), box-shadow var(--pg-t);
 }
+/* 0.55 alpha landed ~3:1 on the well background — placeholders carry real
+ * guidance text here, so keep them readable. */
 .pg-input-bar input::placeholder {
-	color: rgb(152 161 176 / 0.55);
+	color: rgb(152 161 176 / 0.8);
 }
 .pg-input-bar input:focus {
 	border-color: rgb(91 155 248 / 0.55);
 	box-shadow: 0 0 0 3px rgb(91 155 248 / 0.14);
 }
 .pg-input-bar input:disabled {
-	opacity: 0.55;
+	opacity: var(--pg-disabled);
 	cursor: not-allowed;
 }
 
@@ -369,7 +385,7 @@ select:focus-visible {
 	box-shadow: 0 0 0 rgb(0 0 0 / 0);
 }
 .pg-btn:disabled {
-	opacity: 0.38;
+	opacity: var(--pg-disabled);
 	cursor: default;
 	box-shadow: none;
 }
@@ -540,11 +556,10 @@ select:focus-visible {
 	border-color: var(--pg-border-strong);
 	background: #1e232d;
 }
-.pg-session-item:hover,
+/* hover and active used to share the SAME blue border — during replay you
+ * couldn't tell which item was loaded. Active alone gets the accent. */
 .pg-session-item.active {
 	border-color: rgb(91 155 248 / 0.55);
-}
-.pg-session-item.active {
 	box-shadow: inset 3px 0 0 var(--pg-blue);
 }
 .pg-session-title {
@@ -604,14 +619,15 @@ select:focus-visible {
 .pg-orch-plan-tail {
 	font-family: var(--pg-mono);
 	font-size: 11px;
-	opacity: 0.5;
+	opacity: 0.65;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	max-width: 420px;
 }
 
-/* run-view placeholder (planning before the graph materializes) */
+/* run-view placeholder (planning before the graph materializes). Also reused
+ * as the empty-canvas hint overlaid on live canvases — never block clicks. */
 .pg-orch-empty {
 	position: absolute;
 	inset: 0;
@@ -620,6 +636,9 @@ select:focus-visible {
 	justify-content: center;
 	color: var(--pg-fg-dim);
 	font-size: 13px;
+	pointer-events: none;
+	text-align: center;
+	padding: 0 24px;
 }
 .pg-orch-bar select {
 	background: var(--pg-bg-well);
@@ -651,6 +670,23 @@ select:focus-visible {
 	padding: 2px 10px;
 	opacity: 0.85;
 	white-space: nowrap;
+}
+/* the run-status chip speaks the same colored language as the chat card —
+ * one status, one tone, on every page */
+.pg-chip-planning {
+	color: var(--pg-amber);
+}
+.pg-chip-running {
+	color: var(--pg-blue);
+}
+.pg-chip-completed {
+	color: var(--pg-green);
+}
+.pg-chip-failed {
+	color: var(--pg-red);
+}
+.pg-chip-aborted {
+	color: var(--pg-fg-dim);
 }
 
 /* canvas lock banner while a run executes */
@@ -738,7 +774,7 @@ select:focus-visible {
 	transition: border-color var(--pg-t), box-shadow var(--pg-t);
 }
 .pg-form-input::placeholder {
-	color: rgb(152 161 176 / 0.55);
+	color: rgb(152 161 176 / 0.8);
 }
 .pg-form-input:hover:not(:disabled) {
 	border-color: var(--pg-border-strong);
@@ -748,7 +784,7 @@ select:focus-visible {
 	box-shadow: 0 0 0 3px rgb(91 155 248 / 0.14);
 }
 .pg-form-input:disabled {
-	opacity: 0.55;
+	opacity: var(--pg-disabled);
 }
 textarea.pg-form-input {
 	min-height: 120px;
@@ -909,7 +945,9 @@ textarea.pg-form-input {
 
 /* ==== chat =============================================================== */
 
+/* relative: anchors the 回到最新 floating button over the list */
 .pg-chat {
+	position: relative;
 	flex: 1;
 	min-width: 0;
 	display: flex;
@@ -948,11 +986,16 @@ textarea.pg-form-input {
 	background: rgb(255 255 255 / 0.02);
 }
 
+/* Off-screen bubbles skip layout/paint entirely — streaming reflows and
+ * scroll cost stop growing with conversation length (no virtualization lib).
+ * 64px ≈ median single-line bubble + gap; realized rows correct themselves. */
 .pg-chat-row {
 	display: flex;
 	flex-direction: column;
 	align-items: flex-end;
 	gap: 5px;
+	content-visibility: auto;
+	contain-intrinsic-size: auto 64px;
 }
 
 .pg-chat-row-assistant {
@@ -1002,11 +1045,12 @@ textarea.pg-form-input {
 	}
 }
 
-/* orchestration exchange card (goal bubble + dashed status card) */
+/* orchestration exchange card (goal bubble + dashed status card) — node-bg
+ * (elevation 2): a card floating among bubbles, distinct from the input bar */
 .pg-chat-orch-card {
 	width: 88%;
 	border: 1px solid var(--pg-border);
-	background: var(--pg-panel-bg);
+	background: var(--pg-node-bg);
 	border-radius: var(--pg-radius-lg);
 	padding: 10px 13px;
 	display: flex;
@@ -1047,6 +1091,21 @@ textarea.pg-form-input {
 
 .pg-chat-status-failed {
 	color: var(--pg-red);
+}
+
+/* user-initiated stop — neutral, not a warning */
+.pg-chat-status-aborted {
+	color: var(--pg-fg-dim);
+}
+
+/* 回到最新 — appears over the chat list once the user scrolls away from
+ * the streaming tail; re-following is one click, not a scroll hunt */
+.pg-scroll-bottom {
+	position: absolute;
+	right: 18px;
+	bottom: 14px;
+	z-index: 5;
+	box-shadow: var(--pg-shadow);
 }
 
 .pg-chat-chips {

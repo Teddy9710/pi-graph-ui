@@ -354,12 +354,21 @@ export function setRunSnapshot(events: RunEvent[] | undefined): void {
 }
 
 /** Fold one live run event into the run state. foldRunEvent mutates in place,
- *  so clone (state + node records) for zustand reference selectors. The node
- *  map clone stays null-prototype (emptyNodeMap) like every other node map. */
+ *  so clone for zustand reference selectors — but only what the event can
+ *  touch: node_* events mutate exactly ONE record (foldRunEvent never crosses
+ *  nodes otherwise; plan_/run_ events replace the whole map or top-level
+ *  fields). Cloning every record on every node_delta meant a full re-render
+ *  of all run subscribers per streamed token; this way unchanged node
+ *  records keep their references. The map clone stays null-prototype
+ *  (emptyNodeMap) like every other node map — a spread would reopen the
+ *  __proto__ injection surface emptyNodeMap exists to close. */
 export function applyRunEvent(event: RunEvent): void {
 	useOrchStore.setState((s) => {
-		const next: RunState = { ...s.run, nodes: emptyNodeMap() };
-		for (const [id, node] of Object.entries(s.run.nodes)) next.nodes[id] = { ...node };
+		const next: RunState = { ...s.run, nodes: Object.assign(emptyNodeMap(), s.run.nodes) };
+		if ("nodeId" in event) {
+			const record = next.nodes[event.nodeId];
+			if (record) next.nodes[event.nodeId] = { ...record };
+		}
 		foldRunEvent(next, event);
 		// An auto-orchestrated run takes over the canvas: the generated graph
 		// only exists in the run state, not in the editor — and the editor's

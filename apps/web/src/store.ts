@@ -49,6 +49,12 @@ interface AppState {
 	sessions: SessionMeta[];
 	/** Last sessions fetch failed (server down / blocked) — the drawer says so. */
 	sessionsError: boolean;
+	/** Sessions fetch in flight — the drawer shows 加载中 instead of flashing
+	 * 「暂无存档」 before the list lands. */
+	sessionsLoading: boolean;
+	/** A REPLAY load failed after the list was already showing — without this
+	 * the drawer stayed silent and the app silently fell back to live mode. */
+	historyError: { id: string; message: string } | null;
 	sendPrompt: (message: string) => void;
 	steer: (message: string) => void;
 	abort: () => void;
@@ -82,6 +88,52 @@ function ingest(store: AppState, events: JsonAgentSessionEvent[]): void {
 	(store as { session: SessionState }).session = { ...store.session };
 }
 
+// ============================================================================
+// Session-event batching. Streamed tokens arrive as individual WS messages,
+// each in its own macrotask — unbatched, EVERY token paid foldEvent +
+// deriveGraph + a full React render pass (chat list, mini graph, header).
+// Coalesce into one ingest per animation frame instead. Ordering is preserved
+// (single FIFO). hello/reset drop the queue: the snapshot they carry is
+// authoritative for the whole session. A size cap keeps progress even when
+// rAF is paused in a hidden tab.
+// ============================================================================
+let eventQueue: JsonAgentSessionEvent[] = [];
+let flushRaf = 0;
+
+function flushQueuedEvents(): void {
+	flushRaf = 0;
+	if (eventQueue.length === 0) return;
+	const batch = eventQueue;
+	eventQueue = [];
+	useStore.setState((s) => {
+		ingest(s as AppState, batch);
+		return { eventCount: s.eventCount + batch.length, lastEventAt: Date.now() };
+	});
+}
+
+function dropQueuedEvents(): void {
+	eventQueue = [];
+	if (flushRaf) {
+		cancelAnimationFrame(flushRaf);
+		flushRaf = 0;
+	}
+}
+
+function queueEvents(events: JsonAgentSessionEvent[]): void {
+	eventQueue.push(...events);
+	// rAF stalls while the tab is hidden — flush synchronously past the cap
+	// rather than buffering an unbounded backlog.
+	if (eventQueue.length >= 500) {
+		if (flushRaf) {
+			cancelAnimationFrame(flushRaf);
+			flushRaf = 0;
+		}
+		flushQueuedEvents();
+		return;
+	}
+	if (!flushRaf) flushRaf = requestAnimationFrame(flushQueuedEvents);
+}
+
 function resetSession(): { session: SessionState; graph: Graph; piExit: null } {
 	return { session: initState(), graph: { nodes: [], edges: [] }, piExit: null };
 }
@@ -98,6 +150,8 @@ export const useStore = create<AppState>((set, get) => ({
 	historyOpen: false,
 	sessions: [],
 	sessionsError: false,
+	sessionsLoading: false,
+	historyError: null,
 
 	sendPrompt: (message) => send({ type: "command", command: { type: "prompt", message } }),
 	steer: (message) => send({ type: "command", command: { type: "steer", message } }),
@@ -105,16 +159,16 @@ export const useStore = create<AppState>((set, get) => ({
 	newSession: () => send({ type: "command", command: { type: "new_session" } }),
 	select: (nodeId) => set({ selectedNodeId: nodeId }),
 	openHistory: async () => {
-		set({ historyOpen: true });
+		set({ historyOpen: true, sessionsLoading: true });
 		try {
 			const res = await fetch(`${API_BASE}/api/sessions`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const sessions: SessionMeta[] = await res.json();
-			set({ sessions, sessionsError: false });
+			set({ sessions, sessionsError: false, sessionsLoading: false });
 		} catch {
 			// Server down or the response was blocked (e.g. CORS) — say so
 			// instead of masquerading as 「暂无存档」.
-			set({ sessions: [], sessionsError: true });
+			set({ sessions: [], sessionsError: true, sessionsLoading: false });
 		}
 	},
 	loadHistory: async (id) => {
@@ -125,6 +179,7 @@ export const useStore = create<AppState>((set, get) => ({
 				graph: { nodes: [], edges: [] },
 				loading: true,
 			},
+			historyError: null,
 		});
 		try {
 			const meta = get().sessions.find((s) => s.id === id);
@@ -151,13 +206,20 @@ export const useStore = create<AppState>((set, get) => ({
 				},
 				selectedNodeId: null,
 			});
-		} catch {
-			if (req === historyReq) set({ history: null, sessionsError: true });
+		} catch (err) {
+			// The click failed — say WHICH session and offer a retry, instead
+			// of silently dumping the user back into live mode.
+			if (req === historyReq) {
+				set({
+					history: null,
+					historyError: { id, message: err instanceof Error ? err.message : "网络错误" },
+				});
+			}
 		}
 	},
 	exitHistory: () => {
 		historyReq++; // cancel any in-flight load
-		set({ history: null, selectedNodeId: null });
+		set({ history: null, historyError: null, selectedNodeId: null });
 	},
 }));
 
@@ -197,11 +259,15 @@ export function connect(): void {
 		}
 		if (envelope.type === "reset") {
 			// Bridge dropped the session - clear canvas, keep connection.
+			// Queued events belong to the dropped session — discard them.
+			dropQueuedEvents();
 			useStore.setState((s) => ({ ...resetSession(), selectedNodeId: null }));
 			return;
 		}
 		if (envelope.type === "hello" && envelope.snapshot) {
 			// Fresh replay of the whole session - rebuild state from scratch.
+			// The snapshot supersedes anything still queued from the old socket.
+			dropQueuedEvents();
 			useStore.setState((s) => {
 				const fresh = resetSession();
 				ingest(fresh as AppState, envelope.snapshot!);
@@ -213,10 +279,7 @@ export function connect(): void {
 			return;
 		}
 		if (envelope.type === "event" && envelope.event) {
-			useStore.setState((s) => {
-				ingest(s as AppState, [envelope.event!]);
-				return { eventCount: s.eventCount + 1, lastEventAt: Date.now() };
-			});
+			queueEvents([envelope.event!]);
 			return;
 		}
 		if (envelope.type === "run_event" && envelope.event) {
