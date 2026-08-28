@@ -57,20 +57,26 @@ function edgeStyle(e: EdgeDef, opts: { selected?: boolean } = {}): Edge {
 		label: text.length > EDGE_LABEL_DISPLAY_CHARS
 			? `${text.slice(0, EDGE_LABEL_DISPLAY_CHARS)}…`
 			: text,
-		labelStyle: { fill: "#8b93a5", fontSize: 11 },
-		labelBgStyle: { fill: "#0e1014" },
-		labelBgPadding: [6, 3] as [number, number],
-		labelBgBorderRadius: 4,
+		// label capsule: stroked rounded chip + dim text — the badge reads
+		// cleanly crossing nodes AND grid dots (classic rgba syntax: this
+		// string lands in an SVG style attribute, not CSSOM-rewritten CSS)
+		labelStyle: { fill: "#98a1b0", fontSize: 11 },
+		labelBgStyle: { fill: "#10131a", stroke: "rgba(255,255,255,0.09)", strokeWidth: 1 },
+		labelBgPadding: [7, 4] as [number, number],
+		labelBgBorderRadius: 5,
 		// No RF edge-selection (its default gray selected stroke fights our
 		// colors — same reasoning as GraphCanvas); click handlers + our own
-		// selected stroke drive the editor's edge selection instead.
+		// selected stroke drive the editor's edge selection instead. The
+		// selected edge gets the same blue bloom language as selected nodes.
 		selectable: false,
-		style: selected ? { stroke: "#5b9bf8", strokeWidth: 2 } : undefined,
+		style: selected
+			? { stroke: "#5b9bf8", strokeWidth: 2, filter: "drop-shadow(0 0 3px rgba(91,155,248,0.5))" }
+			: undefined,
 		markerEnd: {
 			type: MarkerType.ArrowClosed,
 			width: 16,
 			height: 16,
-			color: selected ? "#5b9bf8" : "#8b93a5",
+			color: selected ? "#5b9bf8" : "#838c9e",
 		},
 	};
 }
@@ -204,7 +210,7 @@ function Canvas() {
 				minZoom={0.15}
 				maxZoom={2}
 			>
-				<Background gap={22} color="rgba(255 255 255 / 0.07)" />
+				<Background gap={22} color="rgba(255 255 255 / 0.05)" />
 				<Controls showInteractive={false} />
 				<MiniMap pannable zoomable nodeStrokeWidth={2} />
 			</ReactFlow>
@@ -291,7 +297,7 @@ function RunCanvas() {
 			minZoom={0.15}
 			maxZoom={2}
 		>
-			<Background gap={22} color="rgba(255 255 255 / 0.07)" />
+			<Background gap={22} color="rgba(255 255 255 / 0.05)" />
 			<Controls showInteractive={false} />
 			<MiniMap pannable zoomable nodeStrokeWidth={2} />
 		</ReactFlow>

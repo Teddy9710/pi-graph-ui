@@ -12,6 +12,9 @@
  * Borders are low-alpha white (rgb(255 255 255 / .07–.14)), not solid grays —
  * solid grays read as cheap plastic; alpha borders blend with whatever is
  * beneath. Interactive elements transition at --pg-t.
+ *
+ * Light: one source. A blue seam under the header hands light to the canvas
+ * sky; panels catch it from the top, wells are carved away from it.
  * ========================================================================== */
 :root {
 	/* native select/datalist popups + default scrollbars follow the dark scheme */
@@ -40,6 +43,13 @@
 	--pg-shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px rgb(0 0 0 / 0.35);
 	--pg-shadow-pop: 0 2px 6px rgb(0 0 0 / 0.45), 0 12px 32px rgb(0 0 0 / 0.45);
 	--pg-t: 150ms ease;
+	/* entrance motion — one duration + one curve for everything that APPEARS;
+	 * hover/press feedback stays at the snappier --pg-t */
+	--pg-t-in: 200ms;
+	--pg-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+	/* two named ink levels replace the 0.6/0.62/0.65/0.85 near-misses */
+	--pg-ink-2: 0.85;
+	--pg-ink-3: 0.7;
 	/* one disabled opacity — 0.38 vs 0.55 in different spots left ghost-button
 	 * text around 3.2:1 contrast; 0.5 keeps cursor as the disabled cue */
 	--pg-disabled: 0.5;
@@ -76,15 +86,18 @@ body {
 	height: 10px;
 }
 *::-webkit-scrollbar-thumb {
+	/* 3px transparent border pulls the visible thumb to 4px inside the 10px
+	 * slot — quieter at rest; the full 10px stays the hit area */
 	background: #2c313c;
 	border-radius: 8px;
-	border: 2px solid transparent;
+	border: 3px solid transparent;
 	background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-	background: #3a4150;
+	/* a step brighter + cool-cast: blue still means interactive here */
+	background: #454f66;
 	background-clip: padding-box;
-	border: 2px solid transparent;
+	border: 3px solid transparent;
 }
 *::-webkit-scrollbar-corner,
 *::-webkit-scrollbar-track {
@@ -118,10 +131,25 @@ select:focus-visible {
 	padding: 0 16px;
 	height: 46px;
 	border-bottom: 1px solid var(--pg-border);
-	/* faint vertical sheen — chrome sits slightly ABOVE the body */
-	background: linear-gradient(180deg, #171a21, var(--pg-panel-bg));
+	/* lit chrome: one step brighter sheen + a top edge that catches the light */
+	background: linear-gradient(180deg, #191d25, var(--pg-panel-bg));
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
 	font-size: 12.5px;
 	flex-shrink: 0;
+	position: relative; /* anchors the light seam below */
+}
+/* the app's light source: a blue hairline riding the bottom border, brightest
+ * at center — it hands the light off to the canvas glow directly beneath, so
+ * header and canvas share one continuous light instead of stacking as strips */
+.pg-header::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: -1px;
+	height: 1px;
+	background: linear-gradient(90deg, transparent 3%, rgb(91 155 248 / 0.32) 50%, transparent 97%);
+	pointer-events: none;
 }
 
 .pg-logo {
@@ -139,7 +167,20 @@ select:focus-visible {
 	height: 10px;
 	border-radius: 3px;
 	background: linear-gradient(135deg, #6ca6ff, var(--pg-blue-deep));
-	box-shadow: 0 0 10px rgb(91 155 248 / 0.55);
+	/* inset white line = a lit bevel on the chip; the outer glow breathes */
+	box-shadow: 0 0 10px rgb(91 155 248 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.4);
+	animation: pg-logo-breathe 5s ease-in-out infinite;
+}
+/* a 5s cycle sits below conscious perception — the mark feels alive without
+ * ever appearing to animate (reduced-motion parks it at the static glow) */
+@keyframes pg-logo-breathe {
+	0%,
+	100% {
+		box-shadow: 0 0 9px rgb(91 155 248 / 0.45), inset 0 1px 0 rgb(255 255 255 / 0.4);
+	}
+	50% {
+		box-shadow: 0 0 16px rgb(91 155 248 / 0.75), inset 0 1px 0 rgb(255 255 255 / 0.4);
+	}
 }
 
 /* tabs read as one segmented control */
@@ -150,11 +191,17 @@ select:focus-visible {
 	border-radius: var(--pg-radius-sm);
 	padding: 5px 14px;
 	font-size: 12.5px;
+	letter-spacing: 0.02em;
 	cursor: pointer;
-	transition: color var(--pg-t), background var(--pg-t), border-color var(--pg-t);
+	transition: color var(--pg-t), background var(--pg-t), border-color var(--pg-t), transform var(--pg-t);
 }
 .pg-tab:hover {
 	color: var(--pg-fg);
+	/* a whisper of mist — hover forms one step below the active blue */
+	background: rgb(255 255 255 / 0.05);
+}
+.pg-tab:active {
+	transform: translateY(1px);
 }
 .pg-tab.active {
 	opacity: 1;
@@ -178,10 +225,11 @@ select:focus-visible {
 	color: var(--pg-red);
 }
 
-/* token counters are data — mono, dim, tight */
+/* token counters are data — mono, dim, tight, and digit-stable */
 .pg-usage {
 	font-family: var(--pg-mono);
 	font-size: 11px;
+	font-variant-numeric: tabular-nums;
 }
 
 .pg-main {
@@ -196,12 +244,17 @@ select:focus-visible {
 	min-width: 0;
 }
 
-/* canvas wells: faint cool ambient light from the top edge */
+/* canvas wells: a three-layer sky — cool key light from the top edge, a
+ * fainter off-axis wash (so the light isn't mirror-symmetric and dead), and
+ * a floor shadow at the bottom edge. Depth you feel rather than read; nodes
+ * and text keep their own backgrounds above it. */
 .pg-canvas,
 .pg-mini-canvas,
 .pg-orch-canvas-wrap {
 	background:
-		radial-gradient(120% 60% at 50% -6%, rgb(91 155 248 / 0.05), transparent 55%),
+		radial-gradient(120% 60% at 50% -6%, rgb(91 155 248 / 0.055), transparent 55%),
+		radial-gradient(70% 50% at 14% 6%, rgb(91 155 248 / 0.028), transparent 60%),
+		radial-gradient(130% 80% at 50% 118%, rgb(3 5 9 / 0.55), transparent 62%),
 		var(--pg-bg);
 }
 
@@ -211,9 +264,21 @@ select:focus-visible {
 	width: 360px;
 	overflow-y: auto;
 	border-left: 1px solid var(--pg-border);
-	background: var(--pg-panel-bg);
+	/* chrome catches the light from the top (the gradient anchors to the box,
+	 * not the content — scrolling never shimmers) */
+	background: linear-gradient(180deg, #171a22, var(--pg-panel-bg) 96px);
 	padding: 14px;
 	font-size: 12.5px;
+}
+/* panel-head hierarchy: 题(13 bold) > 文(12.5) > 注(11) — the header stops
+ * being "bold body text + default code" and starts reading as a page title */
+.pg-panel > header b {
+	font-size: 13px;
+	letter-spacing: 0.01em;
+}
+.pg-panel > header code {
+	font-family: var(--pg-mono);
+	font-size: 11px;
 }
 
 .pg-panel > header,
@@ -226,25 +291,41 @@ select:focus-visible {
 
 .pg-panel h4,
 .pg-drawer h4 {
-	margin: 14px 0 5px;
+	margin: 16px 0 6px;
 	font-size: 11px;
 	font-weight: 600;
 	text-transform: uppercase;
 	letter-spacing: 0.07em;
 	color: var(--pg-fg-dim);
+	/* section heads lead with a hairline fading right — visible grouping */
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	white-space: nowrap;
+}
+.pg-panel h4::after,
+.pg-drawer h4::after {
+	content: "";
+	flex: 1;
+	height: 1px;
+	background: linear-gradient(90deg, var(--pg-border-strong), transparent 85%);
+}
+/* long Chinese hint sentences need real leading to be readable */
+.pg-panel p {
+	line-height: 1.7;
 }
 
 .pg-pre {
 	background: var(--pg-bg-well);
 	border: 1px solid var(--pg-border);
 	border-radius: var(--pg-radius-sm);
-	padding: 10px;
+	padding: 10px 12px;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 	font-family: var(--pg-mono);
 	font-size: 11.5px;
-	line-height: 1.55;
-	margin: 4px 0;
+	line-height: 1.6;
+	margin: 6px 0;
 	max-height: 320px;
 	overflow-y: auto;
 }
@@ -253,10 +334,11 @@ select:focus-visible {
 	font-size: 11px;
 	color: var(--pg-fg-dim);
 	margin-top: 4px;
+	font-variant-numeric: tabular-nums;
 }
 
 .pg-dim {
-	opacity: 0.62;
+	opacity: var(--pg-ink-3);
 }
 
 .pg-error-text {
@@ -323,7 +405,9 @@ select:focus-visible {
 	gap: 8px;
 	padding: 12px 16px;
 	border-top: 1px solid var(--pg-border);
-	background: var(--pg-panel-bg);
+	/* a lit tray at the bottom edge of the page */
+	background: linear-gradient(180deg, #171a21, var(--pg-panel-bg));
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
 	flex-shrink: 0;
 }
 
@@ -337,6 +421,15 @@ select:focus-visible {
 	padding: 10px 14px;
 	font-size: 13.5px;
 	outline: none;
+	/* carved rest state: a top inner shadow + a line of light at the floor —
+	 * the well reads as cut IN, not a dark sticker. The trailing zero-alpha
+	 * rings mirror the focus list so the glow interpolates instead of popping */
+	box-shadow:
+		inset 0 1px 2px rgb(0 0 0 / 0.35),
+		inset 0 -1px 0 rgb(255 255 255 / 0.03),
+		0 0 0 1px rgb(91 155 248 / 0),
+		0 0 0 4px rgb(91 155 248 / 0),
+		0 2px 12px rgb(91 155 248 / 0);
 	transition: border-color var(--pg-t), box-shadow var(--pg-t);
 }
 /* 0.55 alpha landed ~3:1 on the well background — placeholders carry real
@@ -345,8 +438,15 @@ select:focus-visible {
 	color: rgb(152 161 176 / 0.8);
 }
 .pg-input-bar input:focus {
-	border-color: rgb(91 155 248 / 0.55);
-	box-shadow: 0 0 0 3px rgb(91 155 248 / 0.14);
+	border-color: rgb(91 155 248 / 0.6);
+	/* sandwich ring: a 1px bright ring hugging the border + a 4px soft halo +
+	 * a spill of light downward; the carve stays so the groove never flattens */
+	box-shadow:
+		inset 0 1px 2px rgb(0 0 0 / 0.35),
+		inset 0 -1px 0 rgb(255 255 255 / 0.03),
+		0 0 0 1px rgb(91 155 248 / 0.28),
+		0 0 0 4px rgb(91 155 248 / 0.1),
+		0 2px 12px rgb(91 155 248 / 0.12);
 }
 .pg-input-bar input:disabled {
 	opacity: var(--pg-disabled);
@@ -373,12 +473,28 @@ select:focus-visible {
 	box-sizing: border-box;
 	font-size: 12.5px;
 	font-weight: 500;
+	letter-spacing: 0.02em;
 	cursor: pointer;
 	box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.14);
-	transition: filter var(--pg-t), transform var(--pg-t), box-shadow var(--pg-t);
+	/* background/border/color join the list: ghost buttons hover via exactly
+	 * those, and a transition that skips them pops instead of fading */
+	transition:
+		filter var(--pg-t),
+		transform var(--pg-t),
+		box-shadow var(--pg-t),
+		background-color var(--pg-t),
+		border-color var(--pg-t),
+		color var(--pg-t);
 }
-.pg-btn:hover:not(:disabled) {
-	filter: brightness(1.1);
+/* hover = glow, not just brightness: a same-hue halo ties buttons to the
+ * selected-node / live-edge light language. drop-shadow (not box-shadow) so
+ * :active's shadow reset still reads as a press */
+.pg-btn:hover:not(:disabled):not(.pg-btn-ghost) {
+	filter: brightness(1.07) drop-shadow(0 2px 10px rgb(59 130 246 / 0.45));
+}
+/* danger glows red — a blue halo on an abort button would lie */
+.pg-btn.pg-btn-danger:hover:not(:disabled) {
+	filter: brightness(1.07) drop-shadow(0 2px 10px rgb(207 58 58 / 0.5));
 }
 .pg-btn:active:not(:disabled) {
 	transform: translateY(1px);
@@ -404,8 +520,10 @@ select:focus-visible {
 }
 .pg-btn-ghost:hover:not(:disabled) {
 	filter: none;
-	background: rgb(255 255 255 / 0.09);
-	border-color: rgb(255 255 255 / 0.24);
+	/* directional micro-gradient + a lit top edge: frosted glass, not mist */
+	background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.05));
+	border-color: rgb(255 255 255 / 0.26);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08);
 }
 .pg-btn-ghost:active:not(:disabled) {
 	background: rgb(255 255 255 / 0.06);
@@ -413,22 +531,25 @@ select:focus-visible {
 
 /* ==== live-graph edges (canvas) ========================================= */
 
+/* static edges sit a half-step thinner so nodes own the foreground; the
+ * transition lets the live class LIGHT a path up instead of snapping it */
 .pg-edge path,
 .pg-edge .react-flow__edge-path {
-	stroke: #8b93a5;
-	stroke-width: 2;
+	stroke: #838c9e;
+	stroke-width: 1.75;
 	stroke-linecap: round;
+	transition: stroke var(--pg-t), stroke-width var(--pg-t);
 }
 .pg-edge-spawn path,
 .pg-edge-spawn .react-flow__edge-path {
-	stroke-dasharray: 6 4;
-	stroke: #7ba4e0;
+	stroke-dasharray: 5 4;
+	stroke: rgb(123 164 224 / 0.85);
 }
 .pg-edge-live path,
 .pg-edge-live .react-flow__edge-path {
 	stroke: var(--pg-blue);
 	stroke-width: 2.5;
-	filter: drop-shadow(0 0 3px rgb(91 155 248 / 0.45));
+	filter: drop-shadow(0 0 4px rgb(91 155 248 / 0.5));
 }
 
 /* ==== React Flow chrome (dark, via CSS vars + fallbacks) ================= */
@@ -440,26 +561,32 @@ select:focus-visible {
 	 * This one sits under the <Background color=…> inline prop — a real
 	 * fallback if a call site ever drops the prop. */
 	--xy-background-pattern-color: rgb(255 255 255 / 0.07);
-	--xy-controls-box-shadow: var(--pg-shadow);
-	--xy-controls-button-background-color: #1b1f27;
-	--xy-controls-button-background-color-hover: #262b36;
+	--xy-controls-box-shadow: 0 4px 16px rgb(0 0 0 / 0.4);
+	/* translucent bases + the blur rules below = frosted glass floating over
+	 * the canvas instead of opaque slabs sitting on it */
+	--xy-controls-button-background-color: rgb(27 31 39 / 0.75);
+	--xy-controls-button-background-color-hover: rgb(38 43 54 / 0.9);
 	--xy-controls-button-color: #aab3c2;
 	--xy-controls-button-color-hover: #fff;
 	--xy-controls-button-border-color: var(--pg-border);
-	--xy-minimap-background-color: #10131a;
-	--xy-minimap-mask-background-color: rgb(6 8 12 / 0.55);
-	--xy-minimap-node-background-color: #3a4354;
+	--xy-minimap-background-color: rgb(16 19 26 / 0.72);
+	--xy-minimap-mask-background-color: rgb(6 8 12 / 0.48);
+	--xy-minimap-node-background-color: #454f63;
 	--xy-minimap-node-stroke-color: transparent;
 	--xy-attribution-background-color: transparent;
 }
 .react-flow__controls {
 	border-radius: var(--pg-radius-sm);
 	overflow: hidden;
+	border: 1px solid var(--pg-border);
+	backdrop-filter: blur(10px);
 }
 .react-flow__minimap {
-	border-radius: var(--pg-radius-sm);
+	border-radius: var(--pg-radius);
 	overflow: hidden;
 	border: 1px solid var(--pg-border);
+	box-shadow: var(--pg-shadow);
+	backdrop-filter: blur(10px) saturate(1.15);
 }
 
 /* ==== history ============================================================ */
@@ -485,25 +612,36 @@ select:focus-visible {
 .pg-drawer-overlay {
 	position: fixed;
 	inset: 0;
-	background: rgb(4 6 10 / 0.55);
-	backdrop-filter: blur(3px);
+	background: rgb(4 6 10 / 0.5);
+	/* blur + slight desaturation: the app recedes, the drawer becomes the subject */
+	backdrop-filter: blur(6px) saturate(0.85);
 	z-index: 30;
 	display: flex;
+	animation: pg-overlay-in var(--pg-t-in) ease;
+}
+@keyframes pg-overlay-in {
+	from {
+		opacity: 0;
+	}
 }
 
 .pg-drawer {
 	width: 380px;
-	background: var(--pg-panel-bg);
-	border-right: 1px solid var(--pg-border);
+	/* frosted panel riding its own blur — glass, not gray paint; 0.86 alpha
+	 * over an already-dark overlay keeps text contrast at least where it was */
+	background: rgb(20 22 28 / 0.86);
+	backdrop-filter: blur(16px) saturate(1.2);
+	border-right: 1px solid rgb(255 255 255 / 0.1);
 	padding: 16px;
 	overflow-y: auto;
-	box-shadow: var(--pg-shadow-pop);
-	animation: pg-drawer-in 200ms ease;
+	box-shadow: var(--pg-shadow-pop), inset 0 1px 0 rgb(255 255 255 / 0.05);
+	animation: pg-drawer-in var(--pg-t-in) var(--pg-ease-out);
 }
+/* shorter travel + the shared ease-out: the drawer settles instead of lurching */
 @keyframes pg-drawer-in {
 	from {
-		transform: translateX(-40px);
-		opacity: 0.4;
+		transform: translateX(-24px);
+		opacity: 0;
 	}
 }
 
@@ -524,11 +662,14 @@ select:focus-visible {
 	cursor: pointer;
 	padding: 4px 8px;
 	border-radius: var(--pg-radius-sm);
-	transition: color var(--pg-t), background var(--pg-t);
+	transition: color var(--pg-t), background var(--pg-t), transform var(--pg-t);
 }
 .pg-drawer-close:hover {
 	color: var(--pg-fg);
 	background: rgb(255 255 255 / 0.08);
+}
+.pg-drawer-close:active {
+	transform: translateY(1px);
 }
 
 .pg-drawer ul {
@@ -550,17 +691,39 @@ select:focus-visible {
 	padding: 11px 12px;
 	cursor: pointer;
 	font-size: 12.5px;
-	transition: border-color var(--pg-t), background var(--pg-t), transform var(--pg-t);
+	position: relative; /* anchors the active LED strip */
+	transition: border-color var(--pg-t), background var(--pg-t), transform var(--pg-t), box-shadow var(--pg-t);
 }
 .pg-session-item:hover {
 	border-color: var(--pg-border-strong);
-	background: #1e232d;
+	/* micro-gradient + a 1px lift + drop shadow: the card is picked up */
+	background: linear-gradient(180deg, #212630, #1b2029);
+	transform: translateY(-1px);
+	box-shadow: 0 4px 12px rgb(0 0 0 / 0.3);
+}
+.pg-session-item:active {
+	transform: translateY(1px);
 }
 /* hover and active used to share the SAME blue border — during replay you
- * couldn't tell which item was loaded. Active alone gets the accent. */
+ * couldn't tell which item was loaded. Active alone gets the accent: a blue
+ * wash over the card plus an LED strip set into the left edge (fading at
+ * both ends, softly lit — not a full-height hard bar). */
 .pg-session-item.active {
 	border-color: rgb(91 155 248 / 0.55);
-	box-shadow: inset 3px 0 0 var(--pg-blue);
+	background:
+		linear-gradient(180deg, rgb(91 155 248 / 0.09), rgb(91 155 248 / 0.03)),
+		linear-gradient(180deg, #1d222b, var(--pg-node-bg));
+}
+.pg-session-item.active::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 9px;
+	bottom: 9px;
+	width: 3px;
+	border-radius: 2px;
+	background: linear-gradient(180deg, transparent, var(--pg-blue) 22%, var(--pg-blue) 78%, transparent);
+	box-shadow: 0 0 8px rgb(91 155 248 / 0.55);
 }
 .pg-session-title {
 	overflow: hidden;
@@ -568,6 +731,13 @@ select:focus-visible {
 	white-space: nowrap;
 	margin-bottom: 5px;
 	font-weight: 500;
+	font-size: 13px;
+}
+/* meta line drops to the metadata size — title vs footnote at a glance */
+.pg-session-item .pg-dim {
+	font-size: 11px;
+	letter-spacing: 0.01em;
+	font-variant-numeric: tabular-nums;
 }
 
 /* ============================================================================
@@ -587,13 +757,22 @@ select:focus-visible {
 	min-height: 41px;
 	box-sizing: border-box;
 	flex-shrink: 0;
+	/* the shadow the goal bar casts on this one — it sits one level lower */
+	box-shadow: inset 0 1px 0 rgb(0 0 0 / 0.18);
 }
 
 /* 目标 bar: the auto-orchestration entry (goal → plan → run) — sits a shade
    above the run bar so the two rows don't read as one packed strip. */
 .pg-orch-goal {
 	gap: 8px;
-	background: #171a21;
+	background: linear-gradient(180deg, #1c212b, #171a21);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035);
+}
+/* the hero input gets a barely-blue cast — tied to the ⚡ it feeds */
+.pg-orch-goal .pg-orch-goal-input {
+	background:
+		linear-gradient(180deg, rgb(91 155 248 / 0.05), rgb(91 155 248 / 0) 55%),
+		var(--pg-bg-well);
 }
 
 /* one control height for everything in the two bars (btn-sm ≈26 / select ≈29 /
@@ -619,7 +798,8 @@ select:focus-visible {
 .pg-orch-plan-tail {
 	font-family: var(--pg-mono);
 	font-size: 11px;
-	opacity: 0.65;
+	opacity: var(--pg-ink-3);
+	font-variant-numeric: tabular-nums;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -632,13 +812,30 @@ select:focus-visible {
 	position: absolute;
 	inset: 0;
 	display: flex;
+	flex-direction: column;
 	align-items: center;
 	justify-content: center;
+	gap: 12px;
 	color: var(--pg-fg-dim);
 	font-size: 13px;
 	pointer-events: none;
 	text-align: center;
 	padding: 0 24px;
+}
+/* a dashed card behind the hint — an empty canvas reads as designed, and
+ * speaks the same empty-state language as the chat column */
+.pg-orch-empty::before {
+	content: "";
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: clamp(300px, 58%, 520px);
+	min-height: 96px;
+	box-sizing: border-box;
+	border: 1px dashed var(--pg-border-strong);
+	border-radius: var(--pg-radius-lg);
+	background: rgb(255 255 255 / 0.02);
 }
 .pg-orch-bar select {
 	background: var(--pg-bg-well);
@@ -656,54 +853,91 @@ select:focus-visible {
 .pg-orch-bar select:hover:not(:disabled) {
 	border-color: var(--pg-border-strong);
 }
-.pg-orch-bar select:focus {
-	border-color: rgb(91 155 248 / 0.55);
-	box-shadow: 0 0 0 3px rgb(91 155 248 / 0.14);
-}
 
-/* run summary / issue chips */
+/* run summary / issue chips — glass beads: a top-lit micro-gradient + a lit
+ * inner edge; pills read as little glass beads, not outlined boxes */
 .pg-orch-chip {
 	font-size: 11px;
-	border: 1px solid var(--pg-border);
-	background: rgb(255 255 255 / 0.04);
+	border: 1px solid rgb(255 255 255 / 0.09);
+	background: linear-gradient(180deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.03));
 	border-radius: 999px;
 	padding: 2px 10px;
-	opacity: 0.85;
+	opacity: 0.9;
 	white-space: nowrap;
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05);
+	font-variant-numeric: tabular-nums;
 }
 /* the run-status chip speaks the same colored language as the chat card —
- * one status, one tone, on every page */
+ * one status, one tone (text + border + wash), on every page */
 .pg-chip-planning {
 	color: var(--pg-amber);
+	border-color: rgb(251 191 36 / 0.35);
+	background: linear-gradient(180deg, rgb(251 191 36 / 0.12), rgb(251 191 36 / 0.05));
 }
 .pg-chip-running {
 	color: var(--pg-blue);
+	border-color: rgb(91 155 248 / 0.35);
+	background: linear-gradient(180deg, rgb(91 155 248 / 0.13), rgb(91 155 248 / 0.05));
 }
 .pg-chip-completed {
 	color: var(--pg-green);
+	border-color: rgb(63 214 159 / 0.3);
+	background: linear-gradient(180deg, rgb(63 214 159 / 0.11), rgb(63 214 159 / 0.04));
 }
 .pg-chip-failed {
 	color: var(--pg-red);
+	border-color: rgb(248 113 113 / 0.35);
+	background: linear-gradient(180deg, rgb(248 113 113 / 0.12), rgb(248 113 113 / 0.05));
 }
 .pg-chip-aborted {
 	color: var(--pg-fg-dim);
 }
+/* validation-issue chip (pg-orch-chip + pg-error-text): a red frame answers
+ * the red text */
+.pg-orch-chip.pg-error-text {
+	border-color: rgb(248 113 113 / 0.35);
+	background: linear-gradient(180deg, rgb(248 113 113 / 0.12), rgb(248 113 113 / 0.05));
+}
 
-/* canvas lock banner while a run executes */
+/* canvas lock banner while a run executes — a glass pill with a breathing
+ * amber dot: a live status, not a gray box */
 .pg-orch-lock {
 	position: absolute;
 	top: 12px;
 	left: 50%;
 	transform: translateX(-50%);
 	z-index: 10;
-	background: var(--pg-node-bg);
-	border: 1px solid var(--pg-border);
-	border-radius: var(--pg-radius-sm);
-	padding: 5px 12px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: rgb(25 29 37 / 0.88);
+	backdrop-filter: blur(8px);
+	border: 1px solid rgb(251 191 36 / 0.22);
+	border-radius: 999px;
+	padding: 6px 14px 6px 12px;
 	font-size: 12px;
 	color: var(--pg-fg-dim);
 	box-shadow: var(--pg-shadow);
 	pointer-events: none;
+	animation: pg-fade-in 180ms var(--pg-ease-out) 120ms backwards;
+}
+.pg-orch-lock::before {
+	content: "";
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--pg-amber);
+	box-shadow: 0 0 8px rgb(251 191 36 / 0.75);
+	animation: pg-lock-breathe 1.6s ease-in-out infinite;
+}
+@keyframes pg-lock-breathe {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
 }
 
 /* the page stacks under the app header — full height would overflow */
@@ -779,10 +1013,6 @@ select:focus-visible {
 .pg-form-input:hover:not(:disabled) {
 	border-color: var(--pg-border-strong);
 }
-.pg-form-input:focus {
-	border-color: rgb(91 155 248 / 0.55);
-	box-shadow: 0 0 0 3px rgb(91 155 248 / 0.14);
-}
 .pg-form-input:disabled {
 	opacity: var(--pg-disabled);
 }
@@ -801,15 +1031,15 @@ textarea.pg-form-input {
 	overflow: hidden;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
-	opacity: 0.6;
+	opacity: var(--pg-ink-3);
 }
 
-/* generic small chip (node @agent/model badges) */
+/* generic small chip (node @agent/model badges) — same glass-bead family */
 .pg-chip {
 	display: inline-block;
 	font-size: 10.5px;
-	border: 1px solid var(--pg-border);
-	background: rgb(255 255 255 / 0.04);
+	border: 1px solid rgb(255 255 255 / 0.09);
+	background: linear-gradient(180deg, rgb(255 255 255 / 0.06), rgb(255 255 255 / 0.025));
 	border-radius: 999px;
 	padding: 1px 8px;
 	color: var(--pg-fg-dim);
@@ -844,6 +1074,7 @@ textarea.pg-form-input {
 .pg-rh {
 	position: relative;
 	outline: none;
+	--pg-rh-grip: var(--pg-border-strong);
 }
 .pg-rh::after {
 	content: "";
@@ -885,13 +1116,41 @@ textarea.pg-form-input {
 	outline: 2px solid rgb(91 155 248 / 0.65);
 	outline-offset: -2px;
 }
+/* drag grips: a pair of short bars at the center of the line (two vertical
+ * ticks = drag left/right; horizontal ticks = up/down). Resting at
+ * border-strong they whisper "draggable"; hover/drag/focus lights them blue
+ * through the same component variable the gradient reads. */
+.pg-rh::before {
+	content: "";
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	border-radius: 1px;
+}
+.pg-rh-col::before {
+	width: 5px;
+	height: 16px;
+	background: linear-gradient(90deg, var(--pg-rh-grip) 0 1px, transparent 1px 4px, var(--pg-rh-grip) 4px 5px);
+}
+.pg-rh-row::before {
+	width: 16px;
+	height: 5px;
+	background: linear-gradient(180deg, var(--pg-rh-grip) 0 1px, transparent 1px 4px, var(--pg-rh-grip) 4px 5px);
+}
+.pg-rh[data-separator="hover"],
+.pg-rh[data-separator="active"],
+.pg-rh[data-separator="focus"] {
+	--pg-rh-grip: rgb(91 155 248 / 0.9);
+}
 
 .pg-side {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
 	min-width: 0;
-	background: var(--pg-panel-bg);
+	/* the same top light the panels catch */
+	background: linear-gradient(180deg, #171a22, var(--pg-panel-bg) 96px);
 }
 
 /* DetailPanel fills its slot (its own .pg-panel width is for the old fixed
@@ -953,7 +1212,10 @@ textarea.pg-form-input {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
-	background: var(--pg-bg);
+	/* the chat column joins the canvas sky — one light source app-wide */
+	background:
+		radial-gradient(110% 45% at 50% -4%, rgb(91 155 248 / 0.03), transparent 60%),
+		var(--pg-bg);
 }
 
 .pg-chat-header {
@@ -983,7 +1245,27 @@ textarea.pg-form-input {
 	padding: 22px 26px;
 	border: 1px dashed var(--pg-border-strong);
 	border-radius: var(--pg-radius-lg);
-	background: rgb(255 255 255 / 0.02);
+	background:
+		radial-gradient(70% 90% at 50% 0%, rgb(91 155 248 / 0.045), transparent 70%),
+		rgb(255 255 255 / 0.02);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+	animation: pg-chat-in 240ms var(--pg-ease-out);
+}
+/* a "typing…" bubble drawn entirely in gradients (no text): three fading
+ * dots give the empty state an anchor without stealing the show */
+.pg-chat-empty::before {
+	content: "";
+	display: block;
+	width: 38px;
+	height: 28px;
+	margin: 0 auto 14px;
+	border-radius: 12px 12px 12px 3px;
+	border: 1px solid rgb(255 255 255 / 0.1);
+	background:
+		radial-gradient(circle at 13px 14px, rgb(152 161 176 / 0.55) 0 1.8px, transparent 2.2px),
+		radial-gradient(circle at 19px 14px, rgb(152 161 176 / 0.4) 0 1.8px, transparent 2.2px),
+		radial-gradient(circle at 25px 14px, rgb(152 161 176 / 0.28) 0 1.8px, transparent 2.2px),
+		linear-gradient(180deg, rgb(255 255 255 / 0.045), rgb(255 255 255 / 0.015));
 }
 
 /* Off-screen bubbles skip layout/paint entirely — streaming reflows and
@@ -996,6 +1278,17 @@ textarea.pg-form-input {
 	gap: 5px;
 	content-visibility: auto;
 	contain-intrinsic-size: auto 64px;
+	/* the entrance rides THIS layer (the one carrying content-visibility),
+	 * not the bubble inside it: rows mounted off-screen finish their 200ms
+	 * long before any scroll back, so history never re-animates */
+	animation: pg-chat-in var(--pg-t-in) var(--pg-ease-out);
+}
+
+@keyframes pg-chat-in {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
 }
 
 .pg-chat-row-assistant {
@@ -1003,15 +1296,20 @@ textarea.pg-form-input {
 }
 
 .pg-chat-bubble {
-	max-width: 88%;
+	/* reading measure: ~40 CJK chars/line beats 88% on wide screens; 1.75
+	 * leading + a hair of tracking keeps long Chinese replies breathable */
+	max-width: min(88%, 40em);
 	background: var(--pg-node-bg);
 	border: 1px solid var(--pg-border);
 	border-radius: 12px 12px 12px 4px;
 	padding: 9px 13px;
 	font-size: 13px;
-	line-height: 1.65;
+	line-height: 1.75;
+	letter-spacing: 0.01em;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
+	/* the same float the node cards get — bubbles stop reading as flat chips */
+	box-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 18px rgb(0 0 0 / 0.16);
 }
 
 .pg-chat-bubble-user {
@@ -1022,9 +1320,15 @@ textarea.pg-form-input {
 	box-shadow: 0 2px 10px rgb(59 130 246 / 0.22);
 }
 
+/* tool-call count: a quiet pill from the same family as the chips */
 .pg-chat-tools {
 	font-size: 11px;
 	color: var(--pg-fg-dim);
+	border: 1px solid rgb(255 255 255 / 0.08);
+	background: rgb(255 255 255 / 0.03);
+	border-radius: 999px;
+	padding: 1px 8px;
+	font-variant-numeric: tabular-nums;
 }
 
 /* streaming reply cursor */
@@ -1035,13 +1339,14 @@ textarea.pg-form-input {
 	margin-left: 2px;
 	vertical-align: -2px;
 	background: var(--pg-green);
-	border-radius: 1.5px;
-	animation: pg-chat-blink 1s steps(2, start) infinite;
+	border-radius: 2px;
+	/* a pen nib breathing, not a terminal block hard-blinking */
+	animation: pg-chat-breathe 1.1s ease-in-out infinite;
 }
 
-@keyframes pg-chat-blink {
-	to {
-		visibility: hidden;
+@keyframes pg-chat-breathe {
+	50% {
+		opacity: 0.25;
 	}
 }
 
@@ -1049,6 +1354,7 @@ textarea.pg-form-input {
  * (elevation 2): a card floating among bubbles, distinct from the input bar */
 .pg-chat-orch-card {
 	width: 88%;
+	max-width: 40em; /* the same right-edge rhythm as the bubbles beside it */
 	border: 1px solid var(--pg-border);
 	background: var(--pg-node-bg);
 	border-radius: var(--pg-radius-lg);
@@ -1098,14 +1404,47 @@ textarea.pg-form-input {
 	color: var(--pg-fg-dim);
 }
 
+/* while work is in flight the status dot breathes (glow gathers + dims);
+ * settled states fall silent — the quiet IS the status change */
+.pg-chat-status-planning::before,
+.pg-chat-status-running::before {
+	animation: pg-status-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes pg-status-breathe {
+	50% {
+		opacity: 0.55;
+		box-shadow: 0 0 3px currentcolor;
+	}
+}
+
 /* 回到最新 — appears over the chat list once the user scrolls away from
  * the streaming tail; re-following is one click, not a scroll hunt */
+/* 回到最新 — a frosted badge floating over the stream: present, not blocking */
 .pg-scroll-bottom {
 	position: absolute;
 	right: 18px;
 	bottom: 14px;
 	z-index: 5;
-	box-shadow: var(--pg-shadow);
+	background: rgb(22 26 34 / 0.55);
+	backdrop-filter: blur(8px);
+	border-color: rgb(255 255 255 / 0.16);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1), 0 4px 16px rgb(0 0 0 / 0.5);
+	animation: pg-pop-in 160ms var(--pg-ease-out);
+}
+/* prefixed to (0,4,0) so the generic ghost hover can't paint mist over glass */
+.pg-btn-ghost.pg-scroll-bottom:hover:not(:disabled) {
+	filter: none;
+	background: rgb(30 35 45 / 0.6);
+	border-color: rgb(255 255 255 / 0.26);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.12), 0 6px 18px rgb(0 0 0 / 0.55);
+}
+
+@keyframes pg-pop-in {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
 }
 
 .pg-chat-chips {
@@ -1137,6 +1476,44 @@ textarea.pg-form-input {
 	border-color: rgb(91 155 248 / 0.55) !important;
 	background: rgb(91 155 248 / 0.12) !important;
 	box-shadow: 0 0 0 3px rgb(91 155 248 / 0.1);
+	/* a one-shot 8% rebound — the switch's "click" */
+	animation: pg-bolt-pop 220ms var(--pg-ease-out);
+}
+
+@keyframes pg-bolt-pop {
+	from {
+		transform: scale(0.92);
+	}
+}
+
+/* carved rest + sandwich focus for the remaining wells (form inputs, bar
+ * selects) — the same treatment the prompt input gets; gathered here, after
+ * their original rules, so these win the cascade by order */
+.pg-form-input,
+.pg-orch-bar select {
+	box-shadow:
+		inset 0 1px 2px rgb(0 0 0 / 0.35),
+		inset 0 -1px 0 rgb(255 255 255 / 0.03),
+		0 0 0 1px rgb(91 155 248 / 0),
+		0 0 0 4px rgb(91 155 248 / 0),
+		0 2px 12px rgb(91 155 248 / 0);
+}
+.pg-form-input:focus,
+.pg-orch-bar select:focus {
+	border-color: rgb(91 155 248 / 0.6);
+	box-shadow:
+		inset 0 1px 2px rgb(0 0 0 / 0.35),
+		inset 0 -1px 0 rgb(255 255 255 / 0.03),
+		0 0 0 1px rgb(91 155 248 / 0.28),
+		0 0 0 4px rgb(91 155 248 / 0.1),
+		0 2px 12px rgb(91 155 248 / 0.12);
+}
+
+/* shared mount fade (nodes.css references this for node/edge entrances) */
+@keyframes pg-fade-in {
+	from {
+		opacity: 0;
+	}
 }
 
 /* users who prefer stillness get stillness */

@@ -7,23 +7,32 @@
 	padding: 9px 12px;
 	border-radius: var(--pg-radius);
 	border: 1px solid var(--pg-border);
-	/* faint top sheen makes the card read as raised */
-	background: linear-gradient(180deg, #1d222b, var(--pg-node-bg));
+	/* brighter top sheen gathering at 58% + an inset lit edge: the card reads
+	 * as glass under a lamp; the third wide shadow displaces the air around
+	 * it (paint only — dagre's size contract is untouched) */
+	background: linear-gradient(180deg, #212732, var(--pg-node-bg) 58%);
 	color: var(--pg-fg);
 	font-size: 12px;
-	box-shadow: 0 1px 3px rgb(0 0 0 / 0.4), 0 6px 16px rgb(0 0 0 / 0.25);
-	transition: border-color var(--pg-t), box-shadow var(--pg-t);
+	box-shadow:
+		inset 0 1px 0 rgb(255 255 255 / 0.05),
+		0 1px 3px rgb(0 0 0 / 0.4),
+		0 6px 16px rgb(0 0 0 / 0.25),
+		0 18px 44px rgb(0 0 0 / 0.14);
+	transition: border-color var(--pg-t), box-shadow var(--pg-t), transform var(--pg-t);
 	cursor: pointer;
 }
 
 /* Selection lives on the RF wrapper (.selected) — the card itself only knows
  * status. A soft blue ring + lift makes the clicked node unmistakable. */
 .react-flow__node.selected .pg-node {
-	border-color: rgb(91 155 248 / 0.7);
+	border-color: rgb(91 155 248 / 0.75);
+	/* layered halo: a 1px ring to bound it, the kept inset for material, a
+	 * deeper drop, and a wide blue bloom — spotlit, not stickered */
 	box-shadow:
-		0 0 0 1px rgb(91 155 248 / 0.55),
-		0 4px 10px rgb(0 0 0 / 0.45),
-		0 0 24px rgb(91 155 248 / 0.18);
+		0 0 0 1px rgb(91 155 248 / 0.6),
+		inset 0 1px 0 rgb(255 255 255 / 0.07),
+		0 6px 18px rgb(0 0 0 / 0.5),
+		0 0 28px rgb(91 155 248 / 0.22);
 }
 
 .pg-node-head {
@@ -31,7 +40,7 @@
 	align-items: center;
 	gap: 6px;
 	font-size: 11px;
-	opacity: 0.85;
+	opacity: var(--pg-ink-2);
 }
 
 /* orch nodes put the title INSIDE the head row — the body margin would push
@@ -54,14 +63,7 @@
 	text-align: center;
 }
 
-/* The kind classes on .pg-node finally earn their keep: a quiet left accent
- * separates tool calls from agent fan-outs at a glance. */
-.pg-node-tool {
-	border-left: 2px solid rgb(91 155 248 / 0.35);
-}
-.pg-node-agent {
-	border-left: 2px solid rgb(63 214 159 / 0.45);
-}
+/* (moved below the status block — see the note there) */
 
 .pg-node .pg-label {
 	margin-top: 2px;
@@ -76,7 +78,9 @@
 .pg-node .pg-sub {
 	margin-top: 2px;
 	font-size: 10.5px;
-	opacity: 0.65;
+	opacity: var(--pg-ink-3);
+	font-variant-numeric: tabular-nums;
+	letter-spacing: 0.02em;
 }
 
 .pg-mono .pg-label {
@@ -87,26 +91,70 @@
 /* (.pg-dim lives in app.css only — a second definition here was dead code,
  * app.css is injected later and won on specificity ties) */
 
-/* status accents: colored border + a matching glow on the dot */
+/* status accents: a light border + a same-hue bloom under the card (the dot
+ * already glows) — status reads as light, not painted plastic edging. These
+ * box-shadow lists restate the base stack: shadows don't cascade, so any
+ * future change to .pg-node's shadow must be mirrored here and in pg-pulse. */
 .pg-node.pg-status-running {
 	border-color: rgb(91 155 248 / 0.65);
-	animation: pg-pulse 1.4s ease-in-out infinite;
+	animation: pg-pulse 1.8s ease-in-out infinite;
 }
 .pg-node.pg-status-ok {
-	border-color: rgb(63 214 159 / 0.5);
+	border-color: rgb(63 214 159 / 0.38);
+	box-shadow:
+		inset 0 1px 0 rgb(255 255 255 / 0.05),
+		0 1px 3px rgb(0 0 0 / 0.4),
+		0 6px 16px rgb(0 0 0 / 0.25),
+		0 18px 44px rgb(0 0 0 / 0.14),
+		0 0 14px rgb(63 214 159 / 0.12);
 }
 .pg-node.pg-status-error {
-	border-color: rgb(248 113 113 / 0.6);
+	border-color: rgb(248 113 113 / 0.5);
+	box-shadow:
+		inset 0 1px 0 rgb(255 255 255 / 0.05),
+		0 1px 3px rgb(0 0 0 / 0.4),
+		0 6px 16px rgb(0 0 0 / 0.25),
+		0 18px 44px rgb(0 0 0 / 0.14),
+		0 0 14px rgb(248 113 113 / 0.15);
 }
 .pg-node.pg-status-pending {
 	border-color: var(--pg-border);
 }
 
-/* Hover AFTER the status rules and one class heavier (0,2,1 beats their 0,2,0)
- * — every node always carries a pg-status-* class, so a plain .pg-node:hover
- * earlier in the file would never win the border. */
-.react-flow__node .pg-node:hover {
+/* kind accents — (0,2,0) and placed AFTER the status rules: at their old
+ * (0,1,0) the status border-color shorthand (which sets all four longhand
+ * colors) always won, and these bars never actually showed. Hover (0,4,1)
+ * still beats them, as intended. */
+.pg-node.pg-node-tool {
+	border-left: 2px solid rgb(91 155 248 / 0.55);
+}
+.pg-node.pg-node-agent {
+	border-left: 2px solid rgb(63 214 159 / 0.6);
+}
+
+/* Hover AFTER the status rules and heavier — every node always carries a
+ * pg-status-* class, so a plain .pg-node:hover earlier in the file would
+ * never win the border. :not(.selected) keeps the blue halo supreme when the
+ * cursor crosses an already-selected node; :not(.dragging) hands over to the
+ * grabbed look below. The 1px lift is on the CARD, not the RF wrapper —
+ * RF's positioning transform on the wrapper stays untouched. */
+.react-flow__node:not(.selected):not(.dragging) .pg-node:hover {
 	border-color: var(--pg-border-strong);
+	transform: translateY(-1px);
+	box-shadow:
+		inset 0 1px 0 rgb(255 255 255 / 0.06),
+		0 2px 5px rgb(0 0 0 / 0.45),
+		0 10px 24px rgb(0 0 0 / 0.32),
+		0 20px 48px rgb(0 0 0 / 0.18);
+}
+
+/* picked up, not pushed: a dragged card rides higher with the pop shadow
+ * (RF flags the wrapper with .dragging; editor canvas only — the read-only
+ * canvases never drag) */
+.react-flow__node.dragging .pg-node {
+	border-color: var(--pg-border-strong);
+	transform: translateY(-2px);
+	box-shadow: var(--pg-shadow-pop);
 }
 
 /* NO global margin-left:auto here: panel headers (DetailPanel/OrchNodePanel)
@@ -147,11 +195,14 @@
 }
 
 /* Connection handles: slightly larger targets, ring on hover (editor). */
+/* a countersunk port: the dark ring lifts the dot off the card's edge so it
+   reads as a socket, not a speck */
 .pg-handle {
 	width: 7px !important;
 	height: 7px !important;
-	background: #566179;
+	background: #5b6478;
 	border: none !important;
+	box-shadow: 0 0 0 2.5px rgb(11 13 17 / 0.85);
 	transition: background var(--pg-t), box-shadow var(--pg-t);
 }
 /* NO transform on hover: RF positions handles with translate(-50%,-50%) at
@@ -160,16 +211,41 @@
  * reads as growth. */
 .pg-handle:hover {
 	background: var(--pg-blue);
-	box-shadow: 0 0 0 4px rgb(91 155 248 / 0.2);
+	box-shadow:
+		0 0 0 2.5px rgb(11 13 17 / 0.85),
+		0 0 0 6px rgb(91 155 248 / 0.22);
+}
+/* while a connection is in flight (RF's own classes): the origin stays brand
+   blue, the endpoint under the cursor goes solid green with a halo */
+.pg-handle.connectingfrom {
+	background: var(--pg-blue);
+}
+.pg-handle.connectingto,
+.pg-handle.valid {
+	background: var(--pg-green);
+	box-shadow:
+		0 0 0 2.5px rgb(11 13 17 / 0.85),
+		0 0 0 5px rgb(63 214 159 / 0.3);
 }
 
+/* the pulse replaces box-shadow wholesale, so every frame carries the card's
+   full resting stack — the node keeps its feet while breathing, slower and
+   softer than before */
 @keyframes pg-pulse {
 	0%,
 	100% {
-		box-shadow: 0 0 0 0 rgb(91 155 248 / 0.35);
+		box-shadow:
+			inset 0 1px 0 rgb(255 255 255 / 0.05),
+			0 1px 3px rgb(0 0 0 / 0.4),
+			0 6px 16px rgb(0 0 0 / 0.25),
+			0 0 0 0 rgb(91 155 248 / 0.3);
 	}
 	50% {
-		box-shadow: 0 0 0 6px rgb(91 155 248 / 0);
+		box-shadow:
+			inset 0 1px 0 rgb(255 255 255 / 0.05),
+			0 1px 3px rgb(0 0 0 / 0.4),
+			0 6px 16px rgb(0 0 0 / 0.25),
+			0 0 0 5px rgb(91 155 248 / 0);
 	}
 }
 
@@ -177,4 +253,16 @@
 	to {
 		transform: rotate(360deg);
 	}
+}
+
+/* the graph GROWS: nodes fade in as they mount and edges join 60ms later —
+   nodes land first, wires follow. Opacity only, and on the WRAPPER: RF owns
+   the positioning transform there, and .pg-status-running's pg-pulse
+   (declared on the card) would clobber an entrance declared on .pg-node.
+   pg-fade-in itself lives in app.css — keyframes are document-global. */
+.react-flow__node {
+	animation: pg-fade-in var(--pg-t-in) var(--pg-ease-out);
+}
+.react-flow__edge {
+	animation: pg-fade-in var(--pg-t-in) var(--pg-ease-out) 60ms backwards;
 }

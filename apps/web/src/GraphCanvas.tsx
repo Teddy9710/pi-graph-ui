@@ -85,7 +85,7 @@ function Canvas({ graphOverride, compact = false }: { graphOverride?: Graph; com
 				const running = target?.data.status === "running";
 				// Arrowheads bake their color into an inline style, so they
 				// must be given the same per-kind color as the CSS stroke.
-				const color = running ? "#5b9bf8" : e.kind === "spawn" ? "#7ba4e0" : "#8b93a5";
+				const color = running ? "#5b9bf8" : e.kind === "spawn" ? "#7ba4e0" : "#838c9e";
 				return {
 					id: e.id,
 					source: e.source,
@@ -163,7 +163,7 @@ function Canvas({ graphOverride, compact = false }: { graphOverride?: Graph; com
 				minZoom={0.15}
 				maxZoom={2}
 			>
-				<Background gap={22} color="rgba(255 255 255 / 0.07)" />
+				<Background gap={22} color="rgba(255 255 255 / 0.05)" />
 				<Controls showInteractive={false} />
 				{!compact && <MiniMap pannable zoomable nodeStrokeWidth={2} />}
 			</ReactFlow>
