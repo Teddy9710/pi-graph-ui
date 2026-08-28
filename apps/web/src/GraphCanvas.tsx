@@ -163,7 +163,7 @@ function Canvas({ graphOverride, compact = false }: { graphOverride?: Graph; com
 				minZoom={0.15}
 				maxZoom={2}
 			>
-				<Background gap={22} color="rgba(255 255 255 / 0.05)" />
+				<Background gap={22} color="rgba(255 255 255 / 0.13)" />
 				<Controls showInteractive={false} />
 				{!compact && <MiniMap pannable zoomable nodeStrokeWidth={2} />}
 			</ReactFlow>

@@ -7,10 +7,10 @@
 	padding: 9px 12px;
 	border-radius: var(--pg-radius);
 	border: 1px solid var(--pg-border);
-	/* brighter top sheen gathering at 58% + an inset lit edge: the card reads
+	/* brighter top sheen gathering at 62% + an inset lit edge: the card reads
 	 * as glass under a lamp; the third wide shadow displaces the air around
 	 * it (paint only — dagre's size contract is untouched) */
-	background: linear-gradient(180deg, #212732, var(--pg-node-bg) 58%);
+	background: linear-gradient(180deg, #2a3140, var(--pg-node-bg) 62%);
 	color: var(--pg-fg);
 	font-size: 12px;
 	box-shadow:
@@ -25,14 +25,19 @@
 /* Selection lives on the RF wrapper (.selected) — the card itself only knows
  * status. A soft blue ring + lift makes the clicked node unmistakable. */
 .react-flow__node.selected .pg-node {
-	border-color: rgb(91 155 248 / 0.75);
-	/* layered halo: a 1px ring to bound it, the kept inset for material, a
+	border-color: rgb(77 155 255 / 0.9);
+	/* the card is lit from within: a blue wash layered over the card's own
+	 * sheen (restating the NEW base gradient — the old one would dull it) */
+	background:
+		linear-gradient(180deg, rgb(77 155 255 / 0.12), rgb(77 155 255 / 0.03)),
+		linear-gradient(180deg, #2a3140, var(--pg-node-bg) 62%);
+	/* spotlight: a 1px ring to bound it, the kept inset for material, a
 	 * deeper drop, and a wide blue bloom — spotlit, not stickered */
 	box-shadow:
-		0 0 0 1px rgb(91 155 248 / 0.6),
-		inset 0 1px 0 rgb(255 255 255 / 0.07),
-		0 6px 18px rgb(0 0 0 / 0.5),
-		0 0 28px rgb(91 155 248 / 0.22);
+		0 0 0 1px rgb(77 155 255 / 0.75),
+		inset 0 1px 0 rgb(255 255 255 / 0.08),
+		0 8px 22px rgb(0 0 0 / 0.55),
+		0 0 40px rgb(77 155 255 / 0.4);
 }
 
 .pg-node-head {
@@ -96,26 +101,26 @@
  * box-shadow lists restate the base stack: shadows don't cascade, so any
  * future change to .pg-node's shadow must be mirrored here and in pg-pulse. */
 .pg-node.pg-status-running {
-	border-color: rgb(91 155 248 / 0.65);
+	border-color: rgb(77 155 255 / 0.65);
 	animation: pg-pulse 1.8s ease-in-out infinite;
 }
 .pg-node.pg-status-ok {
-	border-color: rgb(63 214 159 / 0.38);
+	border-color: rgb(44 232 160 / 0.38);
 	box-shadow:
 		inset 0 1px 0 rgb(255 255 255 / 0.05),
 		0 1px 3px rgb(0 0 0 / 0.4),
 		0 6px 16px rgb(0 0 0 / 0.25),
 		0 18px 44px rgb(0 0 0 / 0.14),
-		0 0 14px rgb(63 214 159 / 0.12);
+		0 0 14px rgb(44 232 160 / 0.12);
 }
 .pg-node.pg-status-error {
-	border-color: rgb(248 113 113 / 0.5);
+	border-color: rgb(255 107 107 / 0.5);
 	box-shadow:
 		inset 0 1px 0 rgb(255 255 255 / 0.05),
 		0 1px 3px rgb(0 0 0 / 0.4),
 		0 6px 16px rgb(0 0 0 / 0.25),
 		0 18px 44px rgb(0 0 0 / 0.14),
-		0 0 14px rgb(248 113 113 / 0.15);
+		0 0 14px rgb(255 107 107 / 0.15);
 }
 .pg-node.pg-status-pending {
 	border-color: var(--pg-border);
@@ -126,10 +131,10 @@
  * colors) always won, and these bars never actually showed. Hover (0,4,1)
  * still beats them, as intended. */
 .pg-node.pg-node-tool {
-	border-left: 2px solid rgb(91 155 248 / 0.55);
+	border-left: 2px solid rgb(77 155 255 / 0.55);
 }
 .pg-node.pg-node-agent {
-	border-left: 2px solid rgb(63 214 159 / 0.6);
+	border-left: 2px solid rgb(44 232 160 / 0.6);
 }
 
 /* Hover AFTER the status rules and heavier — every node always carries a
@@ -171,15 +176,15 @@
 }
 .pg-dot-running {
 	background: var(--pg-blue);
-	box-shadow: 0 0 7px rgb(91 155 248 / 0.8);
+	box-shadow: 0 0 7px rgb(77 155 255 / 0.8);
 }
 .pg-dot-ok {
 	background: var(--pg-green);
-	box-shadow: 0 0 6px rgb(63 214 159 / 0.55);
+	box-shadow: 0 0 6px rgb(44 232 160 / 0.55);
 }
 .pg-dot-error {
 	background: var(--pg-red);
-	box-shadow: 0 0 6px rgb(248 113 113 / 0.55);
+	box-shadow: 0 0 6px rgb(255 107 107 / 0.55);
 }
 .pg-dot-pending {
 	background: #3a4150;
@@ -213,7 +218,7 @@
 	background: var(--pg-blue);
 	box-shadow:
 		0 0 0 2.5px rgb(11 13 17 / 0.85),
-		0 0 0 6px rgb(91 155 248 / 0.22);
+		0 0 0 6px rgb(77 155 255 / 0.22);
 }
 /* while a connection is in flight (RF's own classes): the origin stays brand
    blue, the endpoint under the cursor goes solid green with a halo */
@@ -225,7 +230,7 @@
 	background: var(--pg-green);
 	box-shadow:
 		0 0 0 2.5px rgb(11 13 17 / 0.85),
-		0 0 0 5px rgb(63 214 159 / 0.3);
+		0 0 0 5px rgb(44 232 160 / 0.3);
 }
 
 /* the pulse replaces box-shadow wholesale, so every frame carries the card's
@@ -238,14 +243,14 @@
 			inset 0 1px 0 rgb(255 255 255 / 0.05),
 			0 1px 3px rgb(0 0 0 / 0.4),
 			0 6px 16px rgb(0 0 0 / 0.25),
-			0 0 0 0 rgb(91 155 248 / 0.3);
+			0 0 0 0 rgb(77 155 255 / 0.3);
 	}
 	50% {
 		box-shadow:
 			inset 0 1px 0 rgb(255 255 255 / 0.05),
 			0 1px 3px rgb(0 0 0 / 0.4),
 			0 6px 16px rgb(0 0 0 / 0.25),
-			0 0 0 5px rgb(91 155 248 / 0);
+			0 0 0 5px rgb(77 155 255 / 0);
 	}
 }
 
