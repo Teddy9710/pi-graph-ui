@@ -30,6 +30,27 @@ import { RunStore } from "./run-store.ts";
 
 export type StartResult = { ok: true; runId: string } | { ok: false; error: string; issues?: GraphValidationIssue[] };
 
+/**
+ * Gate decision notes ride the WS trust boundary and become the node's OUTPUT
+ * (injected into downstream prompts) — bounded here like every other
+ * client-supplied string. shared's fold trims it for display.
+ */
+export const MAX_GATE_NOTE_CHARS = 2000;
+
+/** A gate note becomes the node's output, so downstream prompts inject it as
+ *  section CONTENT — a newline or control char could forge another `### from
+ *  …` header, the same header-forgery rule shared applies to node/edge labels.
+ *  The web input is single-line; this guards the raw WS boundary.
+ */
+const GATE_NOTE_UNSAFE_RE = /[\u0000-\u001f\u007f]/;
+
+/** Full gate-note validity: a string, single line, trimmed ≤ MAX_GATE_NOTE_CHARS. */
+export function isValidGateNote(note: unknown): note is string {
+	return (
+		typeof note === "string" && !GATE_NOTE_UNSAFE_RE.test(note) && note.trim().length <= MAX_GATE_NOTE_CHARS
+	);
+}
+
 /** What the chat-complete hook receives: the goal + per-node outputs
  *  (labels from the run graph) in completion order. */
 export interface ChatRunResult {
@@ -197,6 +218,19 @@ export class RunManager {
 		return () => this.listeners.delete(listener);
 	}
 
+	/**
+	 * Human decision on an awaiting gate node. Guards: an ACTIVE engine under
+	 * the matching runId and a single-line note within MAX_GATE_NOTE_CHARS
+	 * (isValidGateNote — the note becomes prompt material downstream). The
+	 * decision itself (and its node_decided broadcast) flows through the
+	 * engine's existing event path — no separate channel.
+	 */
+	decideNode(runId: string, nodeId: string, approved: boolean, note: string): boolean {
+		if (this.engine === null || runId !== this.currentRunId) return false;
+		if (!isValidGateNote(note)) return false;
+		return this.engine.decideNode(nodeId, approved, note);
+	}
+
 	retainedEvents(): RunEvent[] {
 		return [...this.retained];
 	}
@@ -276,15 +310,22 @@ export class RunManager {
 			(e): e is Extract<RunEvent, { type: "run_started" }> => e.type === "run_started" && e.runId === runId,
 		);
 		const labelById = new Map<string, string>();
+		const capById = new Map<string, number>();
 		if (runStarted) {
 			for (const node of runStarted.graph.nodes) {
 				if (node.label) labelById.set(node.id, node.label);
+				if (node.outputCapBytes !== undefined) capById.set(node.id, node.outputCapBytes);
 			}
 		}
 		const nodes: OrchResultNode[] = [];
 		for (const e of this.retained) {
 			if (e.type === "node_completed" && e.runId === runId) {
-				nodes.push({ nodeId: e.nodeId, label: labelById.get(e.nodeId), text: e.output.text });
+				nodes.push({
+					nodeId: e.nodeId,
+					label: labelById.get(e.nodeId),
+					text: e.output.text,
+					...(capById.has(e.nodeId) ? { capBytes: capById.get(e.nodeId) } : {}),
+				});
 			}
 		}
 		if (nodes.length === 0) return;

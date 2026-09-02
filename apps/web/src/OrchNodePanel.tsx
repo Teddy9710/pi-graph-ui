@@ -159,7 +159,18 @@ export function OrchNodePanel() {
 	const view = useOrchStore((s) => s.view);
 	const updateNode = useOrchStore((s) => s.updateNode);
 	const deleteNode = useOrchStore((s) => s.deleteNode);
+	const approveNode = useOrchStore((s) => s.approveNode);
 	const agents = useAgentNames();
+	const runNode = selectedNodeId ? (run.nodes[selectedNodeId] ?? null) : null;
+	// The note belongs to ONE gate decision — switching nodes, a settled
+	// decision (the status leaves "awaiting": decided/aborted) or a new run
+	// must not leak it into the next gate's input. NOT cleared on click: if
+	// the send is still in flight (or dropped mid-reconnect) the reviewer's
+	// typed note survives for the retry.
+	const [gateNote, setGateNote] = useState("");
+	useEffect(() => {
+		setGateNote("");
+	}, [selectedNodeId, run.runId, runNode?.status]);
 
 	// In the run view the inspected node belongs to the GENERATED graph, not
 	// the editor's — fields render read-only there.
@@ -171,12 +182,13 @@ export function OrchNodePanel() {
 	}
 	if (!node) return <GraphSummary />;
 
-	const runNode = selectedNodeId ? (run.nodes[selectedNodeId] ?? null) : null;
 	const editable = view === "editor" && run.status !== "running";
+	const gate = node.gate === true;
+	const awaiting = runNode?.status === "awaiting";
 	const duration =
 		runNode?.startedAt != null && runNode.endedAt != null
 			? ` · ${((runNode.endedAt - runNode.startedAt) / 1000).toFixed(1)}s`
-			: runNode?.status === "running"
+			: runNode?.status === "running" || awaiting
 				? " · …"
 				: "";
 
@@ -185,8 +197,11 @@ export function OrchNodePanel() {
 			<header>
 				<span className={`pg-dot pg-dot-${runNode?.status ?? "pending"}`} />
 				<b>{node.label || node.id}</b>
-				{/* Status in words, not just the colored dot */}
-				<span className="pg-dim">{RUN_NODE_STATUS_LABEL[runNode?.status ?? "pending"] ?? runNode?.status}</span>
+				{/* Status in words, not just the colored dot. awaiting predates
+				 * status.ts's label map — spell it here instead of showing the raw enum. */}
+				<span className="pg-dim">
+					{runNode?.status === "awaiting" ? "待审批" : (RUN_NODE_STATUS_LABEL[runNode?.status ?? "pending"] ?? runNode?.status)}
+				</span>
 				{/* The id is the identity every edge references — read-only. */}
 				<code className="pg-dim">{node.id}</code>
 			</header>
@@ -201,7 +216,9 @@ export function OrchNodePanel() {
 				/>
 			</div>
 			<div className="pg-form-row">
-				<label htmlFor="pg-node-task">task（任务 prompt，上游输出会自动追加）</label>
+				<label htmlFor="pg-node-task">
+					{gate ? "task（审校要点，挂起时连同上游输入一起展示给审阅者）" : "task（任务 prompt，上游输出会自动追加）"}
+				</label>
 				<textarea
 					id="pg-node-task"
 					className="pg-form-input"
@@ -210,33 +227,78 @@ export function OrchNodePanel() {
 					onChange={(e) => updateNode(node.id, { task: e.target.value })}
 				/>
 			</div>
-			<div className="pg-form-row">
-				<label htmlFor="pg-node-model">model</label>
-				<input
-					id="pg-node-model"
-					className="pg-form-input"
-					placeholder="deepseek/deepseek-chat"
-					value={node.model ?? ""}
-					disabled={!editable}
-					onChange={(e) => updateNode(node.id, { model: e.target.value })}
-				/>
-			</div>
-			<div className="pg-form-row">
-				<label htmlFor="pg-node-agent">agent（persona）</label>
-				<input
-					id="pg-node-agent"
-					className="pg-form-input"
-					list="pg-agents"
-					value={node.agent ?? ""}
-					disabled={!editable}
-					onChange={(e) => updateNode(node.id, { agent: e.target.value })}
-				/>
-				<datalist id="pg-agents">
-					{agents.map((a) => (
-						<option key={a} value={a} />
-					))}
-				</datalist>
-			</div>
+			{/* A gate never reaches an executor — its exec config (model/agent)
+			 * would be rejected by validateGraph, so the fields don't render at all. */}
+			{!gate && (
+				<>
+					<div className="pg-form-row">
+						<label htmlFor="pg-node-model">model</label>
+						<input
+							id="pg-node-model"
+							className="pg-form-input"
+							placeholder="deepseek/deepseek-chat"
+							value={node.model ?? ""}
+							disabled={!editable}
+							onChange={(e) => updateNode(node.id, { model: e.target.value })}
+						/>
+					</div>
+					<div className="pg-form-row">
+						<label htmlFor="pg-node-agent">agent（persona）</label>
+						<input
+							id="pg-node-agent"
+							className="pg-form-input"
+							list="pg-agents"
+							value={node.agent ?? ""}
+							disabled={!editable}
+							onChange={(e) => updateNode(node.id, { agent: e.target.value })}
+						/>
+						<datalist id="pg-agents">
+							{agents.map((a) => (
+								<option key={a} value={a} />
+							))}
+						</datalist>
+					</div>
+				</>
+			)}
+			{gate && (
+				<>
+					<h4>人工门控</h4>
+					{awaiting ? (
+						<>
+							<p className="pg-dim">运行已挂起，等待审校。待审内容：</p>
+							<pre className="pg-pre">{runNode?.assembledPrompt ?? node.task}</pre>
+							<div className="pg-form-row">
+								<label htmlFor="pg-gate-note">备注（批准时注入下游，驳回时作为理由，≤2000 字）</label>
+								<input
+									id="pg-gate-note"
+									className="pg-form-input"
+									maxLength={2000}
+									value={gateNote}
+									onChange={(e) => setGateNote(e.target.value)}
+								/>
+							</div>
+						</>
+					) : (
+						<p className="pg-dim">运行到此节点会挂起，等人工批准后下游才继续；驳回按失败传播（下游跳过）。</p>
+					)}
+					<div className="pg-gate-actions">
+						{/* 批准 is the GO stamp (primary ink); both keys idle outside
+						    awaiting — the store guard double-checks before sending.
+						    The note is NOT cleared here: the status effect clears it
+						    once the decision settles (or it stays for a retry). */}
+						<button className="pg-btn" disabled={!awaiting} onClick={() => approveNode(node.id, true, gateNote)}>
+							批准
+						</button>
+						<button
+							className="pg-btn pg-btn-danger"
+							disabled={!awaiting}
+							onClick={() => approveNode(node.id, false, gateNote)}
+						>
+							驳回
+						</button>
+					</div>
+				</>
+			)}
 			{editable ? (
 				<button className="pg-btn pg-btn-danger pg-btn-sm" onClick={() => deleteNode(node.id)}>
 					删除节点

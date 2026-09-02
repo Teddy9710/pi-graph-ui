@@ -35,6 +35,12 @@ const PERSIST_DELAY_MS = 300;
  *  busy run_error (double-click / Enter+click); absorb it locally. */
 const PLAN_SEND_GUARD_MS = 1000;
 let lastPlanSentAt = 0;
+/** approveNode has the same echo-round-trip gap: run.nodes[…].status only
+ * flips when node_decided streams back, so a double-click's second send
+ * would still read "awaiting" and earn a spurious run_error from the
+ * server (节点不在等待人工决策的状态). Guard per run+node. */
+const APPROVE_SEND_GUARD_MS = 1000;
+const lastApproveSentAt = new Map<string, number>();
 
 interface OrchState {
 	graphDef: GraphDef;
@@ -53,7 +59,9 @@ interface OrchState {
 	connectIssue: string | null;
 	/** Server-side run rejection (run_error envelope); cleared on next run start. */
 	orchError: { message: string; issues: GraphValidationIssue[] } | null;
-	addNode: () => void;
+	/** Add a node at the staggered spawn grid; gate = place a HITL gate node
+	 *  (never executed — the run parks on it until a human decides). */
+	addNode: (gate?: boolean) => void;
 	/** Patch a node's editable fields. The id is the node's identity — never editable. */
 	updateNode: (id: string, patch: Partial<NodeDef>) => void;
 	updateNodePosition: (id: string, position: { x: number; y: number }) => void;
@@ -78,6 +86,10 @@ interface OrchState {
 	/** Client-side validateGraph gate: issues → never sent. */
 	runGraph: () => void;
 	abortRun: () => void;
+	/** Human decision on an awaiting gate node (approve_node). Guarded to
+	 *  awaiting only — any other state the server would answer with a
+	 *  run_error anyway, and a local no-op saves the round trip. */
+	approveNode: (nodeId: string, approved: boolean, note: string) => void;
 	/** Auto-orchestrate: send the goal, the server plans then runs (plan_run).
 	 *  opts.chat = on completion the server injects the compiled node outputs
 	 *  into the main session agent (chat-first orchestration). */
@@ -167,7 +179,7 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 	connectIssue: null,
 	orchError: null,
 
-	addNode: () =>
+	addNode: (gate) =>
 		set((s) => {
 			const ids = new Set(s.graphDef.nodes.map((n) => n.id));
 			let i = s.graphDef.nodes.length + 1;
@@ -175,8 +187,10 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 			const n = s.graphDef.nodes.length; // stagger spawn positions on a grid
 			const node: NodeDef = {
 				id: `node-${i}`,
-				label: `节点 ${i}`,
-				task: "",
+				label: gate ? "门控" : `节点 ${i}`,
+				task: gate ? "人工确认后继续" : "",
+				// undefined → dropped from JSON; plain nodes stay gate-free.
+				gate: gate || undefined,
 				position: { x: 60 + (n % 5) * 260, y: 60 + Math.floor(n / 5) * 140 },
 			};
 			return { ...graphState({ ...s.graphDef, nodes: [...s.graphDef.nodes, node] }), selectedNodeId: node.id, selectedEdgeId: null };
@@ -302,6 +316,17 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 	},
 
 	abortRun: () => sendWs({ type: "abort_run" }),
+
+	approveNode: (nodeId, approved, note) => {
+		const s = get();
+		if (s.run.runId == null) return;
+		if (s.run.nodes[nodeId]?.status !== "awaiting") return;
+		const guardKey = `${s.run.runId}:${nodeId}`;
+		if (Date.now() - (lastApproveSentAt.get(guardKey) ?? 0) < APPROVE_SEND_GUARD_MS) return;
+		lastApproveSentAt.set(guardKey, Date.now());
+		// Empty note omitted — the server settles a bare approve as（已批准）.
+		sendWs({ type: "approve_node", runId: s.run.runId, nodeId, approved, note: note || undefined });
+	},
 
 	planRun: (goal, opts) => {
 		const s = get();

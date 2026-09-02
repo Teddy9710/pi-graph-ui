@@ -266,3 +266,211 @@ describe("OrchestratorEngine", () => {
 		expect(summary).toEqual({ status: "completed", ok: 0, failed: 0, skipped: 0 });
 	});
 });
+
+// ============================================================================
+// Node capability profile plumbing (节点档案)
+// ============================================================================
+
+describe("capability profile plumbing", () => {
+	it("a salvaged NodeResult (attempts=2) surfaces on node_completed", async () => {
+		const h = harness();
+		h.executor.script.a = async () => ({ ok: true, text: "第一次有点短", attempts: 2 });
+		await h.run({ nodes: [node("a")], edges: [] });
+		const completed = h.events.find((e) => e.type === "node_completed") as Extract<RunEvent, { type: "node_completed" }>;
+		expect(completed.output.attempts).toBe(2);
+		// Without the flag the field is absent (not 0) — old archives stay shape-compatible.
+		h.events.length = 0;
+		await h.run({ nodes: [node("b")], edges: [] });
+		const plain = h.events.find((e) => e.type === "node_completed") as Extract<RunEvent, { type: "node_completed" }>;
+		expect(plain.output.attempts).toBeUndefined();
+	});
+
+	it("the upstream node's outputCapBytes rides UpstreamInput and caps the injection", async () => {
+		const h = harness();
+		const longText = "z".repeat(300);
+		h.executor.script.a = async () => ({ ok: true, text: longText });
+		const graph: GraphDef = {
+			nodes: [ { id: "a", task: "task a", outputCapBytes: 100 }, node("b") ],
+			edges: [edge("a", "b")],
+		};
+		await h.run(graph);
+		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
+		expect(callB.upstream[0]!.capBytes).toBe(100);
+		// The shared assemblePrompt honored the per-node budget (100 bytes <
+		// 300 z's → truncated with the marker).
+		expect(callB.assembledPrompt).toContain("（输出过长，已截断）");
+
+		// Without outputCapBytes the default 50KB budget applies (no truncation).
+		const h2 = harness();
+		h2.executor.script.a = async () => ({ ok: true, text: longText });
+		await h2.run({ nodes: [node("a"), node("b")], edges: [edge("a", "b")] });
+		const callB2 = h2.executor.calls.find((c) => c.node.id === "b")!;
+		expect(callB2.upstream[0]!.capBytes).toBeUndefined();
+		expect(callB2.assembledPrompt).not.toContain("（输出过长，已截断）");
+	});
+});
+
+// ============================================================================
+// Gate nodes (HITL: suspend as awaiting, human approve/reject)
+// ============================================================================
+
+describe("gate nodes", () => {
+	const gate = (id: string, task = `task ${id}`) => ({ id, task, gate: true });
+
+	/** An engine the test can decide gates on (harness.run hides the engine). */
+	function gateEngine(h: Harness, graph: GraphDef, maxParallel?: number): OrchestratorEngine {
+		let t = 0;
+		return new OrchestratorEngine(graph, h.executor, {
+			runId: "r-gate",
+			maxParallel,
+			now: () => ++t,
+			onEvent: (e) => h.events.push(e),
+		});
+	}
+
+	it("suspends a ready gate as awaiting without calling the executor or taking a slot", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("a"), gate("g"), node("b")], edges: [] };
+		h.executor.script.a = hangOnAbort; // occupies the only slot forever
+		const engine = gateEngine(h, graph, 1);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 10));
+		const awaiting = h.events.find((e) => e.type === "node_awaiting" && e.nodeId === "g");
+		expect(awaiting).toBeDefined();
+		// The reviewer sees what the gate guards: the task (here, no upstreams).
+		if (awaiting && awaiting.type === "node_awaiting") expect(awaiting.assembledPrompt).toBe("task g");
+		expect(h.executor.started).toEqual(["a"]); // gate never dispatched; b still queued behind the slot
+		expect(h.executor.peak).toBe(1);
+		engine.abort();
+		await runP;
+	});
+
+	it("a gate queued BEHIND a slot-blocked node still suspends immediately", async () => {
+		const h = harness();
+		// maxParallel 1: slow holds the only slot forever, x blocks behind it —
+		// the scan must step OVER parked x and suspend g anyway (regression:
+		// the drain loop used to break at x and strand g until a slot freed).
+		const graph: GraphDef = { nodes: [node("slow"), node("x"), gate("g")], edges: [] };
+		h.executor.script.slow = hangOnAbort;
+		const engine = gateEngine(h, graph, 1);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(h.events.some((e) => e.type === "node_awaiting" && e.nodeId === "g")).toBe(true);
+		expect(h.executor.started).toEqual(["slow"]); // x parked, not launched
+		engine.abort();
+		await runP;
+		// Parked x was skipped by the abort, never dispatched.
+		expect(h.executor.started).toEqual(["slow"]);
+	});
+
+	it("approval unlocks the downstream closure and the note becomes its output", async () => {
+		const h = harness();
+		const graph: GraphDef = {
+			nodes: [node("a"), gate("g"), node("b")],
+			edges: [edge("a", "g"), edge("g", "b")],
+		};
+		const engine = gateEngine(h, graph);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 10));
+		// a ran; g awaits with a's output as the review material.
+		const awaiting = h.events.find((e) => e.type === "node_awaiting" && e.nodeId === "g");
+		if (awaiting && awaiting.type === "node_awaiting") expect(awaiting.assembledPrompt).toContain("out:a");
+		expect(h.executor.started).toEqual(["a"]);
+		expect(engine.decideNode("g", true, "  审校通过  ")).toBe(true);
+		const summary = await runP;
+		expect(summary.status).toBe("completed");
+		// Approved gates tally into ok like completions — the rejection/abort
+		// tests count the gate in failed, so the summary stays symmetric.
+		expect(summary.ok).toBe(3); // a + the approved gate + b
+		// The trimmed note is injected downstream like any upstream output.
+		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
+		expect(callB.assembledPrompt).toContain("### from g");
+		expect(callB.assembledPrompt).toContain("审校通过");
+		const decided = h.events.find((e) => e.type === "node_decided");
+		if (decided && decided.type === "node_decided") {
+			expect(decided.approved).toBe(true);
+			expect(decided.note).toBe("  审校通过  "); // raw note; trimming is the fold's job
+			expect(decided.durationMs).toBeGreaterThan(0); // measured from entering awaiting
+		} else {
+			throw new Error("node_decided missing");
+		}
+	});
+
+	it("an approval without a usable note defaults the gate output to （已批准）", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [gate("g"), node("b")], edges: [edge("g", "b")] };
+		const engine = gateEngine(h, graph);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(engine.decideNode("g", true, "   ")).toBe(true);
+		await runP;
+		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
+		expect(callB.assembledPrompt).toContain("（已批准）");
+	});
+
+	it("a rejection propagates like a node failure: downstream skipped with the standard reason", async () => {
+		const h = harness();
+		const graph: GraphDef = {
+			nodes: [node("a"), gate("g"), node("b")],
+			edges: [edge("a", "g"), edge("g", "b")],
+		};
+		const engine = gateEngine(h, graph);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(engine.decideNode("g", false, "数据可疑")).toBe(true);
+		const summary = await runP;
+		expect(summary.status).toBe("failed");
+		expect(summary.failed).toBe(1); // the gate itself
+		expect(summary.skipped).toBe(1); // b
+		expect(h.executor.started).toEqual(["a"]); // b never dispatched
+		const skipB = h.events.find((e) => e.type === "node_skipped" && e.nodeId === "b");
+		if (skipB && skipB.type === "node_skipped") expect(skipB.reason).toBe("upstream failed: g");
+		else throw new Error("node_skipped for b missing");
+	});
+
+	it("decideNode on a non-awaiting node returns false and emits nothing", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("a"), gate("g")], edges: [] };
+		const engine = gateEngine(h, graph);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 10));
+		const before = h.events.length;
+		expect(engine.decideNode("a", true, "")).toBe(false); // ordinary node, already ok
+		expect(engine.decideNode("nope", true, "")).toBe(false); // unknown id
+		expect(h.events.length).toBe(before); // no event either way
+		expect(engine.decideNode("g", true, "")).toBe(true);
+		expect(engine.decideNode("g", false, "第二次")).toBe(false); // already decided
+		await runP;
+		expect(h.events.filter((e) => e.type === "node_decided")).toHaveLength(1);
+	});
+
+	it("an undecided gate keeps the run open (run_finished waits for the decision)", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("a"), gate("g")], edges: [] };
+		const engine = gateEngine(h, graph);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 20)); // everything else settled long ago
+		expect(h.events.some((e) => e.type === "run_finished")).toBe(false);
+		expect(engine.decideNode("g", true, "")).toBe(true);
+		const summary = await runP;
+		expect(summary.status).toBe("completed");
+	});
+
+	it("abort settles an awaiting gate like a running node: failed, downstream skipped", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [gate("g"), node("b")], edges: [edge("g", "b")] };
+		const engine = gateEngine(h, graph);
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 10));
+		engine.abort();
+		const summary = await runP;
+		expect(summary.status).toBe("aborted");
+		const failedG = h.events.find((e) => e.type === "node_failed" && e.nodeId === "g");
+		if (failedG && failedG.type === "node_failed") expect(failedG.error).toBe("已中止");
+		else throw new Error("node_failed for the aborted gate missing");
+		const skipB = h.events.find((e) => e.type === "node_skipped" && e.nodeId === "b");
+		if (skipB && skipB.type === "node_skipped") expect(skipB.reason).toBe("run aborted");
+		// Aborted-settled gates no longer accept a decision.
+		expect(engine.decideNode("g", true, "")).toBe(false);
+	});
+});

@@ -58,25 +58,24 @@ function edgeStyle(e: EdgeDef, opts: { selected?: boolean } = {}): Edge {
 			? `${text.slice(0, EDGE_LABEL_DISPLAY_CHARS)}…`
 			: text,
 		// label capsule: stroked rounded chip + dim text — the badge reads
-		// cleanly crossing nodes AND grid dots (classic rgba syntax: this
+		// cleanly crossing nodes AND the graticule (classic rgba syntax: this
 		// string lands in an SVG style attribute, not CSSOM-rewritten CSS)
-		labelStyle: { fill: "#98a1b0", fontSize: 11 },
-		labelBgStyle: { fill: "#10131a", stroke: "rgba(255,255,255,0.09)", strokeWidth: 1 },
+		labelStyle: { fill: "#92a7a1", fontSize: 11 },
+		labelBgStyle: { fill: "#060d0f", stroke: "rgba(146,167,161,0.14)", strokeWidth: 1 },
 		labelBgPadding: [7, 4] as [number, number],
 		labelBgBorderRadius: 5,
 		// No RF edge-selection (its default gray selected stroke fights our
 		// colors — same reasoning as GraphCanvas); click handlers + our own
-		// selected stroke drive the editor's edge selection instead. The
-		// selected edge gets the same blue bloom language as selected nodes.
+		// selected stroke drive the editor's edge selection instead. A selected
+		// edge speaks correction ink — the same surveyor's-hand grammar as the
+		// selected node's benchmark ring (blue stays reserved for running).
 		selectable: false,
-		style: selected
-			? { stroke: "#5b9bf8", strokeWidth: 2, filter: "drop-shadow(0 0 3px rgba(91,155,248,0.5))" }
-			: undefined,
+		style: selected ? { stroke: "#e854d4", strokeWidth: 2 } : undefined,
 		markerEnd: {
 			type: MarkerType.ArrowClosed,
 			width: 16,
 			height: 16,
-			color: selected ? "#5b9bf8" : "#838c9e",
+			color: selected ? "#e854d4" : "#5c7370",
 		},
 	};
 }
@@ -201,7 +200,10 @@ function Canvas() {
 				onConnect={onConnect}
 				onEdgeClick={onEdgeClick}
 				onPaneClick={() => select(null)}
-				deleteKeyCode={["Backspace", "Delete"]}
+				// While a run streams, Backspace/Delete would silently edit the
+				// graph under the user's fingers — disable key deletion (drag
+				// and connect are already gated the same way).
+				deleteKeyCode={running ? null : ["Backspace", "Delete"]}
 				nodesDraggable={!running}
 				nodesConnectable={!running}
 				colorMode="dark"

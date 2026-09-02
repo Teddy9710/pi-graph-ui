@@ -6,10 +6,18 @@
  * without waiting for sibling upstreams still in flight. The Executor is
  * injected so the scheduler is unit-testable without spawning pi.
  *
+ * Gate nodes (NodeDef.gate) never touch the Executor: they suspend the run as
+ * "awaiting" (node_awaiting) until a human decides them via decideNode —
+ * approval unlocks downstream exactly like a completion (the note becomes the
+ * node's output), rejection propagates like a failure. "awaiting" is NOT a
+ * terminal state: the run loop parks until every gate is decided or aborted.
+ *
  * Event semantics (RunEvent union in shared/orchestration.ts):
  * - the ENGINE assembles prompts (shared assemblePrompt) so tests can assert
  *   upstream injection through the Executor seam;
  * - node_delta events forward executor onDelta callbacks verbatim;
+ * - gate decisions bracket as node_awaiting → node_decided (never a
+ *   node_started/node_completed pair — the executor was never involved);
  * - run_finished.status: "aborted" > "failed" (any node_failed) > "completed".
  */
 
@@ -38,6 +46,8 @@ export interface NodeResult {
 	model?: string;
 	usage?: NodeUsage;
 	error?: string;
+	/** Executor attempt count (>1 = quality gate salvaged this node). */
+	attempts?: number;
 }
 
 export interface ExecutorCall {
@@ -88,6 +98,12 @@ export class OrchestratorEngine {
 	private readonly edgeLabels = new Map<string, string>();
 	private readonly inflight = new Map<string, Promise<void>>();
 	private ready: string[] = [];
+	/** Gate nodes parked on a human decision (subset of status==="awaiting"). */
+	private readonly awaiting = new Set<string>();
+	/** When each gate entered awaiting — node_decided.durationMs is measured from here. */
+	private readonly awaitingSince = new Map<string, number>();
+	/** Run-loop resolvers parked in Promise.race while gates are open. */
+	private gateWaiters: (() => void)[] = [];
 
 	private readonly abortCtl = new AbortController();
 	private aborted = false;
@@ -132,13 +148,34 @@ export class OrchestratorEngine {
 	async run(): Promise<{ status: RunStatus; ok: number; failed: number; skipped: number }> {
 		this.emit({ type: "run_started", runId: this.runId, startedAt: this.now(), graph: this.graph });
 		while (true) {
-			while (this.ready.length > 0 && this.inflight.size < this.maxParallel) {
+			// Slot-blocked NORMAL nodes park here (order preserved) so the scan
+			// can continue past them — a ready gate queued behind blocked work
+			// must suspend immediately, not wait for an executor slot.
+			const parked: string[] = [];
+			while (this.ready.length > 0) {
 				const id = this.ready.shift()!;
 				if (this.status.get(id) !== "pending") continue; // pruned by failure propagation
+				// Gates suspend for a human decision instead of running — they
+				// never reach the Executor and never occupy a parallel slot, so
+				// they drain out of the queue regardless of slot pressure.
+				if (this.nodeById.get(id)!.gate === true) {
+					this.suspend(id);
+					continue;
+				}
+				if (this.inflight.size >= this.maxParallel) {
+					parked.push(id); // slot busy — park, keep scanning for gates
+					continue;
+				}
 				this.launch(id);
 			}
-			if (this.inflight.size === 0) break;
-			await Promise.race(this.inflight.values());
+			if (parked.length > 0) this.ready.unshift(...parked);
+			// "awaiting" is not terminal: only a decision (decideNode) or an
+			// abort closes a gate, so open gates join the race and keep the
+			// run from finishing without them.
+			const wakeups: Promise<unknown>[] = [...this.inflight.values()];
+			if (this.awaiting.size > 0) wakeups.push(this.gateSignal());
+			if (wakeups.length === 0) break;
+			await Promise.race(wakeups);
 		}
 		const status: RunStatus = this.aborted ? "aborted" : this.failed > 0 ? "failed" : "completed";
 		this.finished = true;
@@ -162,11 +199,69 @@ export class OrchestratorEngine {
 		this.abortCtl.abort();
 		this.ready = [];
 		for (const n of this.graph.nodes) {
-			if (this.status.get(n.id) !== "pending") continue;
-			this.status.set(n.id, "skipped");
-			this.skipped++;
-			this.emit({ type: "node_skipped", runId: this.runId, nodeId: n.id, reason: "run aborted" });
+			const st = this.status.get(n.id);
+			if (st === "pending") {
+				this.status.set(n.id, "skipped");
+				this.skipped++;
+				this.emit({ type: "node_skipped", runId: this.runId, nodeId: n.id, reason: "run aborted" });
+				continue;
+			}
+			if (st !== "awaiting") continue;
+			// An undecided gate settles the way a running node does on abort:
+			// it FAILS (the executor's 已中止 error) rather than being skipped,
+			// so the parked run loop may finish and clients see a terminal node.
+			const startedAt = this.awaitingSince.get(n.id) ?? this.now();
+			this.awaiting.delete(n.id);
+			this.awaitingSince.delete(n.id);
+			this.status.set(n.id, "error");
+			this.failed++;
+			this.emit({
+				type: "node_failed",
+				runId: this.runId,
+				nodeId: n.id,
+				endedAt: this.now(),
+				durationMs: Math.max(0, this.now() - startedAt),
+				error: "已中止",
+			});
 		}
+		this.wake();
+	}
+
+	/**
+	 * Decide an awaiting gate (approve/reject). Valid ONLY while the node is
+	 * awaiting — anything else (unknown id, already decided, aborted, run
+	 * finished) is a silent no-op returning false with no event.
+	 * Approval: the trimmed note (default （已批准）) becomes the node's output
+	 * and unlocks downstream like an ordinary completion. Rejection: the node
+	 * fails and the downstream closure is skipped with the standard reason.
+	 */
+	decideNode(nodeId: string, approved: boolean, note: string): boolean {
+		if (this.status.get(nodeId) !== "awaiting") return false;
+		const startedAt = this.awaitingSince.get(nodeId) ?? this.now();
+		this.awaiting.delete(nodeId);
+		this.awaitingSince.delete(nodeId);
+		const endedAt = this.now();
+		this.emit({
+			type: "node_decided",
+			runId: this.runId,
+			nodeId,
+			endedAt,
+			durationMs: Math.max(0, endedAt - startedAt),
+			approved,
+			note,
+		});
+		if (approved) {
+			this.outputs.set(nodeId, note.trim() || "（已批准）");
+			this.status.set(nodeId, "ok");
+			this.ok++;
+			this.settleDownstream(nodeId);
+		} else {
+			this.status.set(nodeId, "error");
+			this.failed++;
+			this.skipClosure(nodeId, `upstream failed: ${nodeId}`);
+		}
+		this.wake();
+		return true;
 	}
 
 	// ------------------------------------------------------------------------
@@ -201,14 +296,7 @@ export class OrchestratorEngine {
 
 	private launch(id: string): void {
 		const node = this.nodeById.get(id)!;
-		const upstream: UpstreamInput[] = (this.upstreams.get(id) ?? []).map((uid) => ({
-			nodeId: uid,
-			text: this.outputs.get(uid) ?? "",
-			// The edge's TYPE (+ optional note) tells the executor HOW this
-			// input is meant to be used, not just from whom it arrives.
-			type: this.edgeTypes.get(`${uid}->${id}`),
-			label: this.edgeLabels.get(`${uid}->${id}`),
-		}));
+		const upstream = this.upstreamInputs(id);
 		const assembledPrompt = assemblePrompt(node, upstream);
 		const startedAt = this.now();
 		this.status.set(id, "running");
@@ -243,6 +331,44 @@ export class OrchestratorEngine {
 		this.inflight.set(id, promise);
 	}
 
+	/** Suspend a ready gate as awaiting a human decision (no executor call). */
+	private suspend(id: string): void {
+		const node = this.nodeById.get(id)!;
+		const assembledPrompt = assemblePrompt(node, this.upstreamInputs(id));
+		const startedAt = this.now();
+		this.status.set(id, "awaiting");
+		this.awaiting.add(id);
+		this.awaitingSince.set(id, startedAt);
+		// The assembled prompt is the review material: the human sees exactly
+		// what this gate would pass downstream (task + upstream injection).
+		this.emit({ type: "node_awaiting", runId: this.runId, nodeId: id, startedAt, assembledPrompt });
+	}
+
+	private gateSignal(): Promise<void> {
+		return new Promise<void>((resolve) => this.gateWaiters.push(resolve));
+	}
+
+	/** A gate was decided (or aborted) — unpark the run loop. */
+	private wake(): void {
+		const waiters = this.gateWaiters;
+		this.gateWaiters = [];
+		for (const w of waiters) w();
+	}
+
+	/** Snapshot of one node's upstream contributions (prompt material). */
+	private upstreamInputs(id: string): UpstreamInput[] {
+		return (this.upstreams.get(id) ?? []).map((uid) => ({
+			nodeId: uid,
+			text: this.outputs.get(uid) ?? "",
+			// The edge's TYPE (+ optional note) tells the executor HOW this
+			// input is meant to be used, not just from whom it arrives.
+			type: this.edgeTypes.get(`${uid}->${id}`),
+			label: this.edgeLabels.get(`${uid}->${id}`),
+			// The upstream node's own injection budget, when it set one.
+			capBytes: this.nodeById.get(uid)?.outputCapBytes,
+		}));
+	}
+
 	private complete(id: string, startedAt: number, r: NodeResult): void {
 		this.outputs.set(id, r.text);
 		this.status.set(id, "ok");
@@ -254,8 +380,19 @@ export class OrchestratorEngine {
 			nodeId: id,
 			endedAt: this.now(),
 			durationMs: Math.max(0, this.now() - startedAt),
-			output: { text: r.text, stopReason: r.stopReason ?? "stop", model: r.model, usage: r.usage ?? zeroNodeUsage() },
+			output: {
+				text: r.text,
+				stopReason: r.stopReason ?? "stop",
+				model: r.model,
+				usage: r.usage ?? zeroNodeUsage(),
+				...(r.attempts !== undefined ? { attempts: r.attempts } : {}),
+			},
 		});
+		this.settleDownstream(id);
+	}
+
+	/** A node reached ok: decrement downstream indegrees, queue newly ready ones. */
+	private settleDownstream(id: string): void {
 		for (const d of this.downstreams.get(id) ?? []) {
 			if (this.status.get(d) !== "pending") continue; // already skipped / running
 			const rem = this.remaining.get(d)! - 1;

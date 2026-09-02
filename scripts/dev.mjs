@@ -14,7 +14,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,6 +40,24 @@ if (!process.env.DEEPSEEK_API_KEY) {
 process.env.PI_ARGS ??= "--model deepseek/deepseek-chat";
 
 const children = [];
+
+/**
+ * Pidfile so `node scripts/stop.mjs` can clean up after a hard kill (eval F10:
+ * externally killing dev.mjs — task manager, crashed terminal — used to leave
+ * the server and vite orphaned and still holding ports 8787/5173).
+ */
+const PIDFILE = join(tmpdir(), "pi-graph-dev-pids.json");
+
+function writePidfile() {
+	try {
+		writeFileSync(
+			PIDFILE,
+			JSON.stringify({ dev: process.pid, children: children.map((c) => ({ name: c.name, pid: c.proc.pid })) }, null, "\t"),
+		);
+	} catch {
+		/* best effort — stop.mjs still has the port-scan fallback */
+	}
+}
 
 function run(name, cwd, command, args) {
 	// shell:true on Windows splits unquoted paths with spaces (C:\Program Files),
@@ -67,28 +86,58 @@ function run(name, cwd, command, args) {
 		if (shuttingDown) return;
 		shutdown(code === 0 ? 0 : 1);
 	});
-	children.push(proc);
+	children.push({ name, proc });
+	writePidfile();
 	return proc;
+}
+
+/**
+ * Kill a child AND everything under it. On Windows we spawn through a cmd.exe
+ * shim, so child.kill() only kills the shim and leaks the real server/vite —
+ * the same bug pi-bridge.ts fixed with taskkill /T /F. The tree walk also
+ * takes the pi rpc bridges living under the server with it.
+ */
+function treeKill(pid) {
+	if (typeof pid !== "number") return;
+	if (process.platform === "win32") {
+		try {
+			spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" }).on("error", () => {
+				/* already gone */
+			});
+		} catch {
+			/* already gone */
+		}
+	} else {
+		try {
+			process.kill(pid, "SIGTERM");
+		} catch {
+			/* already gone */
+		}
+	}
 }
 
 let shuttingDown = false;
 function shutdown(code = 0) {
 	if (shuttingDown) return;
 	shuttingDown = true;
-	for (const c of children) {
-		try {
-			c.kill();
-		} catch {
-			/* already gone */
-		}
+	// Server first: its tree contains the pi rpc bridges; vite carries nothing
+	// that outlives it.
+	for (const { proc } of children) treeKill(proc.pid);
+	try {
+		rmSync(PIDFILE, { force: true });
+	} catch {
+		/* best effort */
 	}
-	setTimeout(() => process.exit(code), 500);
+	// taskkill runs asynchronously — give the trees a moment to die before exit.
+	setTimeout(() => process.exit(code), 1500);
 }
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
+process.on("SIGBREAK", () => shutdown(0)); // Ctrl+Break on Windows
 
-console.log("pi-graph dev 启动中… Ctrl+C 退出全部\n");
+console.log("pi-graph dev 启动中… Ctrl+C 退出全部（或 node scripts/stop.mjs 兜底清理）\n");
 run("server", join(root, "apps/server"), process.execPath, [
 	"src/main.ts",
 ]);
 run("web", join(root, "apps/web"), process.execPath, ["node_modules/vite/bin/vite.js"]);
+writePidfile();

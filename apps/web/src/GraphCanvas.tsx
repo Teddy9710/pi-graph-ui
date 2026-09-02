@@ -84,8 +84,10 @@ function Canvas({ graphOverride, compact = false }: { graphOverride?: Graph; com
 				const target = byId.get(e.target);
 				const running = target?.data.status === "running";
 				// Arrowheads bake their color into an inline style, so they
-				// must be given the same per-kind color as the CSS stroke.
-				const color = running ? "#5b9bf8" : e.kind === "spawn" ? "#7ba4e0" : "#838c9e";
+				// must be given the same per-kind color as the CSS stroke:
+				// legend blue when the route is live, engraved trace at rest,
+				// and spawn edges print as unsurveyed chart ink.
+				const color = running ? "#4da3ff" : e.kind === "spawn" ? "#92a7a1" : "#5c7370";
 				return {
 					id: e.id,
 					source: e.source,

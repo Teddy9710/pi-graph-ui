@@ -17,8 +17,14 @@ import {
 	foldEvent,
 	initState,
 	MAX_EDGE_NOTE_CHARS,
+	MAX_MIN_OUTPUT_CHARS,
+	MAX_NODE_TIMEOUT_MS,
+	MAX_NODE_TOOLS,
+	MAX_OUTPUT_CAP_BYTES,
 	MODEL_RE,
+	TOOL_NAME_RE,
 	validateGraph,
+	isSafeWorkdir,
 	type EdgeType,
 	type GraphDef,
 	type JsonAgentSessionEvent,
@@ -96,7 +102,11 @@ export function extractGraph(text: string): PlanOutcome {
 	const nodes = raw.nodes.map((n) => {
 		if (typeof n !== "object" || n === null) return n;
 		const r = n as Record<string, unknown>;
-		const out: Record<string, string> = {};
+		// `gate` (HITL 门控) is deliberately NOT carried out of a plan: the
+		// whitelist below drops it like every other unknown field, because a
+		// gate is a human-placed editor construct — a model that learned to
+		// emit one could suspend an unattended run indefinitely.
+		const out: Record<string, string | number | string[]> = {};
 		if (typeof r.id === "string") out.id = r.id.slice(0, 64);
 		if (typeof r.task === "string") out.task = r.task.slice(0, MAX_TASK_CHARS);
 		// Label rides in prompt section headers downstream (buildSynthPrompt
@@ -108,6 +118,27 @@ export function extractGraph(text: string): PlanOutcome {
 		}
 		if (typeof r.model === "string" && r.model.trim()) out.model = r.model.slice(0, 128);
 		if (typeof r.agent === "string" && r.agent.trim()) out.agent = r.agent.slice(0, 64);
+		// Capability profile: clamp in-range numbers, keep safe shapes, drop
+		// everything else. Dropping (not failing) keeps the single planner
+		// retry reserved for structural errors; these fields are opt-in
+		// niceties the prompt does not advertise, not load-bearing contracts.
+		for (const [field, min, max] of [
+			["minOutputChars", 0, MAX_MIN_OUTPUT_CHARS],
+			["timeoutMs", 1_000, MAX_NODE_TIMEOUT_MS],
+			["outputCapBytes", 1, MAX_OUTPUT_CAP_BYTES],
+		] as const) {
+			const v = r[field];
+			if (typeof v === "number" && Number.isFinite(v)) {
+				out[field] = Math.min(max, Math.max(min, Math.round(v)));
+			}
+		}
+		if (typeof r.workdir === "string" && isSafeWorkdir(r.workdir)) out.workdir = r.workdir;
+		for (const field of ["tools", "excludeTools"] as const) {
+			const list = r[field];
+			if (!Array.isArray(list)) continue;
+			const names = list.filter((t): t is string => typeof t === "string" && TOOL_NAME_RE.test(t)).slice(0, MAX_NODE_TOOLS);
+			if (names.length > 0) out[field] = names;
+		}
 		return out;
 	});
 	const edges = raw.edges.map((e) => {

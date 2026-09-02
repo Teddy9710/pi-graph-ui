@@ -8,6 +8,8 @@ import {
 	finalOutput,
 	foldRunEvent,
 	initRunState,
+	isSafeWorkdir,
+	zeroNodeUsage,
 	MAX_EDGE_NOTE_CHARS,
 	MAX_INJECTED_OUTPUT_BYTES,
 	ORCH_RESULTS_SENTINEL,
@@ -362,6 +364,33 @@ describe("foldRunEvent", () => {
 		expect(s.nodes.b?.skipReason).toBe("upstream failed: a");
 	});
 
+	it("ok/failed/skipped/usage tally LIVE per settled node (a gate can park the run for minutes)", () => {
+		const s = initRunState();
+		// four-node graph: fold ignores unknown nodeIds, so c/d must exist
+		foldRunEvent(s, { ...started, graph: { nodes: [{ id: "a", task: "x" }, { id: "b", task: "x" }, { id: "c", task: "x" }, { id: "d", task: "x" }], edges: [] } });
+		foldRunEvent(s, {
+			type: "node_completed",
+			runId: "r1",
+			nodeId: "a",
+			endedAt: 9,
+			durationMs: 4,
+			output: { text: "A", stopReason: "stop", usage: { input: 1, output: 2, totalTokens: 3, cost: 0.01 } },
+		});
+		foldRunEvent(s, { type: "node_failed", runId: "r1", nodeId: "b", endedAt: 10, durationMs: 1, error: "x" });
+		foldRunEvent(s, { type: "node_skipped", runId: "r1", nodeId: "c", reason: "upstream failed: b" });
+		expect(s.ok).toBe(1);
+		expect(s.failed).toBe(1);
+		expect(s.skipped).toBe(1);
+		expect(s.usage.totalTokens).toBe(3);
+		// a rejected gate decision counts as a failure the moment it settles
+		foldRunEvent(s, { type: "node_decided", runId: "r1", nodeId: "d", endedAt: 12, durationMs: 900, approved: false, note: "不行" });
+		expect(s.failed).toBe(2);
+		// run_finished remains the authoritative overwrite
+		foldRunEvent(s, { type: "run_finished", runId: "r1", finishedAt: 99, status: "failed", ok: 1, failed: 2, skipped: 1, usage: zeroNodeUsage() });
+		expect(s.ok).toBe(1);
+		expect(s.usage.totalTokens).toBe(0);
+	});
+
 	it("run_finished sets counts, aggregate usage and status", () => {
 		const s = initRunState();
 		foldRunEvent(s, started);
@@ -551,5 +580,203 @@ describe("parseOrchSynthMeta", () => {
 		expect(parseOrchSynthMeta(`${ORCH_RESULTS_SENTINEL}\n{"runId":1,"goal":"g","nodeCount":1}`)).toBeNull(); // wrong types
 		expect(parseOrchSynthMeta(`${ORCH_RESULTS_SENTINEL}\n{"runId":"r","goal":"g"}`)).toBeNull(); // missing field
 		expect(parseOrchSynthMeta(ORCH_RESULTS_SENTINEL)).toBeNull(); // no line 2
+	});
+});
+
+// ============================================================================
+// Node capability profile (节点档案 — 互鉴 pi-graph-tool)
+// ============================================================================
+
+describe("node capability profile validation", () => {
+	const withNode = (over: Record<string, unknown>) =>
+		validateGraph({ nodes: [{ id: "a", task: "t", ...over }], edges: [] });
+
+	it("accepts a fully-profiled node", () => {
+		expect(
+			withNode({ minOutputChars: 20, timeoutMs: 60_000, outputCapBytes: 4096, workdir: "nodes/dev", tools: ["read", "grep"], excludeTools: ["bash"] }),
+		).toEqual([]);
+	});
+
+	it("rejects out-of-range or non-integer numeric knobs", () => {
+		for (const bad of [ -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "20", 1_000_001 ]) {
+			expect(withNode({ minOutputChars: bad }).some((i) => i.message.includes("minOutputChars"))).toBe(true);
+		}
+		for (const bad of [ 999, 0, 86_400_001, 1.5 ]) {
+			expect(withNode({ timeoutMs: bad }).some((i) => i.message.includes("timeoutMs"))).toBe(true);
+		}
+		for (const bad of [ 0, -5, 1_000_001, 2.5 ]) {
+			expect(withNode({ outputCapBytes: bad }).some((i) => i.message.includes("outputCapBytes"))).toBe(true);
+		}
+	});
+
+	it("isSafeWorkdir rejects escapes and non-relative shapes, accepts real ones", () => {
+		for (const good of ["nodes/dev", "a b/c", "工作目录", "n1/sub_dir"]) {
+			expect(isSafeWorkdir(good)).toBe(true);
+		}
+		const bad = ["", "..", "a/../b", "a//b", "/abs", "C:/win", "C:" + "\\win", "unc" + "\\srv", "a" + "\\b", "a:", "x".repeat(201), "line\nbreak", "tab\there"];
+		for (const b of bad) {
+			expect(isSafeWorkdir(b)).toBe(false);
+		}
+	});
+
+	it("rejects unsafe workdir strings at the graph level", () => {
+		for (const bad of ["..", "a/../b", "C:/win", "/abs", "a" + "\\b"]) {
+			expect(withNode({ workdir: bad }).some((i) => i.message.includes("workdir"))).toBe(true);
+		}
+	});
+
+	it("rejects malformed tool lists and unsafe tool names", () => {
+		expect(withNode({ tools: "read" }).some((i) => i.message.includes("tools"))).toBe(true);
+		expect(withNode({ tools: Array.from({ length: 33 }, () => "read") }).some((i) => i.message.includes("tools"))).toBe(true);
+		for (const bad of [ "bad tool", "a,b", "a&b", "" ]) {
+			expect(withNode({ tools: [bad] }).some((i) => i.message.includes("工具名"))).toBe(true);
+		}
+		expect(withNode({ excludeTools: ["bash & calc"] }).some((i) => i.message.includes("excludeTools"))).toBe(true);
+	});
+});
+
+describe("assemblePrompt / buildSynthPrompt node caps", () => {
+	it("upstream capBytes overrides the 50KB default for that section", () => {
+		const long = "x".repeat(1000);
+		const node: GraphDef["nodes"][number] = { id: "b", task: "t" };
+		const withCap = assemblePrompt(node, [{ nodeId: "a", text: long, capBytes: 100 }]);
+		expect(withCap).toContain("（输出过长，已截断）");
+		expect(withCap.length).toBeLessThan(300);
+		const noCap = assemblePrompt(node, [{ nodeId: "a", text: long }]);
+		expect(noCap).not.toContain("（输出过长，已截断）");
+	});
+
+	it("buildSynthPrompt honors a node's own capBytes over the formula budget", () => {
+		const long = "y".repeat(4000);
+		const capped = buildSynthPrompt("g", "r", [{ nodeId: "n1", text: long, capBytes: 200 }]);
+		expect(capped).toContain("### n1 —— n1\n");
+		expect(capped).toContain("（输出过长，已截断）");
+		// The 200-byte cap beats the 2048-byte floor for this section.
+		const section = capped.split("### n1 —— n1\n")[1] ?? "";
+		expect(section.length).toBeLessThan(300);
+		const uncapped = buildSynthPrompt("g", "r", [{ nodeId: "n1", text: long }]);
+		expect(uncapped).not.toContain("（输出过长，已截断）"); // 4000 bytes < the 50KB single-node budget
+	});
+});
+
+describe("foldRunEvent attempts (salvage visibility)", () => {
+	it("node_completed.attempts lands on the node state; absent stays null", () => {
+		const state = initRunState();
+		foldRunEvent(state, { type: "run_started", runId: "r", startedAt: 1, graph: graph() });
+		foldRunEvent(state, {
+			type: "node_completed",
+			runId: "r",
+			nodeId: "a",
+			endedAt: 2,
+			durationMs: 5,
+			output: { text: "ok", stopReason: "stop", usage: { input: 1, output: 1, totalTokens: 2, cost: 0 }, attempts: 2 },
+		});
+		expect(state.nodes.a!.attempts).toBe(2);
+		foldRunEvent(state, {
+			type: "node_completed",
+			runId: "r",
+			nodeId: "b",
+			endedAt: 3,
+			durationMs: 5,
+			output: { text: "ok", stopReason: "stop", usage: { input: 1, output: 1, totalTokens: 2, cost: 0 } },
+		});
+		expect(state.nodes.b!.attempts).toBeNull();
+	});
+});
+
+// ============================================================================
+// Gate nodes (人工门控 — HITL)
+// ============================================================================
+
+describe("gate node validation", () => {
+	it("accepts a bare gate node; a present gate must be a boolean", () => {
+		expect(validateGraph({ nodes: [{ id: "g", task: "人工确认后继续", gate: true }], edges: [] })).toEqual([]);
+		const issues = validateGraph({ nodes: [{ id: "g", task: "t", gate: "yes" as never }], edges: [] });
+		expect(issues.some((i) => i.nodeOrEdge === "g" && i.message.includes("gate"))).toBe(true);
+	});
+
+	it("rejects a gate carrying any execution config", () => {
+		// A gate never reaches an executor — a model/tools/workdir knob is a
+		// config mistake the editor must surface, not silently ignore.
+		for (const over of [
+			{ model: "deepseek/deepseek-chat" },
+			{ agent: "reviewer" },
+			{ tools: ["read"] },
+			{ excludeTools: ["bash"] },
+			{ workdir: "nodes/gate" },
+			{ minOutputChars: 10 },
+			{ timeoutMs: 60_000 },
+			{ outputCapBytes: 4096 },
+		]) {
+			const issues = validateGraph({ nodes: [{ id: "g", task: "t", gate: true, ...over }], edges: [] });
+			expect(issues.some((i) => i.nodeOrEdge === "g" && i.message === "门控节点不能带执行配置（model/agent/tools/workdir/能力档案）")).toBe(true);
+		}
+	});
+
+	it("still requires the gate task (it is the 审校要点 the reviewer reads)", () => {
+		const issues = validateGraph({ nodes: [{ id: "g", task: "  ", gate: true }], edges: [] });
+		expect(issues.some((i) => i.message.includes("为空"))).toBe(true);
+	});
+});
+
+describe("foldRunEvent gate lifecycle", () => {
+	const gateGraph: GraphDef = {
+		nodes: [
+			{ id: "a", task: "任务 A" },
+			{ id: "g", task: "人工确认后继续", gate: true },
+			{ id: "b", task: "任务 B" },
+		],
+		edges: [
+			{ id: "a->g", source: "a", target: "g" },
+			{ id: "g->b", source: "g", target: "b" },
+		],
+	};
+	const started: RunEvent = { type: "run_started", runId: "r1", startedAt: 1, graph: gateGraph };
+
+	it("node_awaiting parks the node and mirrors startedAt/assembledPrompt like node_started", () => {
+		const s = initRunState();
+		foldRunEvent(s, started);
+		foldRunEvent(s, { type: "node_awaiting", runId: "r1", nodeId: "g", startedAt: 5, assembledPrompt: "人工确认后继续\n\n---\n## 上游输入" });
+		expect(s.nodes.g?.status).toBe("awaiting");
+		expect(s.nodes.g?.startedAt).toBe(5);
+		expect(s.nodes.g?.assembledPrompt).toContain("上游输入");
+	});
+
+	it("an approval settles ok with the trimmed note as output (blank falls back to the marker)", () => {
+		const s = initRunState();
+		foldRunEvent(s, started);
+		foldRunEvent(s, { type: "node_awaiting", runId: "r1", nodeId: "g", startedAt: 5, assembledPrompt: "p" });
+		foldRunEvent(s, { type: "node_decided", runId: "r1", nodeId: "g", endedAt: 9, durationMs: 4, approved: true, note: "  数据可信  " });
+		expect(s.nodes.g?.status).toBe("ok");
+		// The note IS the gate's output — it injects into downstream prompts
+		// like any upstream output, so an empty string must never land there.
+		expect(s.nodes.g?.output).toBe("数据可信");
+		expect(s.nodes.g?.endedAt).toBe(9);
+		const blank = initRunState();
+		foldRunEvent(blank, started);
+		foldRunEvent(blank, { type: "node_decided", runId: "r1", nodeId: "g", endedAt: 9, durationMs: 4, approved: true, note: "   " });
+		expect(blank.nodes.g?.output).toBe("（已批准）");
+	});
+
+	it("a rejection settles error with the 人工驳回 message (blank note → 无备注)", () => {
+		const s = initRunState();
+		foldRunEvent(s, started);
+		foldRunEvent(s, { type: "node_awaiting", runId: "r1", nodeId: "g", startedAt: 5, assembledPrompt: "p" });
+		foldRunEvent(s, { type: "node_decided", runId: "r1", nodeId: "g", endedAt: 9, durationMs: 4, approved: false, note: "结论缺引用" });
+		expect(s.nodes.g?.status).toBe("error");
+		expect(s.nodes.g?.error).toBe("人工驳回：结论缺引用");
+		const blank = initRunState();
+		foldRunEvent(blank, started);
+		foldRunEvent(blank, { type: "node_decided", runId: "r1", nodeId: "g", endedAt: 9, durationMs: 4, approved: false, note: "" });
+		expect(blank.nodes.g?.error).toBe("人工驳回：无备注");
+	});
+
+	it("ignores gate events from a stale runId", () => {
+		const s = initRunState();
+		foldRunEvent(s, started);
+		const before = JSON.stringify(s.nodes);
+		foldRunEvent(s, { type: "node_awaiting", runId: "r-OTHER", nodeId: "g", startedAt: 5, assembledPrompt: "" });
+		foldRunEvent(s, { type: "node_decided", runId: "r-OTHER", nodeId: "g", endedAt: 9, durationMs: 4, approved: true, note: "n" });
+		expect(JSON.stringify(s.nodes)).toBe(before);
 	});
 });

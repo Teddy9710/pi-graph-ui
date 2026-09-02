@@ -1,6 +1,6 @@
 # pi-graph-ui 测试用例（M-C 对话式编排）
 
-覆盖范围：实时页「对话为主」布局、聊天面板、⚡ 自动编排、编排卡片与结果注入、服务端注入管线、失败/中止路径、历史回放与恢复、安全边界。
+覆盖范围：实时页「对话为主」布局、聊天面板、⚡ 自动编排、编排卡片与结果注入、服务端注入管线、失败/中止路径、历史回放与恢复、安全边界、人工门控（HITL）。
 
 每条用例均从源码提取并经对抗性复核（预期结果与代码行为逐条核对，`代码` 列为依据位置）。
 
@@ -16,19 +16,21 @@
 
 ```bash
 node scripts/dev.mjs          # 启动 dev 栈：server :8787 / web :5173（Ctrl+C 全停）
+node scripts/stop.mjs         # 兜底清理：dev.mjs 被硬杀后残留的 server/vite（pidfile + 端口扫描）
 # 浏览器打开 http://localhost:5173
-pnpm -r test                  # 全部单测（shared 79 + server 109）
+pnpm -r test                  # 全部单测（shared 95 + server 137）
 pnpm -r typecheck             # 三个包类型检查
 node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1（可选 ABORT=1）
+node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 → 批准注入下游 → 归档/重放/孤儿
 ```
 
 **自动化覆盖现状**（与本文件的「契约」类对应）：
 
 | 层 | 内容 | 状态 |
 |---|---|---|
-| shared 单测 79 | chat.test 15（时间线合并/sentinel 识别）、orchestration.test 43（validateGraph/assemblePrompt/buildSynthPrompt/截断/label 防伪造）、fold 13、graph 8 | ✅ 全绿 |
-| server 单测 109 | run-manager 23（含 chat 钩子 6 条）、planner 23（含 label 归一）、orchestrator 12、session-store/snake/bridge 等 | ✅ 全绿 |
-| e2e | chain（注入/归档/重放）、PLAN（规划全流程）、CHAT（sentinel 注入+整合回复+hello 重放） | ✅ 三模式绿 |
+| shared 单测 95 | chat.test 15（时间线合并/sentinel 识别）、orchestration.test 59（validateGraph 含节点能力档案与门控规则/assemblePrompt/buildSynthPrompt/capBytes 截断/label 防伪造/fold attempts/门控事件折叠与长效计数）、fold 13、graph 8 | ✅ 全绿 |
+| server 单测 137 | run-manager 25（含 chat 钩子 6 条 + 门控备注防伪造）、planner 25（label 归一 + 能力档案归一 + gate 剥离）、orchestrator 22（含 attempts/capBytes/门控挂起·决策·中止·槽位旁路）、pi-node-executor 14（质量门 salvage/超时/workdir/工具档案）、session-store/snake/bridge 等 | ✅ 全绿 |
+| e2e | chain（注入/归档/重放）、PLAN（规划全流程）、CHAT（sentinel 注入+整合回复+hello 重放）、**GATE（挂起→4 类非法决策仅回请求方→批准备注注入下游→归档/重放）**；ABORT 模式孤儿检查为 **PID 集合快照差**（基线之前存在的进程不计泄漏，PowerShell 查询失败即报错不静默通过） | ✅ 四模式绿 |
 | web | 仅 typecheck（无组件测试）→ 本文 MC-CHAT / MC-BAR / MC-LAY 的手测用例即为 Web 层主要防线 | ⚠️ 靠手测 |
 
 ---
@@ -163,6 +165,13 @@ node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1�
 | SRV-32 | P1 | 契约 | 空闲时 abort_run；引擎 finished 后再 abort | 观察事件 | 两处均 no-op：空闲返回 false 无事件；引擎已结束后 abort 不重复发事件 | run-manager.ts:190-192, main.ts:306-308, orchestrator.ts:159-160 |
 | SRV-33 | P1 | 契约 | kill() 后 trickle stdout | 观察事件 | planner/executor 的 post-settle 守卫：kill 后 trickle 事件不再 fold、不再转发 delta（已结算节点不事后补发） | planner.ts:254-257, pi-node-executor.ts:137-140 |
 | SRV-34 | P0 | 契约 | server 运行，带 `Origin: http://localhost:5173` 请求 | `curl -i -H "Origin: …" :8787/api/sessions`（及 `/api/sessions/:id/events`、`/api/agents`、`/api/runs*`） | 响应带 `access-control-allow-origin: *`（web 由 Vite :5173 提供、API 在 :8787，**fetch 跨源**；WS 不受 CORS 限但 fetch 会被浏览器静默拦截——修复前历史抽屉永远显示「暂无存档」）；`/api/snake/*` **不**带（维持同源） | main.ts:142-154 |
+| SRV-35 | P0 | 契约 | fake bridge 脚本回放 | 质量门违规触发 salvage | ①门关（默认 minOutputChars=0）短输出一次通过、无 attempts；②违规→**原题不改写重跑一次**（两次 prompt 完全一致），两答取长，`attempts:2`；③重跑标记「—— 输出仅 N 字符（< 质量门 M），用原题重跑一次 ——」走 delta 流（预览可见）；④两次均空→节点判失败「两次输出均为空」；⑤真实失败（进程退出/超时/prompt 被拒）**不重试**；⑥中止后不重试（第二次 spawn 不发生）。**已自动化**（pi-node-executor.test） | pi-node-executor.ts:115-146 |
+| SRV-36 | P0 | 契约 | ORCH_NODE_RETRY=0 | 空输出 + 短输出各一次 | 关闭重跑后：空输出直接判失败「输出为空（质量门 minOutputChars=N）」；短而非空照常通过——**空转不再静默算成功**（对齐 tool 的显式违规语义） | pi-node-executor.ts:127-132, main.ts:68-69 |
+| SRV-37 | P0 | 契约 | 节点带能力档案字段 | 逐项验证覆盖优先级 | ①`node.minOutputChars` 优先于 `ORCH_MIN_OUTPUT_CHARS`；②`node.timeoutMs` 优先于 `ORCH_NODE_TIMEOUT_MS`（超时报「节点超时（Nms）」）；③`node.outputCapBytes` 只影响注入下游/汇总的预算，归档输出保持完整。**已自动化** | pi-node-executor.ts:119,204, orchestrator.ts:214, run-manager.ts:279-293 |
+| SRV-38 | P0 | 契约 | 节点带 workdir / tools | 观察 spawn 参数与 cwd | ①workdir=相对安全路径→解析到 base 之下、目录自动创建、bridge cwd 指向它（并行节点互不踩文件）；②越界路径（含 ../、绝对路径、反斜杠）在 validateGraph 拒绝 + 执行器 resolve 包含检查双防线（「workdir 越界」，不 spawn）；③tools/excludeTools 以逗号拼接进 `--tools`/`--exclude-tools` argv（TOOL_NAME_RE 保证无 cmd 元字符）。**已自动化** | pi-node-executor.ts:181-202, orchestration.ts:79,246-258 |
+| SRV-39 | P0 | 契约 | — | 单测 validateGraph 能力档案规则 | minOutputChars 0–1000000、timeoutMs 1000–86400000、outputCapBytes 1–1000000 的整数范围校验；isSafeWorkdir 拒绝空/超 200/控制字符/`\\`/`:`/前导 `/`/空段/`..`；tools 数组 ≤32 个合法名。**已自动化**（orchestration.test） | orchestration.ts:232-258 |
+| SRV-40 | P0 | 契约 | — | 断言 node_completed 事件与 RunNodeState | ①executor 返回 attempts>1 → orchestrator 在 node_completed.output 带 `attempts`（未 salvage 则无该字段）；②foldRunEvent 把 attempts 落进节点状态（历史回放可见重跑标记）。**已自动化** | orchestrator.ts:42,266, orchestration.ts:542,732 |
+| SRV-41 | P1 | 契约 | 规划器输出带能力字段 | 过 extractGraph | 数字夹取到范围内（负→min、超大→max、小数四舍五入）；不安全 workdir 丢弃；tools 数组过滤非法名后 ≤32；空 tools 视为缺省——**归一不报错**（不消耗规划器唯一一次重试）。**已自动化**（planner.test） | planner.ts:121-137 |
 
 ## 6. 失败 / 中止 / 异常（MC-FAIL）
 
@@ -201,12 +210,36 @@ node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1�
 
 | 编号 | P | 类型 | 前置 | 步骤 | 预期 | 代码 |
 |---|---|---|---|---|---|---|
-| SEC-01 | P0 | 契约 | label 含 \n/\t/DEL(0x7f) | 三层分别验证 | ①第一层 validateGraph：LABEL_UNSAFE_RE=/[ -]/（**含 DEL 0x7f**）命中即报「节点/边 label 不能包含换行或控制字符」，图被拒→plan_failed 不执行不注入；②第二层 extractGraph 归一：控制字符替换空格+trim，非空才留、节点截 100/边截 20——归一后不会因换行被拒；③第三层 safeLabel 兜底：构节头时再替换，空则回退 nodeId——注入 prompt 中任何 `###` 分节头不可能由 label 伪造。**已自动化**（三层各有用例） | orchestration.ts:61,158-159,186-187,329, planner.ts:105-108,127-128 |
+| SEC-01 | P0 | 契约 | label 含 \n/\t/DEL(0x7f) | 三层分别验证 | ①第一层 validateGraph：LABEL_UNSAFE_RE=/[\u0000-\u001f\u007f]/（**含 DEL 0x7f**）命中即报「节点/边 label 不能包含换行或控制字符」，图被拒→plan_failed 不执行不注入；②第二层 extractGraph 归一：控制字符替换空格+trim，非空才留、节点截 100/边截 20——归一后不会因换行被拒；③第三层 safeLabel 兜底：构节头时再替换，空则回退 nodeId——注入 prompt 中任何 `###` 分节头不可能由 label 伪造。**已自动化**（三层各有用例） | orchestration.ts:61,158-159,186-187,329, planner.ts:105-108,127-128 |
 | SEC-02 | P0 | 契约 | 超长节点输出 | buildSynthPrompt 极端输入 | 120KB 总预算/每节点 cap 公式/截断标记/字节级截断。**已自动化**（同 SRV-12） | orchestration.ts:283-285,319-322 |
 | SEC-03 | P1 | 契约 | env 模型 id 含元字符 | 发起规划/运行 | MODEL_RE 拒绝 argv 注入：「规划模型「X」含非法字符」/节点侧同防线（同 SRV-28） | planner.ts:211-214, pi-node-executor.ts:82-84 |
 | SEC-04 | P1 | 契约 | 各类超限输入 | 逐项验证 | goal>4000 拒；节点>16/边>512 拒；id 截 64、task 截 8000、model 128、agent 64、label 100、边 note 20；规划输出围栏/散文包裹可提取（同 SRV-03/04/18） | planner.ts:33-40,74-148, run-manager.ts:123-125 |
 
-## 9. 已知问题 / 接受项（KNOWN）
+## 9. 人工门控 / human-in-the-loop（MC-GATE）
+
+门控节点（`NodeDef.gate === true`）不执行 pi：就绪时把 run 挂起等人工「批准/驳回」。批准 → 备注成为节点输出注入下游；驳回 → 下游按 `upstream failed` 跳过。规划器**不会**生成门控——只能编辑器手工放置。线级契约由 `scripts/e2e-gate.mjs` 端到端锁定（挂起 → 4 类非法决策仅回请求方 → 批准备注注入下游 → 归档/重放/孤儿检查）。
+
+| 编号 | P | 类型 | 前置 | 步骤 | 预期 | 代码 |
+|---|---|---|---|---|---|---|
+| GATE-01 | P0 | 手测 | 编排页编辑器 | 点「＋门控」；选中该节点 | ①画布新增节点带 mono「门」小标、pending 虚线边；②面板 task 字段标签为「审校要点」，**执行配置（model/agent/tools/workdir/能力档案）全部不渲染**；③按钮 title 说明挂起语义 | OrchestratePage.tsx, OrchNodePanel.tsx |
+| GATE-02 | P0 | 契约 | — | 单测 validateGraph | ①gate 带任一执行配置（model/agent/tools/excludeTools/workdir/minOutputChars/timeoutMs/outputCapBytes）→ issue「门控节点不能带执行配置…」；②gate 非布尔 → issue；③gate 的 task 仍必填；④gate 无出边/全 gate 图合法。**已自动化**（orchestration.test） | orchestration.ts validateGraph |
+| GATE-03 | P0 | 契约 | fake executor | 门控 + 并行任务混合图 | ①gate ready 时**不调 executor、不占 maxParallel 槽**；②发 `node_awaiting`（assembledPrompt = assemblePrompt(gate, 上游输入)）；③并行任务照常推进不被门控阻塞。**已自动化**（orchestrator.test） | orchestrator.ts |
+| GATE-04 | P0 | 契约 | — | 图中仅剩 awaiting 门控 | run **不发 run_finished**——awaiting 非终态，直到决定或中止。**已自动化**（orchestrator.test） | orchestrator.ts 完成判定 |
+| GATE-05 | P0 | 契约 | — | 对 awaiting 门控 decideNode(true, "备注") | ①`node_decided` approved=true，durationMs 从进入 awaiting 起算；②折叠 status=ok、output=备注（空→「（已批准）」）；③下游解锁，其 prompt 含 `### from <gateId> —— 输入` 分节携带备注。**已自动化**（orchestrator.test + orchestration.test + e2e-gate） | orchestrator.ts, orchestration.ts fold |
+| GATE-06 | P0 | 契约 | — | decideNode(false, "原因") | ①折叠 status=error、error=`人工驳回：原因`（空备注→「无备注」）；②下游 `node_skipped` reason=`upstream failed: <id>`，与执行失败同语义。**已自动化**（orchestrator.test） | orchestrator.ts |
+| GATE-07 | P0 | 契约 | devtools 直发 WS | 对非 awaiting 节点/过期 runId/结束后发 `approve_node`；发 approved:"true"（非布尔）、note 带换行/控制字符、note>2000 | 均被拒：decideNode 返回 false 无事件；非法载荷只向请求方回 run_error（广播流不受污染）。**已自动化**（run-manager.test + e2e-gate 四连拒） | main.ts, run-manager.ts decideNode |
+| GATE-08 | P0 | 契约 | — | 两个客户端同时批准同一门控；批准与 abort 同时到达 | ①仅第一次 decide 生效（第二次 false 无事件）；②竞态下不双重结算、不发矛盾事件。**已自动化**（orchestrator.test + e2e-gate 迟到驳回） | orchestrator.ts decideNode 守卫 |
+| GATE-09 | P1 | 契约 | 门控 awaiting 中 | 点中止 | awaiting 门控按 running 节点同款 abort 结算（跳过），run_finished aborted。**已自动化**（orchestrator.test） | orchestrator.ts abort |
+| GATE-10 | P1 | 契约 | — | 规划器输出 JSON 带 gate:true | extractGraph **剥离** gate 字段——规划器不能自造审批点，落为普通任务节点。**已自动化**（planner.test） | planner.ts |
+| GATE-11 | P0 | 手测 | 运行至门控 awaiting | 选中 awaiting 门控节点 | ①面板显示 assembledPrompt 预览（等宽 pre）+ 备注 input +「批准」（主按钮）/「驳回」（danger）；②非 awaiting 时两钮禁用；③批准后节点变绿、按钮禁用；④驳回后节点红 ✗、下游琥珀跳过。（Playwright 走查 + 截图已核验：`D:/pip_temp/gate-shots/01→03`） | OrchNodePanel.tsx |
+| GATE-12 | P1 | 手测 | 门控各状态 | 观察节点视觉 | ①pending=虚线+空心点（未勘测习语）；②awaiting=琥珀描边 + 琥珀方点 + 缓慢呼吸；③无新色相、无 glow——门控用四色系的琥珀，绝不用洋红。（截图已核验） | nodes.css, orch-nodes.tsx |
+| GATE-13 | P1 | 契约 | 门控 awaiting/已决 | F5 刷新 / 历史重放 | node_awaiting/node_decided 进归档与 hello 全量重建——awaiting 态、决策备注、驳回错误均完整复原。**已自动化**（e2e-gate 归档/重放断言） | orchestration.ts foldRunEvent |
+| GATE-14 | P1 | 手测 | ⚡ 发起编排 | 观察生成图 | 规划器生成的图**不含门控节点**（与 GATE-10 对应的端上表现）。**已自动化**（planner.test 剥离断言，端上表现归 GATE-10） | planner.ts |
+| GATE-15 | P0 | 契约 | — | fake executor：maxParallel=1，慢节点占满槽位，普通节点排队其后，gate 队尾 | 扫描必须**跨过被槽位阻塞的节点**继续找 gate 并立即挂起（parked 数组保序回填），而不是断在阻塞节点处把 gate 困到槽位释放；中止后 parked 节点从未派发。**已自动化**（orchestrator.test 回归） | orchestrator.ts 排水循环 |
+| GATE-16 | P0 | 契约 | — | 门控挂起期间读运行条 chip | ok/失败/跳过/tok **逐节点实时累计**（node_completed/failed/decided/skipped 即刻 +1，usage 累加）——挂起几分钟的 run 不再显示「ok 0」；run_finished 仍以服务端权威计数覆盖兜底。**已自动化**（orchestration.test 长效计数） | orchestration.ts foldRunEvent |
+| GATE-17 | P1 | 手测 | 门控 awaiting | ①快速双击「批准」；②填备注后切换选中节点再切回；③awaiting 中按 Backspace/Delete | ①1s 发送防抖窗（`runId:nodeId` 键控）吞掉第二次发送——无重复 decide；②备注随节点切换/状态离开 awaiting/新 run 清空，但点击批准**不**清（发送在途/掉线重试时输入保留）；③运行中删除键已禁用（drag/connect 同锁）。 | orch-store.ts approveNode, OrchNodePanel.tsx, OrchCanvas.tsx |
+
+## 10. 已知问题 / 接受项（KNOWN）
 
 | 编号 | 描述 | 影响 | 依据 |
 |---|---|---|---|

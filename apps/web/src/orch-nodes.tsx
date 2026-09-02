@@ -2,8 +2,9 @@
  * Orchestration editor node: left/right connection handles, a status dot
  * (pending/running/ok/error/skipped), bold label plus @agent/model chips, and
  * a compact run preview — stream tail while running, output tail / error
- * snippet / skip reason once the node settles. Stays ~220px wide to match the
- * size dagre lays out with (orch-layout.ts).
+ * snippet / skip reason once the node settles. Gate nodes lead the head row
+ * with a mono 「门」 mark and breathe amber while awaiting a human decision.
+ * Stays ~220px wide to match the size dagre lays out with (orch-layout.ts).
  */
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
@@ -47,6 +48,9 @@ export function OrchNode({ data }: OrchNodeProps) {
 			<Handle type="target" position={Position.Left} className="pg-handle" />
 			<Handle type="source" position={Position.Right} className="pg-handle" />
 			<div className="pg-node-head">
+				{/* the kind slot the live canvas pins too (pg-icon) — a gate is
+				 * material structure, so the mark is ink, never the amber state */}
+				{node.gate && <span className="pg-icon pg-orch-gate-mark">门</span>}
 				{status === "running" && <span className="pg-spinner" />}
 				<b className="pg-title">{data.label}</b>
 				<span className={`pg-dot pg-dot-${status}`} />

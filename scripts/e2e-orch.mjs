@@ -62,26 +62,76 @@ function connect() {
 	});
 }
 
-/** Count live pi rpc node processes (0 expected when no run is active). */
-function countPiProcesses() {
-	if (process.platform !== "win32") return 0;
-	const out = execFileSync(
-		"powershell",
-		[
-			"-NoProfile",
-			"-Command",
-			"(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -match 'coding-agent' }).Count",
-		],
-		{ encoding: "utf8" },
-	);
-	return Number(out.trim()) || 0;
+/**
+ * Live pi rpc node process PIDs as a Set (win32 only; null = cannot probe on
+ * this platform → leak checks are skipped).
+ *
+ * The old COUNT-based probe had two defects (eval F8): it matched EVERY
+ * node.exe on the machine whose command line mentions 'coding-agent' — this
+ * session, other projects, the main bridge — so unrelated processes produced
+ * false orphan reports; and `Number(out.trim()) || 0` turned any PowerShell
+ * failure into "0 processes" (fail-open, leaks passed silently). The PID-set
+ * snapshot diff fixes both: a baseline is taken before the run starts, and
+ * only processes that appeared AFTER it count as this run's leaks. A broken
+ * query now fails loudly instead of reading as zero.
+ */
+function listPiPids() {
+	if (process.platform !== "win32") return null;
+	let out;
+	try {
+		out = execFileSync(
+			"powershell",
+			[
+				"-NoProfile",
+				"-Command",
+				"Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -match 'coding-agent' } | Select-Object -ExpandProperty ProcessId",
+			],
+			{ encoding: "utf8" },
+		);
+	} catch (err) {
+		throw new Error(`pi 进程查询失败（孤儿检查不可用）: ${err.message}`);
+	}
+	const pids = new Set();
+	for (const line of out.split(/\r?\n/)) {
+		const s = line.trim();
+		if (!s) continue;
+		const pid = Number(s);
+		if (!Number.isInteger(pid) || pid <= 0) {
+			throw new Error(`pi 进程查询返回了无法解析的输出: ${JSON.stringify(line)}`);
+		}
+		pids.add(pid);
+	}
+	return pids;
+}
+
+/** PIDs alive now but absent from the baseline (this run's true leak); null when the probe is unavailable. */
+function leakedPids(baseline) {
+	const now = listPiPids();
+	if (now === null || baseline === null) return null;
+	return [...now].filter((pid) => !baseline.has(pid));
+}
+
+/** Shared tail of every orphan check: wait for taskkill, then diff against the baseline. */
+async function assertNoLeaks(stage, baseline) {
+	await new Promise((r) => setTimeout(r, 3000)); // give Windows taskkill a moment
+	const leaked = leakedPids(baseline);
+	if (leaked === null) {
+		console.log("  [orphans] non-win32 platform: pid leak check skipped");
+		return;
+	}
+	if (leaked.length > 0) fail(`${leaked.length} orphaned pi process(es) after ${stage} (pids: ${leaked.join(", ")})`);
 }
 
 const graph = ABORT
 	? {
 			name: "e2e-abort",
+			// Count-to-100 keeps the slow node comfortably mid-flight when the
+			// abort lands: with count-to-30 it once finished ~14.6s BEFORE the
+			// abort propagated, leaving "never" aborted-in-flight (node_failed)
+			// instead of unstarted (node_skipped) — a legit outcome the old
+			// skip-only assertion wrongly reported as a defect (eval F9).
 			nodes: [
-				{ id: "slow", task: "从 1 慢慢数到 30，每个数字单独一行，不要做任何其他事。" },
+				{ id: "slow", task: "从 1 慢慢数到 100，每个数字单独一行，不要做任何其他事。" },
 				{ id: "never", task: "只输出：不该跑到这里" },
 			],
 			edges: [{ id: "slow->never", source: "slow", target: "never" }],
@@ -173,6 +223,10 @@ ws.onmessage = (msg) => {
 	}
 };
 
+// Orphan-check baseline: every pi process alive RIGHT BEFORE the run is
+// pre-existing (main bridge, other sessions) and excluded from the leak diff.
+const baselinePids = listPiPids();
+
 if (PLAN || CHAT) {
 	ws.send(JSON.stringify({ type: "plan_run", goal: GOAL, chat: CHAT }));
 	planSent = true;
@@ -249,10 +303,8 @@ async function finish(fin) {
 			fail(`archive has ${archived.length} events, stream had ${events.length}`);
 		}
 		if (archived[0].type !== "plan_started") fail("archive does not start with plan_started");
-		// The planner bridge must be dead with the run.
-		await new Promise((r) => setTimeout(r, 3000));
-		const leaked = countPiProcesses();
-		if (leaked > 0) fail(`${leaked} orphaned pi process(es) after plan run`);
+		// The planner + node bridges must be dead with the run.
+		await assertNoLeaks("plan run", baselinePids);
 		console.log(`\n  [plan] ok: ${gen.nodes.length} generated nodes ran to completion under one runId`);
 		if (!CHAT) {
 			console.log("\nE2E OK (plan)");
@@ -265,13 +317,17 @@ async function finish(fin) {
 
 	if (ABORT) {
 		if (fin.status !== "aborted") fail(`expected status "aborted", got "${fin.status}"`);
-		const skipped = byType("node_skipped");
-		if (!skipped.some((e) => e.nodeId === "never")) fail("downstream node was not skipped on abort");
-		// Orphan check: give taskkill a moment, then no pi node process may remain.
-		await new Promise((r) => setTimeout(r, 3000));
-		const leaked = countPiProcesses();
-		if (leaked > 0) fail(`${leaked} orphaned pi process(es) after abort`);
-		console.log("\nE2E OK (abort): status=aborted, downstream skipped, no orphaned processes");
+		// Downstream invariant (relaxed per eval F9): "never" must not COMPLETE
+		// — whether it was skipped before starting or aborted in flight depends
+		// on when the abort propagated, and both are correct outcomes.
+		if (byType("node_completed").some((e) => e.nodeId === "never")) {
+			fail("downstream node completed despite the abort");
+		}
+		const never = ["node_skipped", "node_failed", "node_started"]
+			.map((t) => `${t}=${byType(t).filter((e) => e.nodeId === "never").length}`)
+			.join(" ");
+		await assertNoLeaks("abort", baselinePids);
+		console.log(`\nE2E OK (abort): status=aborted, downstream never completed (${never}), no orphaned processes`);
 		process.exit(0);
 	}
 

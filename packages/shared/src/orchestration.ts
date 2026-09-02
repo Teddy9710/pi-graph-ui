@@ -53,6 +53,40 @@ const EDGE_TYPE_SET = new Set<string>(EDGE_TYPES);
  * of the same type differ (e.g. two 输入 edges with different materials).
  */
 export const MAX_EDGE_NOTE_CHARS = 20;
+// ============================================================================
+// Node capability profile (节点档案, mirrors pi-graph-tool's per-node knobs)
+// ============================================================================
+/**
+ * Tool names travel as ONE comma-joined argv entry (`--tools a,b,c`) through
+ * the cmd.exe shim — same metacharacter reasoning as MODEL_RE. The RE also
+ * excludes the comma itself (it is the list separator).
+ */
+export const TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const MAX_NODE_TOOLS = 32;
+/** Quality gate bounds (chars of the trimmed final output). 0 = gate off. */
+export const MAX_MIN_OUTPUT_CHARS = 1_000_000;
+/** Per-node wall clock bounds (ms): 1s … 24h. */
+export const MAX_NODE_TIMEOUT_MS = 86_400_000;
+/** Per-node injection cap bounds (bytes). */
+export const MAX_OUTPUT_CAP_BYTES = 1_000_000;
+/**
+ * workdir is a RELATIVE path under the server cwd (spawn cwd — the only
+ * isolation mechanism pi rpc offers). Pure-string shape check usable from
+ * the web bundle too (no node:path): no drive/UNC/absolute forms, no
+ * backslashes, no `..`/empty segments. The executor re-checks containment
+ * with a real resolve() as defense in depth.
+ */
+export function isSafeWorkdir(workdir: string): boolean {
+	if (workdir.length === 0 || workdir.length > 200) return false;
+	if (LABEL_UNSAFE_RE.test(workdir)) return false;
+	if (workdir.includes("\\")) return false;
+	if (workdir.includes(":")) return false; // drive letters / UNC
+	if (workdir.startsWith("/")) return false;
+	for (const segment of workdir.split("/")) {
+		if (segment === "" || segment === "..") return false;
+	}
+	return true;
+}
 /**
  * Notes AND node labels ride INSIDE prompt section headers (`### from n1 —— 输入（备注）`);
  * a newline would let a label forge another `### from …` header that neither
@@ -66,12 +100,50 @@ export interface NodeDef {
 	label?: string;
 	/** Task prompt. Upstream outputs are appended automatically at run time. */
 	task: string;
+	/**
+	 * Gate node (门控, HITL): never dispatched to an executor — the run parks
+	 * on it until a human approves/rejects. The task stays REQUIRED because
+	 * it doubles as the 审校要点 the reviewer reads while deciding. The note
+	 * the human types becomes the node's output (injected downstream like any
+	 * upstream output).
+	 */
+	gate?: boolean;
 	/** "provider/model"; falls back to the server default model. */
 	model?: string;
 	/** Persona name → ~/.pi/agent/agents/<name>.md (body via --append-system-prompt). */
 	agent?: string;
 	/** Editor-only canvas position; the server ignores it. */
 	position?: { x: number; y: number };
+	// --- capability profile (节点档案): all optional, absent = server default.
+	/**
+	 * Quality gate: a trimmed final output shorter than this is a violation
+	 * (salvage retry fires once with the original prompt; two empty answers
+	 * fail the node). 0 disables the gate. Server default:
+	 * ORCH_MIN_OUTPUT_CHARS (0 = off, matching pi-graph-tool's semantics).
+	 */
+	minOutputChars?: number;
+	/** Per-node wall clock budget (ms); overrides ORCH_NODE_TIMEOUT_MS. */
+	timeoutMs?: number;
+	/**
+	 * Per-node injection budget (bytes): caps THIS node's output wherever it
+	 * is injected — downstream assembled prompts and the chat synthesis
+	 * prompt — overriding the global 50KB / formula caps. The archived
+	 * output itself stays uncapped.
+	 */
+	outputCapBytes?: number;
+	/**
+	 * Relative working directory for this node's pi subprocess (created under
+	 * the server cwd if missing). Isolates parallel nodes that would
+	 * otherwise write over each other in one shared cwd.
+	 */
+	workdir?: string;
+	/**
+	 * pi tool ALLOWLIST (`--tools a,b`); absent = default tool set. Both may
+	 * be present: excludeTools filters whatever tools left enabled.
+	 */
+	tools?: string[];
+	/** pi tool DENYLIST (`--exclude-tools a,b`), applied after `tools`. */
+	excludeTools?: string[];
 }
 
 export interface EdgeDef {
@@ -153,10 +225,59 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		if (n.agent !== undefined && (typeof n.agent !== "string" || !AGENT_RE.test(n.agent))) {
 			issues.push({ nodeOrEdge: n.id, message: "agent 名非法（仅限字母/数字/_/-，1-64 字符）" });
 		}
+		// Gate nodes park the run for a human decision — there is no execution
+		// to configure, so any profile knob is a config mistake the editor must
+		// surface (the task is still required above: it is the 审校要点).
+		if (n.gate !== undefined && typeof n.gate !== "boolean") {
+			issues.push({ nodeOrEdge: n.id, message: "gate 非法（必须是布尔值）" });
+		}
+		if (
+			n.gate === true &&
+			[n.model, n.agent, n.tools, n.excludeTools, n.workdir, n.minOutputChars, n.timeoutMs, n.outputCapBytes].some((v) => v !== undefined)
+		) {
+			issues.push({ nodeOrEdge: n.id, message: "门控节点不能带执行配置（model/agent/tools/workdir/能力档案）" });
+		}
 		// Node labels ride in buildSynthPrompt section headers (### nodeId —— 标签)
 		// on chat runs — same header-forgery rule as edge notes.
 		if (typeof n.label === "string" && LABEL_UNSAFE_RE.test(n.label)) {
 			issues.push({ nodeOrEdge: n.id, message: "节点 label 不能包含换行或控制字符" });
+		}
+		// Capability profile knobs (all optional). Numbers must be integers in
+		// range; tool names and workdir shapes are validated here so the
+		// executor can trust them past the WS trust boundary.
+		if (
+			n.minOutputChars !== undefined &&
+			(!Number.isInteger(n.minOutputChars) || n.minOutputChars < 0 || n.minOutputChars > MAX_MIN_OUTPUT_CHARS)
+		) {
+			issues.push({ nodeOrEdge: n.id, message: `minOutputChars 非法（需为 0–${MAX_MIN_OUTPUT_CHARS} 的整数）` });
+		}
+		if (
+			n.timeoutMs !== undefined &&
+			(!Number.isInteger(n.timeoutMs) || n.timeoutMs < 1_000 || n.timeoutMs > MAX_NODE_TIMEOUT_MS)
+		) {
+			issues.push({ nodeOrEdge: n.id, message: `timeoutMs 非法（需为 1000–${MAX_NODE_TIMEOUT_MS} 的整数，毫秒）` });
+		}
+		if (
+			n.outputCapBytes !== undefined &&
+			(!Number.isInteger(n.outputCapBytes) || n.outputCapBytes < 1 || n.outputCapBytes > MAX_OUTPUT_CAP_BYTES)
+		) {
+			issues.push({ nodeOrEdge: n.id, message: `outputCapBytes 非法（需为 1–${MAX_OUTPUT_CAP_BYTES} 的整数，字节）` });
+		}
+		if (n.workdir !== undefined && (typeof n.workdir !== "string" || !isSafeWorkdir(n.workdir))) {
+			issues.push({ nodeOrEdge: n.id, message: "workdir 非法（仅限服务目录内的相对路径，不可含 .. / 绝对路径 / 反斜杠）" });
+		}
+		for (const field of ["tools", "excludeTools"] as const) {
+			const list = n[field];
+			if (list === undefined) continue;
+			if (!Array.isArray(list) || list.length > MAX_NODE_TOOLS) {
+				issues.push({ nodeOrEdge: n.id, message: `${field} 非法（字符串数组，≤${MAX_NODE_TOOLS} 项）` });
+				continue;
+			}
+			for (const name of list) {
+				if (typeof name !== "string" || !TOOL_NAME_RE.test(name)) {
+					issues.push({ nodeOrEdge: n.id, message: `${field} 中的工具名「${String(name)}」非法（仅限字母/数字/_/-）` });
+				}
+			}
 		}
 	}
 	const edgeSeen = new Set<string>();
@@ -247,20 +368,24 @@ export interface UpstreamInput {
 	type?: EdgeType;
 	/** The edge's optional short note. */
 	label?: string;
+	/** The UPSTREAM node's outputCapBytes, when it set one (byte budget for
+	 *  this section; absent = the global MAX_INJECTED_OUTPUT_BYTES). */
+	capBytes?: number;
 }
 
 /**
  * Assemble a node's full prompt: its task, then every upstream output under a
  * deterministic header (graph node order), each capped at
- * MAX_INJECTED_OUTPUT_BYTES. The section header carries the edge's TYPE badge
- * (with the optional note in full-width parens) so the executor knows HOW the
- * input is meant to be used, not just from whom it arrives:
+ * MAX_INJECTED_OUTPUT_BYTES (or the upstream node's own outputCapBytes).
+ * The section header carries the edge's TYPE badge (with the optional note in
+ * full-width parens) so the executor knows HOW the input is meant to be used,
+ * not just from whom it arrives:
  * `### from n1 —— 输入` / `### from n1 —— 汇总（提供调研数据）`.
  */
 export function assemblePrompt(node: NodeDef, upstream: UpstreamInput[]): string {
 	if (upstream.length === 0) return node.task;
-	const sections = upstream.map(({ nodeId, text, type, label }) => {
-		const { text: capped, capped: wasCapped } = truncateBytes(text, MAX_INJECTED_OUTPUT_BYTES);
+	const sections = upstream.map(({ nodeId, text, type, label, capBytes }) => {
+		const { text: capped, capped: wasCapped } = truncateBytes(text, capBytes ?? MAX_INJECTED_OUTPUT_BYTES);
 		const badge = EDGE_TYPE_LABELS[type ?? "input"];
 		const note = label ? `（${label}）` : "";
 		return `### from ${nodeId} —— ${badge}${note}\n${capped}${wasCapped ? "\n\n（输出过长，已截断）" : ""}`;
@@ -289,6 +414,8 @@ export interface OrchResultNode {
 	nodeId: string;
 	label?: string;
 	text: string;
+	/** The node's outputCapBytes override for its section budget. */
+	capBytes?: number;
 }
 
 /** Round-tripped metadata carried on line 2 of the injection prompt. */
@@ -321,8 +448,9 @@ export function buildSynthPrompt(goal: string, runId: string, nodes: readonly Or
 			? Math.max(ORCH_SYNTH_NODE_MIN_BYTES, Math.min(MAX_INJECTED_OUTPUT_BYTES, Math.floor(ORCH_SYNTH_TOTAL_MAX_BYTES / nodes.length)))
 			: MAX_INJECTED_OUTPUT_BYTES;
 	const meta: OrchSynthMeta = { runId, goal, nodeCount: nodes.length };
-	const sections = nodes.map(({ nodeId, label, text }) => {
-		const { text: capped, capped: wasCapped } = truncateBytes(text, perNode);
+	const sections = nodes.map(({ nodeId, label, text, capBytes }) => {
+		// A node's own outputCapBytes overrides the shared perNode budget.
+		const { text: capped, capped: wasCapped } = truncateBytes(text, capBytes ?? perNode);
 		// Backstop: labels ride in this header — a newline could forge another
 		// section (validateGraph + extractGraph reject those upstream; this
 		// guarantees it where the headers are actually built).
@@ -382,7 +510,7 @@ export function finalOutput(state: SessionState): string {
 // ============================================================================
 
 export type RunStatus = "running" | "completed" | "failed" | "aborted";
-export type NodeRunStatus = "pending" | "running" | "ok" | "error" | "skipped";
+export type NodeRunStatus = "pending" | "running" | "awaiting" | "ok" | "error" | "skipped";
 
 /** Usage summary per node / per run (flattened from fold.ts Usage). */
 export interface NodeUsage {
@@ -425,9 +553,22 @@ export type RunEvent =
 			nodeId: string;
 			endedAt: number;
 			durationMs: number;
-			output: { text: string; stopReason: string; model?: string; usage: NodeUsage };
+			output: {
+				text: string;
+				stopReason: string;
+				model?: string;
+				usage: NodeUsage;
+				/** >1 when the quality gate salvaged the node (re-ran it once). */
+				attempts?: number;
+			};
 	  }
 	| { type: "node_failed"; runId: string; nodeId: string; endedAt: number; durationMs: number; error: string }
+	// Gate lifecycle (HITL): awaiting REPLACES node_started for a gate node and
+	// carries the assembled prompt so the reviewer sees exactly what waits on
+	// them; decided REPLACES node_completed/node_failed — the human note is the
+	// node's output when approved, the rejection message when not.
+	| { type: "node_awaiting"; runId: string; nodeId: string; startedAt: number; assembledPrompt: string }
+	| { type: "node_decided"; runId: string; nodeId: string; endedAt: number; durationMs: number; approved: boolean; note: string }
 	| { type: "node_skipped"; runId: string; nodeId: string; reason: string }
 	| {
 			type: "run_finished";
@@ -458,6 +599,8 @@ export interface RunNodeState {
 	skipReason: string | null;
 	/** Capped streamed preview (tail-preserving, PREVIEW_CAP). */
 	preview: string;
+	/** Executor attempt count (>1 = quality gate salvaged this node). */
+	attempts: number | null;
 }
 
 export interface RunState {
@@ -522,6 +665,7 @@ function initNode(id: string): RunNodeState {
 		error: null,
 		skipReason: null,
 		preview: "",
+		attempts: null,
 	};
 }
 
@@ -605,25 +749,59 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 		case "node_completed": {
 			const node = state.nodes[event.nodeId];
 			if (!node) return state;
+			// LIVE tallies: a gate can park the run for minutes — the summary
+			// chips must not read ok 0 / 0 tok while the canvas shows greens.
+			// run_finished still overwrites with the server's authoritative
+			// counts, so any fold/server drift self-corrects at the end.
+			state.ok += 1;
+			state.usage = addNodeUsage(state.usage, event.output.usage);
 			node.status = "ok";
 			node.endedAt = event.endedAt;
 			node.output = event.output.text;
 			node.stopReason = event.output.stopReason;
 			node.model = event.output.model ?? null;
 			node.usage = event.output.usage;
+			node.attempts = event.output.attempts ?? null;
 			return state;
 		}
 		case "node_failed": {
 			const node = state.nodes[event.nodeId];
 			if (!node) return state;
+			state.failed += 1;
 			node.status = "error";
 			node.endedAt = event.endedAt;
 			node.error = event.error;
 			return state;
 		}
+		case "node_awaiting": {
+			// Same mirroring as node_started — the assembled prompt IS the review
+			// surface (the panel previews it while the buttons wait on a human).
+			const node = state.nodes[event.nodeId];
+			if (!node) return state;
+			node.status = "awaiting";
+			node.startedAt = event.startedAt;
+			node.assembledPrompt = event.assembledPrompt;
+			return state;
+		}
+		case "node_decided": {
+			const node = state.nodes[event.nodeId];
+			if (!node) return state;
+			node.endedAt = event.endedAt;
+			if (event.approved) {
+				state.ok += 1;
+				node.status = "ok";
+				node.output = event.note.trim() || "（已批准）";
+			} else {
+				state.failed += 1;
+				node.status = "error";
+				node.error = `人工驳回：${event.note.trim() || "无备注"}`;
+			}
+			return state;
+		}
 		case "node_skipped": {
 			const node = state.nodes[event.nodeId];
 			if (!node) return state;
+			state.skipped += 1;
 			node.status = "skipped";
 			node.skipReason = event.reason;
 			return state;

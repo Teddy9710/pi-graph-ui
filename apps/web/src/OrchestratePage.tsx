@@ -155,8 +155,18 @@ function OrchRunBar() {
 			<button className="pg-btn pg-btn-ghost pg-btn-sm" disabled={editLocked} onClick={autoArrange}>
 				自动整理
 			</button>
-			<button className="pg-btn pg-btn-ghost pg-btn-sm" disabled={editLocked} onClick={addNode}>
+			{/* onClick must drop the click event — addNode's first param is the
+			    gate flag, and a truthy MouseEvent would spawn gates forever */}
+			<button className="pg-btn pg-btn-ghost pg-btn-sm" disabled={editLocked} onClick={() => addNode()}>
 				＋节点
+			</button>
+			<button
+				className="pg-btn pg-btn-ghost pg-btn-sm"
+				disabled={editLocked}
+				title="放置人工门控节点：不执行，运行到此挂起，等批准/驳回后下游才继续"
+				onClick={() => addNode(true)}
+			>
+				＋门控
 			</button>
 			<button
 				className="pg-btn pg-btn-ghost pg-btn-sm"
@@ -192,7 +202,7 @@ function OrchRunBar() {
 					style={{ cursor: "pointer" }}
 					onClick={() => select(null)}
 				>
-					⚠ {issues.length} 个问题
+					{issues.length} 个问题
 				</span>
 			)}
 			{connectIssue && <span className="pg-error-text" title={connectIssue}>{connectIssue}</span>}

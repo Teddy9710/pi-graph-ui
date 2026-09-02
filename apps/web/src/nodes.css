@@ -1,5 +1,9 @@
-/* Graph node cards (both canvases). Widths/heights are layout contracts with
- * dagre (orch-layout.ts sizes nodes at 220px) — skin only, never metrics. */
+/* Graph node cards (both canvases) — STATION PLATES on the chart sheet.
+ * Widths/heights are layout contracts with dagre (orch-layout.ts sizes nodes
+ * at 220px) — skin only, never metrics. Printed: flat fill, 1px engraved
+ * line, the one printed shadow. The shadow stack is restated in
+ * .pg-status-ok/.pg-status-error AND both pg-pulse frames (shadows don't
+ * cascade — change .pg-node's, mirror all four). */
 
 .pg-node {
 	min-width: 140px;
@@ -7,37 +11,24 @@
 	padding: 9px 12px;
 	border-radius: var(--pg-radius);
 	border: 1px solid var(--pg-border);
-	/* brighter top sheen gathering at 62% + an inset lit edge: the card reads
-	 * as glass under a lamp; the third wide shadow displaces the air around
-	 * it (paint only — dagre's size contract is untouched) */
-	background: linear-gradient(180deg, #2a3140, var(--pg-node-bg) 62%);
+	background: var(--pg-node-bg);
 	color: var(--pg-fg);
 	font-size: 12px;
-	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0.05),
-		0 1px 3px rgb(0 0 0 / 0.4),
-		0 6px 16px rgb(0 0 0 / 0.25),
-		0 18px 44px rgb(0 0 0 / 0.14);
+	box-shadow: 0 1px 0 rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.28);
 	transition: border-color var(--pg-t), box-shadow var(--pg-t), transform var(--pg-t);
 	cursor: pointer;
 }
 
-/* Selection lives on the RF wrapper (.selected) — the card itself only knows
- * status. A soft blue ring + lift makes the clicked node unmistakable. */
+/* Selection is the surveyor's BENCHMARK RING: a 1px correction-ink ring with
+ * a 4px halo — the same mark the chart stamps at triangulation stations
+ * (and the same geometry the logo's benchmark uses). Never a fill. */
 .react-flow__node.selected .pg-node {
-	border-color: rgb(77 155 255 / 0.9);
-	/* the card is lit from within: a blue wash layered over the card's own
-	 * sheen (restating the NEW base gradient — the old one would dull it) */
-	background:
-		linear-gradient(180deg, rgb(77 155 255 / 0.12), rgb(77 155 255 / 0.03)),
-		linear-gradient(180deg, #2a3140, var(--pg-node-bg) 62%);
-	/* spotlight: a 1px ring to bound it, the kept inset for material, a
-	 * deeper drop, and a wide blue bloom — spotlit, not stickered */
+	border-color: rgb(232 84 212 / 0.85);
+	background: linear-gradient(180deg, rgb(232 84 212 / 0.05), transparent 60%), var(--pg-node-bg);
 	box-shadow:
-		0 0 0 1px rgb(77 155 255 / 0.75),
-		inset 0 1px 0 rgb(255 255 255 / 0.08),
-		0 8px 22px rgb(0 0 0 / 0.55),
-		0 0 40px rgb(77 155 255 / 0.4);
+		0 0 0 1px var(--pg-ink),
+		0 0 0 4px rgb(232 84 212 / 0.18),
+		0 8px 24px rgb(0 0 0 / 0.32);
 }
 
 .pg-node-head {
@@ -68,7 +59,29 @@
 	text-align: center;
 }
 
-/* (moved below the status block — see the note there) */
+/* gate badge: the kind slot as a printed 方标 — mono 「门」 in chart ink on the
+ * ink well. Kind is MATERIAL, never dye: awaiting's amber (below) speaks the
+ * STATE, the badge only says what this station IS. */
+.pg-orch-gate-mark {
+	font-family: var(--pg-mono);
+	font-size: 9.5px;
+	padding: 2px 0;
+	color: var(--pg-fg-dim);
+	border: 1px solid rgb(146 167 161 / 0.35);
+	border-radius: 3px;
+	background: var(--pg-bg-well);
+}
+
+/* failed stations carry the ✗ glyph IN the head row — hue is never the sole
+ * carrier of state (color-blind eyes read the mark, not the red) */
+.pg-node.pg-status-error .pg-node-head::after {
+	content: "✗";
+	color: var(--pg-red);
+	font-size: 9.5px;
+	font-weight: 600;
+	margin-left: 4px;
+	line-height: 1;
+}
 
 .pg-node .pg-label {
 	margin-top: 2px;
@@ -82,6 +95,7 @@
 
 .pg-node .pg-sub {
 	margin-top: 2px;
+	font-family: var(--pg-mono);
 	font-size: 10.5px;
 	opacity: var(--pg-ink-3);
 	font-variant-numeric: tabular-nums;
@@ -93,67 +107,69 @@
 	font-size: 11.5px;
 }
 
-/* (.pg-dim lives in app.css only — a second definition here was dead code,
- * app.css is injected later and won on specificity ties) */
-
-/* status accents: a light border + a same-hue bloom under the card (the dot
- * already glows) — status reads as light, not painted plastic edging. These
- * box-shadow lists restate the base stack: shadows don't cascade, so any
- * future change to .pg-node's shadow must be mirrored here and in pg-pulse. */
+/* status accents: engraved borders in the legend's hues with alpha floors
+ * (they must read at zoom-out), plus a quiet same-hue wash under the card.
+ * Shadow stacks RESTATE the base — see the file header's mirror warning. */
 .pg-node.pg-status-running {
-	border-color: rgb(77 155 255 / 0.65);
+	border-color: rgb(77 163 255 / 0.65);
 	animation: pg-pulse 1.8s ease-in-out infinite;
 }
 .pg-node.pg-status-ok {
-	border-color: rgb(44 232 160 / 0.38);
+	border-color: rgb(63 221 143 / 0.5);
 	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0.05),
-		0 1px 3px rgb(0 0 0 / 0.4),
-		0 6px 16px rgb(0 0 0 / 0.25),
-		0 18px 44px rgb(0 0 0 / 0.14),
-		0 0 14px rgb(44 232 160 / 0.12);
+		0 1px 0 rgb(0 0 0 / 0.4),
+		0 8px 24px rgb(0 0 0 / 0.28),
+		0 0 14px rgb(63 221 143 / 0.12);
 }
 .pg-node.pg-status-error {
-	border-color: rgb(255 107 107 / 0.5);
+	border-color: rgb(255 95 95 / 0.6);
 	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0.05),
-		0 1px 3px rgb(0 0 0 / 0.4),
-		0 6px 16px rgb(0 0 0 / 0.25),
-		0 18px 44px rgb(0 0 0 / 0.14),
-		0 0 14px rgb(255 107 107 / 0.15);
+		0 1px 0 rgb(0 0 0 / 0.4),
+		0 8px 24px rgb(0 0 0 / 0.28),
+		0 0 14px rgb(255 95 95 / 0.15);
 }
+/* pending = UNSURVEYED: the shared dash idiom prints on the border too */
 .pg-node.pg-status-pending {
 	border-color: var(--pg-border);
+	border-style: dashed;
 }
 
-/* kind accents — (0,2,0) and placed AFTER the status rules: at their old
- * (0,1,0) the status border-color shorthand (which sets all four longhand
- * colors) always won, and these bars never actually showed. Hover (0,4,1)
- * still beats them, as intended. */
+/* gate AWAITING: the run is parked on a human — amber (the legend's warn hue)
+ * border + square dot, breathing on the EDGE alone, printed ink dimming in and
+ * out. Deliberately slower than running's pulse: nothing executes while a
+ * reviewer is being waited FOR, and there is no shadow ring — flat ink, no glow. */
+.pg-node.pg-status-awaiting {
+	border-color: rgb(255 176 58 / 0.55);
+	animation: pg-await-breathe 3s ease-in-out infinite;
+}
+
+/* kind accents — GRAFTED from the loom critique: structure is MATERIAL,
+ * never dye. tool vs agent identity rides the icon; both splices speak chart
+ * ink so the legend's four hues stay pure. (0,2,0) and placed AFTER the
+ * status rules: at (0,1,0) the status border-color shorthand (which sets
+ * all four longhand colors) always won. Hover (0,4,1) still beats them. */
 .pg-node.pg-node-tool {
-	border-left: 2px solid rgb(77 155 255 / 0.55);
+	border-left: 2px solid rgb(146 167 161 / 0.5);
 }
 .pg-node.pg-node-agent {
-	border-left: 2px solid rgb(44 232 160 / 0.6);
+	border-left: 2px solid rgb(146 167 161 / 0.5);
 }
 
 /* Hover AFTER the status rules and heavier — every node always carries a
  * pg-status-* class, so a plain .pg-node:hover earlier in the file would
- * never win the border. :not(.selected) keeps the blue halo supreme when the
- * cursor crosses an already-selected node; :not(.dragging) hands over to the
- * grabbed look below. The 1px lift is on the CARD, not the RF wrapper —
- * RF's positioning transform on the wrapper stays untouched. */
+ * never win the border. :not(.selected) keeps the benchmark ring supreme
+ * when the cursor crosses an already-selected node; :not(.dragging) hands
+ * over to the grabbed look below. The 1px lift is on the CARD, not the RF
+ * wrapper — RF's positioning transform on the wrapper stays untouched. */
 .react-flow__node:not(.selected):not(.dragging) .pg-node:hover {
 	border-color: var(--pg-border-strong);
 	transform: translateY(-1px);
 	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0.06),
-		0 2px 5px rgb(0 0 0 / 0.45),
-		0 10px 24px rgb(0 0 0 / 0.32),
-		0 20px 48px rgb(0 0 0 / 0.18);
+		0 1px 0 rgb(0 0 0 / 0.4),
+		0 10px 28px rgb(0 0 0 / 0.34);
 }
 
-/* picked up, not pushed: a dragged card rides higher with the pop shadow
+/* picked up, not pushed: a dragged plate rides higher with the pop shadow
  * (RF flags the wrapper with .dragging; editor canvas only — the read-only
  * canvases never drag) */
 .react-flow__node.dragging .pg-node {
@@ -166,9 +182,9 @@
  * put a dot FIRST in their flex row — auto would shove the whole title group
  * off the left edge. Right-alignment belongs to the node head only. */
 .pg-dot {
-	width: 8px;
-	height: 8px;
-	border-radius: 50%;
+	width: 7px;
+	height: 7px;
+	border-radius: 2px;
 	flex-shrink: 0;
 }
 .pg-node-head .pg-dot {
@@ -176,87 +192,101 @@
 }
 .pg-dot-running {
 	background: var(--pg-blue);
-	box-shadow: 0 0 7px rgb(77 155 255 / 0.8);
 }
 .pg-dot-ok {
 	background: var(--pg-green);
-	box-shadow: 0 0 6px rgb(44 232 160 / 0.55);
 }
 .pg-dot-error {
 	background: var(--pg-red);
-	box-shadow: 0 0 6px rgb(255 107 107 / 0.55);
 }
+/* pending = hollow: an unsurveyed mark — chart-ink outline, nothing inside */
 .pg-dot-pending {
-	background: #3a4150;
+	background: transparent;
+	border: 1px solid rgb(146 167 161 / 0.55);
+}
+/* awaiting gate: the hollow fills with amber — a reviewer's eyes are now
+ * required. Breathes on the lock banner's cadence (pg-lock-breathe lives in
+ * app.css; keyframes are document-global, like pg-fade-in). */
+.pg-dot-awaiting {
+	background: var(--pg-amber);
+	animation: pg-lock-breathe 1.6s ease-in-out infinite;
 }
 
 .pg-spinner {
 	width: 10px;
 	height: 10px;
-	border: 2px solid rgb(255 255 255 / 0.12);
+	border: 2px solid rgb(146 167 161 / 0.18);
 	border-top-color: var(--pg-blue);
-	border-radius: 50%;
+	border-radius: 2px;
 	animation: pg-spin 0.8s linear infinite;
 }
 
 /* Connection handles: slightly larger targets, ring on hover (editor). */
-/* a countersunk port: the dark ring lifts the dot off the card's edge so it
+/* a countersunk socket: the dark ring lifts the dot off the card's edge so it
    reads as a socket, not a speck */
 .pg-handle {
 	width: 7px !important;
 	height: 7px !important;
-	background: #5b6478;
+	background: #3d5450;
 	border: none !important;
-	box-shadow: 0 0 0 2.5px rgb(11 13 17 / 0.85);
+	box-shadow: 0 0 0 2.5px rgb(6 13 15 / 0.85);
 	transition: background var(--pg-t), box-shadow var(--pg-t);
 }
 /* NO transform on hover: RF positions handles with translate(-50%,-50%) at
  * (0,1,0) specificity — any transform here REPLACES it and the dot jumps off
  * its anchor the moment a connection drag starts. The expanding ring already
- * reads as growth. */
+ * reads as growth. The surveyor draws the line: hover/origin speak ink. */
 .pg-handle:hover {
-	background: var(--pg-blue);
+	background: var(--pg-ink);
 	box-shadow:
-		0 0 0 2.5px rgb(11 13 17 / 0.85),
-		0 0 0 6px rgb(77 155 255 / 0.22);
+		0 0 0 2.5px rgb(6 13 15 / 0.85),
+		0 0 0 6px rgb(232 84 212 / 0.25);
 }
-/* while a connection is in flight (RF's own classes): the origin stays brand
-   blue, the endpoint under the cursor goes solid green with a halo */
 .pg-handle.connectingfrom {
-	background: var(--pg-blue);
+	background: var(--pg-ink);
 }
 .pg-handle.connectingto,
 .pg-handle.valid {
 	background: var(--pg-green);
 	box-shadow:
-		0 0 0 2.5px rgb(11 13 17 / 0.85),
-		0 0 0 5px rgb(44 232 160 / 0.3);
+		0 0 0 2.5px rgb(6 13 15 / 0.85),
+		0 0 0 5px rgb(63 221 143 / 0.3);
 }
 
 /* the pulse replaces box-shadow wholesale, so every frame carries the card's
-   full resting stack — the node keeps its feet while breathing, slower and
-   softer than before */
+   full resting stack — the node keeps its feet while breathing. The ring is
+   legend blue: running is the one thing blue means. */
 @keyframes pg-pulse {
 	0%,
 	100% {
 		box-shadow:
-			inset 0 1px 0 rgb(255 255 255 / 0.05),
-			0 1px 3px rgb(0 0 0 / 0.4),
-			0 6px 16px rgb(0 0 0 / 0.25),
-			0 0 0 0 rgb(77 155 255 / 0.3);
+			0 1px 0 rgb(0 0 0 / 0.4),
+			0 8px 24px rgb(0 0 0 / 0.28),
+			0 0 0 0 rgb(77 163 255 / 0.35);
 	}
 	50% {
 		box-shadow:
-			inset 0 1px 0 rgb(255 255 255 / 0.05),
-			0 1px 3px rgb(0 0 0 / 0.4),
-			0 6px 16px rgb(0 0 0 / 0.25),
-			0 0 0 5px rgb(77 155 255 / 0);
+			0 1px 0 rgb(0 0 0 / 0.4),
+			0 8px 24px rgb(0 0 0 / 0.28),
+			0 0 0 5px rgb(77 163 255 / 0);
 	}
 }
 
 @keyframes pg-spin {
 	to {
 		transform: rotate(360deg);
+	}
+}
+
+/* the awaiting gate breathes through its border only — a lit halo would read
+   as work happening, and the whole point of the state is that nothing is */
+@keyframes pg-await-breathe {
+	0%,
+	100% {
+		border-color: rgb(255 176 58 / 0.55);
+	}
+	50% {
+		border-color: rgb(255 176 58 / 0.25);
 	}
 }
 

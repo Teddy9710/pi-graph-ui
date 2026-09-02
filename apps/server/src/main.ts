@@ -10,7 +10,7 @@
  *   {type: "event", event: JsonAgentSessionEvent}        - live events (throttled)
  *   {type: "response", response: RpcResponse}            - correlated RPC replies
  *   {type: "run_event", event: RunEvent}                 - orchestration stream
- *   {type: "run_error", message, issues}                 - run_graph rejected (requester only)
+ *   {type: "run_error", message, issues}                 - run_graph/approve_node rejected (requester only)
  *   {type: "pi-exit", code, stderr}                      - subprocess died
  *
  * WS protocol (client -> server):
@@ -21,6 +21,10 @@
  *          chat: true = on completion the node outputs are compiled into one
  *          prompt and injected into the MAIN session agent, whose streamed
  *          reply lands in the chat panel
+ *   {type: "approve_node", runId, nodeId, approved, note?} - decide an awaiting
+ *          gate node (approve/reject with an optional note); invalid payloads,
+ *          unknown/expired runIds and non-awaiting nodes answer the requester
+ *          with run_error only
  *   {type: "abort_run"}                                  - abort the active run/planning
  *
  * HTTP:
@@ -42,7 +46,7 @@ import { EventHub } from "./event-hub.ts";
 import { PiBridge } from "./pi-bridge.ts";
 import { PiNodeExecutor } from "./pi-node-executor.ts";
 import { PiPlanner } from "./planner.ts";
-import { RunManager } from "./run-manager.ts";
+import { isValidGateNote, MAX_GATE_NOTE_CHARS, RunManager } from "./run-manager.ts";
 import { RunStore } from "./run-store.ts";
 import { SessionStore } from "./session-store.ts";
 import { Leaderboard } from "./snake/leaderboard.ts";
@@ -57,6 +61,16 @@ const PI_ARGS = process.env.PI_ARGS?.split(/\s+/).filter(Boolean) ?? [];
 const ORCH_MAX_PARALLEL = Math.max(1, Number(process.env.ORCH_MAX_PARALLEL ?? 4) || 4);
 const ORCH_MODEL = process.env.ORCH_MODEL ?? "deepseek/deepseek-chat";
 const ORCH_NODE_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_NODE_TIMEOUT_MS ?? 600_000) || 600_000);
+/**
+ * Quality gate + salvage retry (pi-graph-tool 互鉴): nodes whose trimmed
+ * output falls short of ORCH_MIN_OUTPUT_CHARS are violations; by default the
+ * executor re-runs them once with the original prompt and keeps the longer
+ * answer (ORCH_NODE_RETRY=0 disables that — an empty output then fails the
+ * node). Per-node overrides: node.minOutputChars. Default 0 = gate off, so
+ * out-of-the-box behavior is unchanged.
+ */
+const ORCH_MIN_OUTPUT_CHARS = Math.max(0, Math.floor(Number(process.env.ORCH_MIN_OUTPUT_CHARS ?? 0)) || 0);
+const ORCH_NODE_RETRY = process.env.ORCH_NODE_RETRY !== "0";
 const ORCH_AGENTS_DIR = join(homedir(), ".pi", "agent", "agents");
 /** Auto-orchestration planner (goal → graph); defaults to the node model. */
 const ORCH_PLANNER_MODEL = process.env.ORCH_PLANNER_MODEL ?? ORCH_MODEL;
@@ -77,6 +91,8 @@ const runManager = new RunManager({
 		defaultModel: ORCH_MODEL,
 		agentsDir: ORCH_AGENTS_DIR,
 		timeoutMs: ORCH_NODE_TIMEOUT_MS,
+		minOutputChars: ORCH_MIN_OUTPUT_CHARS,
+		salvageRetry: ORCH_NODE_RETRY,
 	}),
 	planner: new PiPlanner({ bin: PI_BIN, cwd: PI_CWD, model: ORCH_PLANNER_MODEL, timeoutMs: ORCH_PLAN_TIMEOUT_MS }),
 	maxParallel: ORCH_MAX_PARALLEL,
@@ -258,7 +274,17 @@ wss.on("connection", (ws) => {
 	});
 
 	ws.on("message", (data) => {
-		let msg: { type: string; command?: unknown; graph?: unknown; goal?: unknown; chat?: unknown };
+		let msg: {
+			type: string;
+			command?: unknown;
+			graph?: unknown;
+			goal?: unknown;
+			chat?: unknown;
+			runId?: unknown;
+			nodeId?: unknown;
+			approved?: unknown;
+			note?: unknown;
+		};
 		try {
 			msg = JSON.parse(String(data));
 		} catch {
@@ -314,6 +340,35 @@ wss.on("connection", (ws) => {
 				}
 			} catch (err) {
 				ws.send(JSON.stringify({ type: "run_error", message: `goal 无法解析: ${(err as Error).message}` }));
+			}
+			return;
+		}
+		if (msg.type === "approve_node") {
+			// Same defensive shape as plan_run: strict field validation first,
+			// then the decision. A malformed payload, an unknown/expired runId
+			// or a non-awaiting node answers the REQUESTER only — the broadcast
+			// stream stays untouched.
+			try {
+				const note = msg.note === undefined ? "" : msg.note;
+				if (
+					typeof msg.approved !== "boolean" ||
+					typeof msg.runId !== "string" ||
+					typeof msg.nodeId !== "string" ||
+					!isValidGateNote(note)
+				) {
+					ws.send(
+						JSON.stringify({
+							type: "run_error",
+							message: `approve_node 参数非法（approved 需为布尔值，备注需为不含换行/控制字符、不超过 ${MAX_GATE_NOTE_CHARS} 字符的字符串）`,
+						}),
+					);
+					return;
+				}
+				if (!runManager.decideNode(msg.runId, msg.nodeId, msg.approved, note)) {
+					ws.send(JSON.stringify({ type: "run_error", message: "节点不在等待人工决策的状态（未知名/已决定/运行已结束）" }));
+				}
+			} catch (err) {
+				ws.send(JSON.stringify({ type: "run_error", message: `approve_node 无法处理: ${(err as Error).message}` }));
 			}
 			return;
 		}

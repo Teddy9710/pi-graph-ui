@@ -1,47 +1,87 @@
 /* ============================================================================
- * pi-graph design system (dark).
+ * pi-graph design system — the night chart room (制图室).
  *
- * Elevation model — four depths, never skipped:
- *   0  --pg-bg          app body / chat main area (deepest)
- *   1  --pg-panel-bg    chrome sitting ON the body: header, bars, side column,
- *                       drawer, panels
- *   2  --pg-node-bg     cards floating on chrome: nodes, session items,
- *                       assistant bubbles, buttons (ghost)
- *   3  --pg-bg-well     carved-IN surfaces: inputs, <pre>, selects, canvas wells
+ * The app is a sheet of teal-ink survey paper. Every canvas is marked chart
+ * ground (24px graticule, 120px majors, corner registration ticks); a run is
+ * a route being inked live in legend blue; the chat column is the expedition
+ * log on unmarked paper; the history drawer is the atlas.
  *
- * Borders are low-alpha white (rgb(255 255 255 / .10–.18)), not solid grays —
- * solid grays read as cheap plastic; alpha borders blend with whatever is
- * beneath. Interactive elements transition at --pg-t.
+ * TWO INKS carry all meaning:
+ *   chart ink (#92a7a1 by alpha) — the WORLD: borders, graticule, structure,
+ *     kind splices, spawn edges, ::selection. Structure is material, never dye.
+ *   correction ink (--pg-ink magenta) — the SURVEYOR'S HAND, governed to a
+ *     10-surface allowlist (see beside the token): wordmark benchmark,
+ *     selected-node ring, :focus-visible + input focus, .pg-rh hover grips,
+ *     .pg-session-item.active spine, header scale bar, .pg-bolt-on armed,
+ *     .pg-handle hover/connectingfrom, h4 tick. NEVER a status hue, never
+ *     long text.
+ * The blue/green/red/amber quartet is LOCKED legend: running / ok / failed /
+ * planning-warn. DASHED = unsurveyed (pending borders, spawn edges, empty
+ * states) — hue is never the sole carrier (square dots, ✗ glyphs, motion).
  *
- * Light: one source. A blue seam under the header hands light to the canvas
- * sky; panels catch it from the top, wells are carved away from it.
+ * Elevation — four depths, printed not lit: 0 --pg-bg (chart paper), 1
+ * --pg-panel-bg (printed chrome), 2 --pg-node-bg (plates on chrome), 3
+ * --pg-bg-well (pressed paper). Flat fills + 1px engraved lines; no glass, no
+ * glow, no blur. Radii 12/8/5 — engraved plates, never 0, never 17.
  * ========================================================================== */
+
+@font-face {
+	font-family: "Big Shoulders";
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url("/fonts/big-shoulders-600.woff2") format("woff2");
+	/* latin subset — the wordmark only; never inherits into CJK */
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+2000-206F, U+2212, U+2215;
+}
+@font-face {
+	font-family: "Spline Sans Mono";
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url("/fonts/spline-sans-mono-400.woff2") format("woff2");
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+2000-206F, U+2212, U+2215;
+}
+@font-face {
+	font-family: "Spline Sans Mono";
+	font-style: normal;
+	font-weight: 500;
+	font-display: swap;
+	src: url("/fonts/spline-sans-mono-500.woff2") format("woff2");
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+2000-206F, U+2212, U+2215;
+}
+
 :root {
 	/* native select/datalist popups + default scrollbars follow the dark scheme */
 	color-scheme: dark;
-	/* surfaces — steps widened so body/chrome/card/well read apart at a glance */
-	--pg-bg: #0c0e12;
-	--pg-panel-bg: #14161c;
-	--pg-node-bg: #1e222c;
-	--pg-bg-well: #07090d;
-	/* text — one step brighter to fund the brighter card surface */
-	--pg-fg: #edf0f6;
-	--pg-fg-dim: #9da6b6;
-	/* borders — one step more present */
-	--pg-border: rgb(255 255 255 / 0.1);
-	--pg-border-strong: rgb(255 255 255 / 0.18);
-	/* semantic accents — one notch more saturated: same lightness, more chroma */
-	--pg-blue: #4d9bff;
-	--pg-blue-deep: #2a63ea;
-	--pg-green: #2ce8a0;
-	--pg-red: #ff6b6b;
-	--pg-amber: #ffc22e;
-	/* shape + motion — bigger radius scale, deeper float */
-	--pg-radius-lg: 17px;
-	--pg-radius: 12px;
-	--pg-radius-sm: 8px;
-	--pg-shadow: 0 2px 4px rgb(0 0 0 / 0.55), 0 12px 32px rgb(0 0 0 / 0.42);
-	--pg-shadow-pop: 0 3px 8px rgb(0 0 0 / 0.5), 0 20px 48px rgb(0 0 0 / 0.5);
+	/* surfaces — the four-step chart-paper ramp: teal-cast ink, never neutral
+	 * gray, so even empty areas read as printed paper, not dashboard void */
+	--pg-bg: #0a1214;          /* 夜海 night sea — chart paper */
+	--pg-panel-bg: #101c1e;    /* 潮线 tideline — printed chrome */
+	--pg-node-bg: #16262a;     /* 测板 plane table — plates on chrome */
+	--pg-bg-well: #060d0f;     /* 墨井 ink well — pressed paper */
+	/* text — foam (print-white, faintly cool) on dim print */
+	--pg-fg: #e9f2ed;
+	--pg-fg-dim: #92a7a1;      /* also THE chart ink: every line derives from it */
+	/* borders — chart ink by alpha, engraved not glassed */
+	--pg-border: rgb(146 167 161 / 0.14);
+	--pg-border-strong: rgb(146 167 161 / 0.26);
+	/* correction ink — the surveyor's hand. GOVERNED (see file header):
+	 * wordmark benchmark, selection ring, focus rings, rh grips, session
+	 * spine, scale bar, bolt armed, handle hover, h4 tick. Nothing else. */
+	--pg-ink: #e854d4;
+	--pg-ink-deep: #9c2e85;    /* pressed fill under foam text (btns, user bubble) */
+	/* LOCKED legend quartet — running / ok / failed / planning-warn */
+	--pg-blue: #4da3ff;
+	--pg-green: #3fdd8f;
+	--pg-red: #ff5f5f;
+	--pg-amber: #ffb03a;
+	/* shape — engraved plates: 12/8/5, printed shadows (no 44px blooms) */
+	--pg-radius-lg: 12px;
+	--pg-radius: 8px;
+	--pg-radius-sm: 5px;
+	--pg-shadow: 0 1px 0 rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.28);
+	--pg-shadow-pop: 0 1px 0 rgb(0 0 0 / 0.45), 0 10px 28px rgb(0 0 0 / 0.38);
 	--pg-t: 150ms ease;
 	/* entrance motion — one duration + one curve for everything that APPEARS;
 	 * hover/press feedback stays at the snappier --pg-t */
@@ -53,7 +93,7 @@
 	/* one disabled opacity — 0.38 vs 0.55 in different spots left ghost-button
 	 * text around 3.2:1 contrast; 0.5 keeps cursor as the disabled cue */
 	--pg-disabled: 0.5;
-	--pg-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+	--pg-mono: "Spline Sans Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
 html,
@@ -73,13 +113,14 @@ body {
 }
 
 ::selection {
-	background: rgb(77 155 255 / 0.35);
+	/* chart ink, NOT magenta — selected pink text reads as an error in a tool */
+	background: rgb(146 167 161 / 0.28);
 }
 
 /* Quiet scrollbars everywhere (Windows default white bars scream on dark). */
 * {
 	scrollbar-width: thin;
-	scrollbar-color: #3e465a transparent;
+	scrollbar-color: #2e4341 transparent;
 }
 *::-webkit-scrollbar {
 	width: 10px;
@@ -89,14 +130,13 @@ body {
 	/* 2px transparent border pulls the visible thumb to 6px inside the 10px
 	 * slot — visible at rest without shouting; the full 10px stays the hit
 	 * area */
-	background: #3e465a;
+	background: #2e4341;
 	border-radius: 8px;
 	border: 2px solid transparent;
 	background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-	/* a step brighter + cool-cast: blue still means interactive here */
-	background: #5a648a;
+	background: #3f5a55;
 	background-clip: padding-box;
 	border: 2px solid transparent;
 }
@@ -105,10 +145,10 @@ body {
 	background: transparent;
 }
 
-/* One focus language for every interactive element. Outline follows the
- * element's own border-radius — no radius override here. */
+/* One focus language for every interactive element — the surveyor's hand.
+ * Outline follows the element's own border-radius — no radius override here. */
 :focus-visible {
-	outline: 2px solid rgb(77 155 255 / 0.65);
+	outline: 2px solid rgb(232 84 212 / 0.65);
 	outline-offset: 1px;
 }
 input:focus-visible,
@@ -132,27 +172,27 @@ select:focus-visible {
 	padding: 0 18px;
 	height: 54px;
 	border-bottom: 1px solid var(--pg-border);
-	/* lit chrome: a real title bar — taller, brighter sheen, a top edge that
-	 * clearly catches the light */
-	background: linear-gradient(180deg, #1e222d, var(--pg-panel-bg));
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07);
+	/* printed chrome — flat tideline fill, the boundary is a ruled line */
+	background: var(--pg-panel-bg);
 	font-size: 13px;
 	flex-shrink: 0;
-	position: relative; /* anchors the light seam below */
+	position: relative; /* anchors the scale bar */
 }
-/* the app's light source: a visible blue light line riding the bottom border,
- * brightest at center, with a soft spill downward — it hands the light off to
- * the canvas glow directly beneath, so header and canvas share one continuous
- * light instead of stacking as strips */
+/* the header carries a chart SCALE BAR: a 132px strip of alternating solid /
+ * faint magenta segments (9px each — a real map scale bar's rhythm), stamped
+ * at the bottom-left. It is the surveyor's mark on the sheet's margin and the
+ * powered-tell anchor (brightens while any node runs — see the motion block) */
 .pg-header::after {
 	content: "";
 	position: absolute;
-	left: 0;
-	right: 0;
-	bottom: -1px;
-	height: 2px;
-	background: linear-gradient(90deg, transparent 2%, rgb(77 155 255 / 0.7) 50%, transparent 98%);
-	box-shadow: 0 2px 10px rgb(77 155 255 / 0.25);
+	left: 18px;
+	bottom: 6px;
+	width: 132px;
+	height: 3px;
+	border-radius: 1px;
+	background: repeating-linear-gradient(90deg, var(--pg-scale-a) 0 9px, var(--pg-scale-b) 9px 18px);
+	--pg-scale-a: rgb(232 84 212 / 0.72);
+	--pg-scale-b: rgb(232 84 212 / 0.22);
 	pointer-events: none;
 }
 
@@ -160,81 +200,57 @@ select:focus-visible {
 	display: inline-flex;
 	align-items: center;
 	gap: 9px;
+	font-family: "Big Shoulders", "Arial Narrow", system-ui;
 	font-size: 15px;
-	font-weight: 700;
-	letter-spacing: 0.02em;
+	font-weight: 600;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	color: var(--pg-fg);
 	margin-right: 6px;
 	user-select: none;
-	/* SIGNATURE: the product name itself carries the brand light — blue
-	 * melting into cyan across the wordmark, echoed by the chip's gradient.
-	 * No text-shadow allowed here: it paints OVER clipped text */
-	background: linear-gradient(100deg, #8dbaff 0%, #4f9bff 55%, #5fe3ff 115%);
-	-webkit-background-clip: text;
-	background-clip: text;
-	color: transparent;
+	/* the wordmark is STAMPED, not lit: solid foam caps in the condensed
+	 * industrial face — if Big Shoulders appears twice in a screenshot, it
+	 * has leaked (CJK never inherits it) */
 }
+/* a survey BENCHMARK: the triangulation-station symbol — an open square with
+ * a filled center dot, the same mark real charts stamp at known points */
 .pg-logo::before {
 	content: "";
-	width: 13px;
-	height: 13px;
-	border-radius: 4px;
-	background: linear-gradient(135deg, #79c8ff, var(--pg-blue-deep));
-	/* inset white line = a lit bevel on the chip; the outer glow breathes
-	 * (static shadow doubles as the reduced-motion fallback) */
-	box-shadow: 0 0 10px rgb(77 155 255 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.4);
-	animation: pg-logo-breathe 5s ease-in-out infinite;
-}
-/* a 5s cycle sits below conscious perception — the mark feels alive without
- * ever appearing to animate (reduced-motion parks it at the static glow) */
-@keyframes pg-logo-breathe {
-	0%,
-	100% {
-		box-shadow: 0 0 9px rgb(77 155 255 / 0.45), inset 0 1px 0 rgb(255 255 255 / 0.4);
-	}
-	50% {
-		box-shadow: 0 0 16px rgb(77 155 255 / 0.75), inset 0 1px 0 rgb(255 255 255 / 0.4);
-	}
+	width: 12px;
+	height: 12px;
+	border: 1px solid var(--pg-ink);
+	border-radius: 2px;
+	background: linear-gradient(var(--pg-ink), var(--pg-ink)) center / 4px 4px no-repeat;
 }
 
-/* tabs read as one segmented control of full pills */
+/* tabs are sheet tabs: squared, transparent at rest, active = inked underline
+ * + a faint print wash. The rest/active box-shadow lists are MATCHED single
+ * layers so the underline fades instead of popping (the file's 1:1 rule) */
 .pg-tab {
 	background: transparent;
-	border: 1px solid transparent;
+	border: none;
 	color: var(--pg-fg-dim);
-	border-radius: 999px;
+	border-radius: 2px;
 	padding: 7px 16px;
 	font-size: 13px;
 	letter-spacing: 0.02em;
 	cursor: pointer;
-	/* zero-alpha placeholders mirror .pg-tab.active's 3 layers so the pill's
-	 * ring + glow fade in instead of popping */
-	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0),
-		0 0 0 1px rgb(77 155 255 / 0),
-		0 2px 12px rgb(42 99 234 / 0);
-	transition: color var(--pg-t), background var(--pg-t), border-color var(--pg-t), box-shadow var(--pg-t), transform var(--pg-t);
+	box-shadow: inset 0 -2px 0 rgb(232 84 212 / 0);
+	transition: color var(--pg-t), background var(--pg-t), box-shadow var(--pg-t);
 }
 .pg-tab:hover {
 	color: var(--pg-fg);
-	/* a whisper of mist — hover forms one step below the active blue */
-	background: rgb(255 255 255 / 0.05);
+	background: rgb(233 242 237 / 0.04);
 }
 .pg-tab:active {
 	transform: translateY(1px);
 }
-/* the active tab is a clearly lit blue pill: filled wash, bright double ring,
- * a real glow — layer list matches .pg-tab's placeholders 1:1 or the fade dies */
 .pg-tab.active {
 	opacity: 1;
-	color: #eaf3ff;
+	color: var(--pg-fg);
 	font-weight: 600;
-	border-color: rgb(77 155 255 / 0.55);
-	background: linear-gradient(180deg, rgb(77 155 255 / 0.3), rgb(42 99 234 / 0.16));
-	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0.14),
-		0 0 0 1px rgb(77 155 255 / 0.28),
-		0 2px 12px rgb(42 99 234 / 0.38);
-	text-shadow: 0 1px 3px rgb(9 16 32 / 0.6);
+	background: rgb(233 242 237 / 0.04);
+	box-shadow: inset 0 -2px 0 var(--pg-ink);
 }
 
 .pg-ws {
@@ -271,18 +287,49 @@ select:focus-visible {
 	min-width: 0;
 }
 
-/* canvas wells: a three-layer sky — cool key light from the top edge, a
- * fainter off-axis wash (so the light isn't mirror-symmetric and dead), and
- * a floor shadow at the bottom edge. Depth you feel rather than read; nodes
- * and text keep their own backgrounds above it. */
+/* ============================================================================
+ * SIGNATURE — THE SURVEY SHEET: the moment the app opens you are looking at
+ * marked chart paper, not a glowing void. A 24px graticule with every-5th-line
+ * 120px majors in chart ink; the ground is fixed to the wrapper, so panning
+ * moves the territory over a still sheet. .pg-chat gets NO mesh — it is the
+ * unmarked expedition log. The mini canvas prints the same sheet at ~70%.
+ * ========================================================================== */
 .pg-canvas,
 .pg-mini-canvas,
 .pg-orch-canvas-wrap {
+	--chart-line: rgb(146 167 161 / 0.055); /* fine 24px graticule */
+	--chart-major: rgb(146 167 161 / 0.1); /* every 5th line, 120px */
 	background:
-		radial-gradient(120% 60% at 50% -6%, rgb(77 155 255 / 0.11), transparent 55%),
-		radial-gradient(70% 50% at 14% 6%, rgb(77 155 255 / 0.055), transparent 60%),
-		radial-gradient(130% 80% at 50% 118%, rgb(3 5 9 / 0.68), transparent 62%),
+		linear-gradient(to right, var(--chart-line) 1px, transparent 1px) 0 0 / 24px 24px,
+		linear-gradient(to bottom, var(--chart-line) 1px, transparent 1px) 0 0 / 24px 24px,
+		linear-gradient(to right, var(--chart-major) 1px, transparent 1px) 0 0 / 120px 120px,
+		linear-gradient(to bottom, var(--chart-major) 1px, transparent 1px) 0 0 / 120px 120px,
 		var(--pg-bg);
+}
+.pg-mini-canvas {
+	/* the inset index prints lighter — same sheet, smaller scale */
+	--chart-line: rgb(146 167 161 / 0.04);
+	--chart-major: rgb(146 167 161 / 0.07);
+}
+/* registration ticks: the sheet's corner crop marks (8 hairlines, 14px long,
+ * inset 10px) — how a print shop knows the sheet is square. Paint-only,
+ * never interactive; sits above the RF pane, below RF's own controls. */
+.pg-canvas::after {
+	content: "";
+	position: absolute;
+	inset: 10px;
+	z-index: 2;
+	pointer-events: none;
+	background:
+		linear-gradient(var(--chart-major), var(--chart-major)) top left / 14px 1px,
+		linear-gradient(var(--chart-major), var(--chart-major)) top left / 1px 14px,
+		linear-gradient(var(--chart-major), var(--chart-major)) top right / 14px 1px,
+		linear-gradient(var(--chart-major), var(--chart-major)) top right / 1px 14px,
+		linear-gradient(var(--chart-major), var(--chart-major)) bottom left / 14px 1px,
+		linear-gradient(var(--chart-major), var(--chart-major)) bottom left / 1px 14px,
+		linear-gradient(var(--chart-major), var(--chart-major)) bottom right / 14px 1px,
+		linear-gradient(var(--chart-major), var(--chart-major)) bottom right / 1px 14px;
+	background-repeat: no-repeat;
 }
 
 /* ==== panels (detail / node inspector) =================================== */
@@ -291,9 +338,7 @@ select:focus-visible {
 	width: 360px;
 	overflow-y: auto;
 	border-left: 1px solid var(--pg-border);
-	/* chrome catches the light from the top (the gradient anchors to the box,
-	 * not the content — scrolling never shimmers) */
-	background: linear-gradient(180deg, #171a22, var(--pg-panel-bg) 96px);
+	background: var(--pg-panel-bg);
 	padding: 18px 20px;
 	font-size: 13px;
 }
@@ -319,23 +364,24 @@ select:focus-visible {
 .pg-panel h4,
 .pg-drawer h4 {
 	margin: 22px 0 8px;
-	font-size: 12px;
+	font-size: 11px;
 	font-weight: 600;
 	text-transform: uppercase;
-	letter-spacing: 0.09em;
+	letter-spacing: 0.14em;
 	color: var(--pg-fg-dim);
-	/* section heads lead with a hairline fading right — visible grouping */
+	/* section heads are LED BY a magenta ink tick — the surveyor's mark that
+	 * flags a labeled region on the sheet */
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	gap: 8px;
 	white-space: nowrap;
 }
-.pg-panel h4::after,
-.pg-drawer h4::after {
+.pg-panel h4::before,
+.pg-drawer h4::before {
 	content: "";
-	flex: 1;
-	height: 1px;
-	background: linear-gradient(90deg, var(--pg-border-strong), transparent 85%);
+	width: 8px;
+	height: 2px;
+	background: var(--pg-ink);
 }
 /* long Chinese hint sentences need real leading to be readable */
 .pg-panel p {
@@ -432,9 +478,8 @@ select:focus-visible {
 	gap: 8px;
 	padding: 12px 16px;
 	border-top: 1px solid var(--pg-border);
-	/* a lit tray at the bottom edge of the page */
-	background: linear-gradient(180deg, #171a21, var(--pg-panel-bg));
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
+	/* printed tray — flat tideline under a ruled edge */
+	background: var(--pg-panel-bg);
 	flex-shrink: 0;
 }
 
@@ -448,32 +493,30 @@ select:focus-visible {
 	padding: 12px 16px;
 	font-size: 14px;
 	outline: none;
-	/* carved rest state: a top inner shadow + a line of light at the floor —
-	 * the well reads as cut IN, not a dark sticker. The trailing zero-alpha
-	 * rings mirror the focus list so the glow interpolates instead of popping */
+	/* pressed-paper rest state: the well reads as pressed INTO the sheet. The
+	 * trailing zero-alpha rings mirror the focus list so the ink ring
+	 * interpolates instead of popping */
 	box-shadow:
 		inset 0 1px 2px rgb(0 0 0 / 0.35),
-		inset 0 -1px 0 rgb(255 255 255 / 0.03),
-		0 0 0 1px rgb(77 155 255 / 0),
-		0 0 0 4px rgb(77 155 255 / 0),
-		0 2px 12px rgb(77 155 255 / 0);
+		inset 0 -1px 0 rgb(233 242 237 / 0.03),
+		0 0 0 1px rgb(232 84 212 / 0),
+		0 0 0 4px rgb(232 84 212 / 0);
 	transition: border-color var(--pg-t), box-shadow var(--pg-t);
 }
 /* 0.55 alpha landed ~3:1 on the well background — placeholders carry real
  * guidance text here, so keep them readable. */
 .pg-input-bar input::placeholder {
-	color: rgb(152 161 176 / 0.8);
+	color: rgb(146 167 161 / 0.8);
 }
 .pg-input-bar input:focus {
-	border-color: rgb(77 155 255 / 0.6);
-	/* sandwich ring: a 1px bright ring hugging the border + a 4px soft halo +
-	 * a spill of light downward; the carve stays so the groove never flattens */
+	border-color: rgb(232 84 212 / 0.6);
+	/* the surveyor's hand: a 1px ink ring hugging the border + a 4px halo;
+	 * the carve stays so the groove never flattens */
 	box-shadow:
 		inset 0 1px 2px rgb(0 0 0 / 0.35),
-		inset 0 -1px 0 rgb(255 255 255 / 0.03),
-		0 0 0 1px rgb(77 155 255 / 0.28),
-		0 0 0 4px rgb(77 155 255 / 0.1),
-		0 2px 12px rgb(77 155 255 / 0.12);
+		inset 0 -1px 0 rgb(233 242 237 / 0.03),
+		0 0 0 1px rgb(232 84 212 / 0.28),
+		0 0 0 4px rgb(232 84 212 / 0.12);
 }
 .pg-input-bar input:disabled {
 	opacity: var(--pg-disabled);
@@ -491,9 +534,11 @@ select:focus-visible {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	background: linear-gradient(180deg, #4f92f7, var(--pg-blue-deep));
-	color: #fff;
-	border: none;
+	/* pressed correction ink: the GO key is the surveyor's stamp — foam text
+	 * on pressed magenta (5.85:1 at 13px CJK) */
+	background: var(--pg-ink-deep);
+	color: var(--pg-fg);
+	border: 1px solid rgb(0 0 0 / 0.35);
 	border-radius: var(--pg-radius-sm);
 	padding: 10px 20px;
 	min-height: 38px; /* the floor — the taller prompt input stretches it further */
@@ -502,12 +547,7 @@ select:focus-visible {
 	font-weight: 600;
 	letter-spacing: 0.02em;
 	cursor: pointer;
-	/* at-rest ambient glow: the primary action casts brand light before hover;
-	 * the 3 layers match :active's padded stack below so the press fades */
-	box-shadow:
-		0 1px 2px rgb(0 0 0 / 0.35),
-		inset 0 1px 0 rgb(255 255 255 / 0.2),
-		0 2px 14px rgb(42 99 234 / 0.45);
+	box-shadow: var(--pg-shadow);
 	/* background/border/color join the list: ghost buttons hover via exactly
 	 * those, and a transition that skips them pops instead of fading */
 	transition:
@@ -518,23 +558,20 @@ select:focus-visible {
 		border-color var(--pg-t),
 		color var(--pg-t);
 }
-/* hover = glow, not just brightness: a same-hue halo ties buttons to the
- * selected-node / live-edge light language. drop-shadow (not box-shadow) so
- * :active's shadow reset still reads as a press */
+/* hover re-inks the edge — brightness plus a correction-ink border, no glow */
 .pg-btn:hover:not(:disabled):not(.pg-btn-ghost) {
-	filter: brightness(1.07) drop-shadow(0 2px 10px rgb(42 99 234 / 0.45));
+	filter: brightness(1.06);
+	border-color: var(--pg-ink);
 }
-/* danger glows red — a blue halo on an abort button would lie */
 .pg-btn.pg-btn-danger:hover:not(:disabled) {
-	filter: brightness(1.07) drop-shadow(0 2px 10px rgb(207 58 58 / 0.5));
+	filter: brightness(1.06);
+	border-color: var(--pg-red);
 }
 .pg-btn:active:not(:disabled) {
 	transform: translateY(1px);
-	/* the glow sinks with the press — matched 3 layers, no snap */
-	box-shadow:
-		0 1px 1px rgb(0 0 0 / 0.3),
-		inset 0 1px 0 rgb(255 255 255 / 0.08),
-		0 1px 6px rgb(42 99 234 / 0.18);
+	/* the stamp presses in: deeper fill, shadow flattens to the printed floor */
+	background: #8f2a7d;
+	box-shadow: 0 1px 0 rgb(0 0 0 / 0.3);
 }
 .pg-btn:disabled {
 	opacity: var(--pg-disabled);
@@ -544,49 +581,49 @@ select:focus-visible {
 
 /* deep red — light red + white text tops out around 2.5:1 contrast. */
 .pg-btn-danger {
-	background: linear-gradient(180deg, #e05252, #cf3a3a);
-	box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.1);
+	background: #c73a3a;
+	color: #fff;
+}
+/* (0,4,0) — beats .pg-btn:active's magenta press, which would flash the
+ * abort key the wrong color for a frame */
+.pg-btn.pg-btn-danger:active:not(:disabled) {
+	background: #b53232;
 }
 
 .pg-btn-ghost {
-	background: rgb(255 255 255 / 0.05);
+	background: var(--pg-node-bg);
 	border: 1px solid var(--pg-border-strong);
 	color: var(--pg-fg);
 	box-shadow: none;
 }
 .pg-btn-ghost:hover:not(:disabled) {
 	filter: none;
-	/* directional micro-gradient + a lit top edge: frosted glass, not mist */
-	background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.05));
-	border-color: rgb(255 255 255 / 0.26);
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08);
+	background: #1b2e32;
+	border-color: rgb(146 167 161 / 0.4);
 }
 .pg-btn-ghost:active:not(:disabled) {
-	background: rgb(255 255 255 / 0.06);
+	background: #182a2e;
 }
 
 /* ==== live-graph edges (canvas) ========================================= */
 
-/* static edges sit a half-step thinner so nodes own the foreground; the
- * transition lets the live class LIGHT a path up instead of snapping it */
+/* static edges are engraved traces — surveyed connections between stations,
+ * a half-step thinner than the live route so nodes own the foreground */
 .pg-edge path,
 .pg-edge .react-flow__edge-path {
-	stroke: #838c9e;
-	stroke-width: 1.75;
+	stroke: #5c7370;
+	stroke-width: 1.5;
 	stroke-linecap: round;
 	transition: stroke var(--pg-t), stroke-width var(--pg-t);
 }
+/* spawn = UNSURVEYED: dashed chart ink, no hue — the idiom prints */
 .pg-edge-spawn path,
 .pg-edge-spawn .react-flow__edge-path {
 	stroke-dasharray: 5 4;
-	stroke: rgb(123 164 224 / 0.85);
+	stroke: rgb(146 167 161 / 0.75);
 }
-.pg-edge-live path,
-.pg-edge-live .react-flow__edge-path {
-	stroke: var(--pg-blue);
-	stroke-width: 3;
-	filter: drop-shadow(0 0 6px rgb(77 155 255 / 0.85));
-}
+/* the live ROUTE is drawn by the motion block (drawn-once-then-marching
+ * keyframes live there with the rest of the sheet's one moment) */
 
 /* ==== React Flow chrome (dark, via CSS vars + fallbacks) ================= */
 
@@ -596,41 +633,40 @@ select:focus-visible {
 	 * .react-flow.dark rule at higher specificity and would be dead here.
 	 * This one sits under the <Background color=…> inline prop — a real
 	 * fallback if a call site ever drops the prop. */
-	--xy-background-pattern-color: rgb(255 255 255 / 0.13);
+	--xy-background-pattern-color: rgb(146 167 161 / 0.055);
 	--xy-controls-box-shadow: 0 4px 16px rgb(0 0 0 / 0.4);
-	/* translucent bases + the blur rules below = frosted glass floating over
-	 * the canvas instead of opaque slabs sitting on it */
-	--xy-controls-button-background-color: rgb(27 31 39 / 0.8);
-	--xy-controls-button-background-color-hover: rgb(38 43 54 / 0.92);
-	--xy-controls-button-color: #b9c2d2;
-	--xy-controls-button-color-hover: #fff;
+	/* opaque printed plates — no glass, no blur in this system */
+	--xy-controls-button-background-color: rgb(16 28 30 / 0.92);
+	--xy-controls-button-background-color-hover: rgb(22 38 41 / 0.95);
+	--xy-controls-button-color: #92a7a1;
+	--xy-controls-button-color-hover: var(--pg-fg);
 	--xy-controls-button-border-color: var(--pg-border);
-	--xy-minimap-background-color: rgb(16 19 26 / 0.72);
-	--xy-minimap-mask-background-color: rgb(5 7 11 / 0.56);
-	--xy-minimap-node-background-color: #5e6f96;
+	--xy-minimap-background-color: rgb(16 28 30 / 0.9);
+	/* the mask is the uncharted sea around the viewport — dark, but not a
+	 * black void: at 0.45 the viewport rectangle stays legible at a glance */
+	--xy-minimap-mask-background-color: rgb(4 9 10 / 0.45);
+	--xy-minimap-node-background-color: #4a6763;
 	--xy-minimap-node-stroke-color: transparent;
 	--xy-attribution-background-color: transparent;
 }
-/* the dot grid becomes real texture: brighter + slightly larger dots under
- * the nodes. (0,3,0) beats RF's own (0,2,0) fill rule; `r` as a CSS geometry
- * property degrades silently where unsupported. Keeps the <Background> inline
- * prop company — both say 0.13. */
+/* RF's dot grid retires — the graticule owns the texture now. (0,3,0) beats
+ * RF's own (0,2,0) fill rule and covers all three <Background> instances
+ * (GraphCanvas + OrchCanvas editor + run view) in one rule; `r` as a CSS
+ * geometry property degrades silently where unsupported. */
 .react-flow .react-flow__background-pattern.dots {
-	fill: rgb(255 255 255 / 0.13);
-	r: 1.3px;
+	fill: transparent;
+	r: 0.1px;
 }
 .react-flow__controls {
 	border-radius: var(--pg-radius-sm);
 	overflow: hidden;
 	border: 1px solid var(--pg-border);
-	backdrop-filter: blur(10px);
 }
 .react-flow__minimap {
 	border-radius: var(--pg-radius);
 	overflow: hidden;
 	border: 1px solid var(--pg-border);
 	box-shadow: var(--pg-shadow);
-	backdrop-filter: blur(10px) saturate(1.15);
 }
 
 /* ==== history ============================================================ */
@@ -656,9 +692,8 @@ select:focus-visible {
 .pg-drawer-overlay {
 	position: fixed;
 	inset: 0;
-	background: rgb(4 6 10 / 0.5);
-	/* blur + slight desaturation: the app recedes, the drawer becomes the subject */
-	backdrop-filter: blur(6px) saturate(0.85);
+	/* a plain scrim — the atlas page laid over the chart table, no blur */
+	background: rgb(2 8 9 / 0.62);
 	z-index: 30;
 	display: flex;
 	animation: pg-overlay-in var(--pg-t-in) ease;
@@ -671,15 +706,12 @@ select:focus-visible {
 
 .pg-drawer {
 	width: 380px;
-	/* frosted panel riding its own blur — glass with a visible rim, not gray
-	 * paint; 0.88 alpha over an already-dark overlay keeps text contrast at
-	 * least where it was */
-	background: rgb(21 24 31 / 0.88);
-	backdrop-filter: blur(18px) saturate(1.25);
-	border-right: 1px solid rgb(255 255 255 / 0.16);
+	/* a solid atlas page — printed, ruled, opaque */
+	background: var(--pg-panel-bg);
+	border-right: 1px solid var(--pg-border);
 	padding: 16px;
 	overflow-y: auto;
-	box-shadow: var(--pg-shadow-pop), inset 0 1px 0 rgb(255 255 255 / 0.08);
+	box-shadow: var(--pg-shadow-pop);
 	animation: pg-drawer-in var(--pg-t-in) var(--pg-ease-out);
 }
 /* shorter travel + the shared ease-out: the drawer settles instead of lurching */
@@ -711,7 +743,7 @@ select:focus-visible {
 }
 .pg-drawer-close:hover {
 	color: var(--pg-fg);
-	background: rgb(255 255 255 / 0.08);
+	background: rgb(146 167 161 / 0.1);
 }
 .pg-drawer-close:active {
 	transform: translateY(1px);
@@ -731,33 +763,29 @@ select:focus-visible {
 	text-align: left;
 	background: var(--pg-node-bg);
 	border: 1px solid var(--pg-border);
-	border-radius: var(--pg-radius);
+	border-radius: var(--pg-radius-sm);
 	color: var(--pg-fg);
 	padding: 11px 12px;
 	cursor: pointer;
 	font-size: 12.5px;
-	position: relative; /* anchors the active LED strip */
+	position: relative; /* anchors the active spine */
 	transition: border-color var(--pg-t), background var(--pg-t), transform var(--pg-t), box-shadow var(--pg-t);
 }
 .pg-session-item:hover {
 	border-color: var(--pg-border-strong);
-	/* micro-gradient + a 1px lift + drop shadow: the card is picked up */
-	background: linear-gradient(180deg, #212630, #1b2029);
+	background: #1b2e32;
 	transform: translateY(-1px);
-	box-shadow: 0 4px 12px rgb(0 0 0 / 0.3);
+	box-shadow: var(--pg-shadow);
 }
 .pg-session-item:active {
 	transform: translateY(1px);
 }
-/* hover and active used to share the SAME blue border — during replay you
- * couldn't tell which item was loaded. Active alone gets the accent: a blue
- * wash over the card plus an LED strip set into the left edge (fading at
- * both ends, softly lit — not a full-height hard bar). */
+/* active = the marked atlas entry: a correction-ink spine set into the left
+ * edge (fading at both ends) + a faint ink wash. Hover keeps neutral chart
+ * ink so the two never blur together during replay. */
 .pg-session-item.active {
-	border-color: rgb(77 155 255 / 0.55);
-	background:
-		linear-gradient(180deg, rgb(77 155 255 / 0.09), rgb(77 155 255 / 0.03)),
-		linear-gradient(180deg, #232837, var(--pg-node-bg));
+	border-color: rgb(232 84 212 / 0.45);
+	background: linear-gradient(180deg, rgb(232 84 212 / 0.06), transparent 60%), var(--pg-node-bg);
 }
 .pg-session-item.active::before {
 	content: "";
@@ -765,10 +793,9 @@ select:focus-visible {
 	left: 0;
 	top: 9px;
 	bottom: 9px;
-	width: 3px;
-	border-radius: 2px;
-	background: linear-gradient(180deg, transparent, var(--pg-blue) 22%, var(--pg-blue) 78%, transparent);
-	box-shadow: 0 0 8px rgb(77 155 255 / 0.55);
+	width: 2px;
+	border-radius: 1px;
+	background: linear-gradient(180deg, transparent, var(--pg-ink) 22%, var(--pg-ink) 78%, transparent);
 }
 .pg-session-title {
 	overflow: hidden;
@@ -802,22 +829,17 @@ select:focus-visible {
 	min-height: 41px;
 	box-sizing: border-box;
 	flex-shrink: 0;
-	/* the shadow the goal bar casts on this one — it sits one level lower */
-	box-shadow: inset 0 1px 0 rgb(0 0 0 / 0.18);
+	/* the run bar catches a hair of light on its top edge */
+	box-shadow: inset 0 1px 0 rgb(233 242 237 / 0.04);
 }
 
-/* 目标 bar: the auto-orchestration entry (goal → plan → run) — sits a shade
-   above the run bar so the two rows don't read as one packed strip. */
+/* 目标 bar: the auto-orchestration entry (goal → plan → run) — one printed
+   deck with the run bar, separated by a pressed groove instead of stacked
+   gradients (the expedition office sits above the instrument shelf) */
 .pg-orch-goal {
 	gap: 8px;
-	background: linear-gradient(180deg, #1c212b, #171a21);
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035);
-}
-/* the hero input gets a barely-blue cast — tied to the ⚡ it feeds */
-.pg-orch-goal .pg-orch-goal-input {
-	background:
-		linear-gradient(180deg, rgb(77 155 255 / 0.05), rgb(77 155 255 / 0) 55%),
-		var(--pg-bg-well);
+	background: var(--pg-panel-bg);
+	box-shadow: inset 0 1px 0 rgb(0 0 0 / 0.35);
 }
 
 /* one control height for everything in the two bars (btn-sm ≈26 / select ≈29 /
@@ -867,8 +889,10 @@ select:focus-visible {
 	text-align: center;
 	padding: 0 24px;
 }
-/* a dashed card behind the hint — an empty canvas reads as designed, and
- * speaks the same empty-state language as the chat column */
+/* a dashed card behind the hint — UNSURVEYED GROUND: the shared dash idiom
+ * (pending borders, spawn edges) plus contour rings, which are permitted
+ * ONLY here, where they mean "not yet charted" — decoration converted to
+ * meaning */
 .pg-orch-empty::before {
 	content: "";
 	position: absolute;
@@ -880,7 +904,9 @@ select:focus-visible {
 	box-sizing: border-box;
 	border: 1px dashed var(--pg-border-strong);
 	border-radius: var(--pg-radius-lg);
-	background: rgb(255 255 255 / 0.02);
+	background:
+		repeating-radial-gradient(circle at 50% 30%, transparent 0 26px, rgb(146 167 161 / 0.1) 26px 27px),
+		var(--pg-panel-bg);
 }
 .pg-orch-bar select {
 	background: var(--pg-bg-well);
@@ -899,64 +925,74 @@ select:focus-visible {
 	border-color: var(--pg-border-strong);
 }
 
-/* run summary / issue chips — glass beads: a top-lit micro-gradient + a lit
- * inner edge; pills read as little glass beads, not outlined boxes */
+/* run summary / issue chips — printed plates: small ruled rectangles in the
+ * mono face; numerals are data, data is mono and tabular */
 .pg-orch-chip {
+	font-family: var(--pg-mono);
 	font-size: 11px;
-	border: 1px solid rgb(255 255 255 / 0.09);
-	background: linear-gradient(180deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.03));
-	border-radius: 999px;
-	padding: 2px 10px;
+	border: 1px solid var(--pg-border);
+	background: var(--pg-node-bg);
+	border-radius: 3px;
+	padding: 2px 8px;
 	opacity: 0.9;
 	white-space: nowrap;
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05);
 	font-variant-numeric: tabular-nums;
 }
 /* the run-status chip speaks the same colored language as the chat card —
- * one status, one tone (text + border + wash), on every page */
+ * one status, one tone (text + border + flat wash), on every page */
 .pg-chip-planning {
 	color: var(--pg-amber);
-	border-color: rgb(255 194 46 / 0.35);
-	background: linear-gradient(180deg, rgb(255 194 46 / 0.12), rgb(255 194 46 / 0.05));
+	border-color: rgb(255 176 58 / 0.35);
+	background: linear-gradient(180deg, rgb(255 176 58 / 0.12), rgb(255 176 58 / 0.05));
 }
 .pg-chip-running {
 	color: var(--pg-blue);
-	border-color: rgb(77 155 255 / 0.35);
-	background: linear-gradient(180deg, rgb(77 155 255 / 0.13), rgb(77 155 255 / 0.05));
+	border-color: rgb(77 163 255 / 0.35);
+	background: linear-gradient(180deg, rgb(77 163 255 / 0.13), rgb(77 163 255 / 0.05));
 }
 .pg-chip-completed {
 	color: var(--pg-green);
-	border-color: rgb(44 232 160 / 0.3);
-	background: linear-gradient(180deg, rgb(44 232 160 / 0.11), rgb(44 232 160 / 0.04));
+	border-color: rgb(63 221 143 / 0.3);
+	background: linear-gradient(180deg, rgb(63 221 143 / 0.11), rgb(63 221 143 / 0.04));
 }
 .pg-chip-failed {
 	color: var(--pg-red);
-	border-color: rgb(255 107 107 / 0.35);
-	background: linear-gradient(180deg, rgb(255 107 107 / 0.12), rgb(255 107 107 / 0.05));
+	border-color: rgb(255 95 95 / 0.35);
+	background: linear-gradient(180deg, rgb(255 95 95 / 0.12), rgb(255 95 95 / 0.05));
 }
 .pg-chip-aborted {
 	color: var(--pg-fg-dim);
 }
 /* validation-issue chip (pg-orch-chip + pg-error-text): a red frame answers
- * the red text */
+ * the red text, and the square mark carries the hue — no emoji glyphs in
+ * this system (the failed legend speaks squares, like every status dot) */
 .pg-orch-chip.pg-error-text {
-	border-color: rgb(255 107 107 / 0.35);
-	background: linear-gradient(180deg, rgb(255 107 107 / 0.12), rgb(255 107 107 / 0.05));
+	border-color: rgb(255 95 95 / 0.35);
+	background: linear-gradient(180deg, rgb(255 95 95 / 0.12), rgb(255 95 95 / 0.05));
 }
-/* status beads: currentcolor drives border + wash + a faint same-hue halo —
- * one rule, four statuses, clearly colored glass instead of gray pills.
- * Wins over the four originals by order; .pg-chip-aborted stays neutral. */
+.pg-orch-chip.pg-error-text::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border-radius: 1px;
+	background: var(--pg-red);
+	margin-right: 5px;
+	vertical-align: 1px;
+}
+/* status plates: currentcolor drives border + wash — one rule, four statuses,
+ * stamped in the legend's colors instead of gray pills. Wins over the four
+ * originals by order; .pg-chip-aborted stays neutral. */
 .pg-orch-chip.pg-chip-planning,
 .pg-orch-chip.pg-chip-running,
 .pg-orch-chip.pg-chip-completed,
 .pg-orch-chip.pg-chip-failed {
 	border-color: color-mix(in srgb, currentcolor 55%, transparent);
 	background: linear-gradient(180deg, color-mix(in srgb, currentcolor 18%, transparent), color-mix(in srgb, currentcolor 7%, transparent));
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 10px color-mix(in srgb, currentcolor 22%, transparent);
 }
 
-/* canvas lock banner while a run executes — a glass pill with a breathing
- * amber dot: a live status, not a gray box */
+/* canvas lock banner while a run executes — a printed plate with a breathing
+ * amber square: a live status, not a gray box */
 .pg-orch-lock {
 	position: absolute;
 	top: 12px;
@@ -966,10 +1002,9 @@ select:focus-visible {
 	display: inline-flex;
 	align-items: center;
 	gap: 8px;
-	background: rgb(25 29 37 / 0.88);
-	backdrop-filter: blur(8px);
-	border: 1px solid rgb(255 194 46 / 0.22);
-	border-radius: 999px;
+	background: var(--pg-panel-bg);
+	border: 1px solid rgb(255 176 58 / 0.25);
+	border-radius: var(--pg-radius-sm);
 	padding: 6px 14px 6px 12px;
 	font-size: 12px;
 	color: var(--pg-fg-dim);
@@ -981,9 +1016,8 @@ select:focus-visible {
 	content: "";
 	width: 6px;
 	height: 6px;
-	border-radius: 50%;
+	border-radius: 1px;
 	background: var(--pg-amber);
-	box-shadow: 0 0 8px rgb(255 194 46 / 0.75);
 	animation: pg-lock-breathe 1.6s ease-in-out infinite;
 }
 @keyframes pg-lock-breathe {
@@ -1022,7 +1056,7 @@ select:focus-visible {
 	opacity: 0.75;
 }
 .pg-node.pg-status-skipped {
-	border-color: rgb(255 194 46 / 0.45);
+	border-color: rgb(255 176 58 / 0.5);
 }
 
 /* editor node sizing (matches dagre node size in orch-layout.ts) */
@@ -1078,6 +1112,18 @@ textarea.pg-form-input {
 	line-height: 1.55;
 }
 
+/* gate decision row: 批准（the GO stamp — primary ink is an allowlisted
+ * surface）+ 驳回（danger）share one line at equal weight; the note input
+ * above carries the payload both keys send */
+.pg-gate-actions {
+	display: flex;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+.pg-gate-actions .pg-btn {
+	flex: 1;
+}
+
 /* compact run preview inside a node */
 .pg-orch-preview {
 	font-family: var(--pg-mono);
@@ -1090,16 +1136,18 @@ textarea.pg-form-input {
 	opacity: var(--pg-ink-3);
 }
 
-/* generic small chip (node @agent/model badges) — same glass-bead family */
+/* generic small chip (node @agent/model badges) — the same printed family */
 .pg-chip {
 	display: inline-block;
+	font-family: var(--pg-mono);
 	font-size: 10.5px;
-	border: 1px solid rgb(255 255 255 / 0.09);
-	background: linear-gradient(180deg, rgb(255 255 255 / 0.06), rgb(255 255 255 / 0.025));
-	border-radius: 999px;
-	padding: 1px 8px;
+	border: 1px solid var(--pg-border);
+	background: var(--pg-node-bg);
+	border-radius: 3px;
+	padding: 1px 7px;
 	color: var(--pg-fg-dim);
 	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
 }
 
 /* ============================================================================
@@ -1161,15 +1209,15 @@ textarea.pg-form-input {
 	right: 0;
 	height: 1px;
 }
-/* states are flagged by the lib via the data-separator attribute */
+/* states are flagged by the lib via the data-separator attribute — the
+ * surveyor's hand takes the seam while you pull it */
 .pg-rh[data-separator="hover"]::after,
 .pg-rh[data-separator="active"]::after,
 .pg-rh[data-separator="focus"]::after {
-	background: rgb(77 155 255 / 0.75);
-	box-shadow: 0 0 6px rgb(77 155 255 / 0.35);
+	background: rgb(232 84 212 / 0.75);
 }
 .pg-rh:focus-visible {
-	outline: 2px solid rgb(77 155 255 / 0.65);
+	outline: 2px solid rgb(232 84 212 / 0.65);
 	outline-offset: -2px;
 }
 /* drag grips: a pair of short bars at the center of the line (two vertical
@@ -1197,7 +1245,7 @@ textarea.pg-form-input {
 .pg-rh[data-separator="hover"],
 .pg-rh[data-separator="active"],
 .pg-rh[data-separator="focus"] {
-	--pg-rh-grip: rgb(77 155 255 / 0.9);
+	--pg-rh-grip: rgb(232 84 212 / 0.9);
 }
 
 .pg-side {
@@ -1205,8 +1253,7 @@ textarea.pg-form-input {
 	flex-direction: column;
 	min-height: 0;
 	min-width: 0;
-	/* the same top light the panels catch */
-	background: linear-gradient(180deg, #171a22, var(--pg-panel-bg) 96px);
+	background: var(--pg-panel-bg);
 }
 
 /* DetailPanel fills its slot (its own .pg-panel width is for the old fixed
@@ -1236,19 +1283,19 @@ textarea.pg-form-input {
 	font-size: 11px;
 	font-weight: 600;
 	text-transform: uppercase;
-	letter-spacing: 0.07em;
+	letter-spacing: 0.14em;
 	color: var(--pg-fg-dim);
 	display: flex;
 	align-items: center;
 	gap: 7px;
 }
+/* the inset index's live mark — a small green square (stamped, not glowing) */
 .pg-mini-header::before {
 	content: "";
 	width: 6px;
 	height: 6px;
-	border-radius: 50%;
+	border-radius: 1px;
 	background: var(--pg-green);
-	box-shadow: 0 0 8px rgb(44 232 160 / 0.7);
 }
 
 .pg-mini-canvas {
@@ -1268,19 +1315,15 @@ textarea.pg-form-input {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
-	/* the chat column joins the canvas sky — one light source app-wide: a
-	 * clearly blue-lit overhead wash plus a soft floor shadow toward the tray */
-	background:
-		radial-gradient(110% 45% at 50% -4%, rgb(77 155 255 / 0.065), transparent 60%),
-		radial-gradient(120% 55% at 50% 112%, rgb(3 5 9 / 0.35), transparent 60%),
-		var(--pg-bg);
+	/* the expedition log — UNMARKED paper: no mesh, no wash; reading surface */
+	background: var(--pg-bg);
 }
 
 .pg-chat-header {
 	font-size: 11px;
 	font-weight: 600;
 	text-transform: uppercase;
-	letter-spacing: 0.07em;
+	letter-spacing: 0.14em;
 	color: var(--pg-fg-dim);
 	padding: 12px 16px 6px;
 }
@@ -1291,7 +1334,7 @@ textarea.pg-form-input {
 .pg-mini-header {
 	padding: 12px 18px 10px;
 	font-size: 11.5px;
-	letter-spacing: 0.09em;
+	letter-spacing: 0.14em;
 	border-bottom: 1px solid var(--pg-border);
 }
 
@@ -1313,27 +1356,28 @@ textarea.pg-form-input {
 	padding: 30px 34px;
 	border: 1px dashed var(--pg-border-strong);
 	border-radius: var(--pg-radius-lg);
+	/* unsurveyed ground — the same contour rings as the canvas empty card */
 	background:
-		radial-gradient(70% 90% at 50% 0%, rgb(77 155 255 / 0.055), transparent 70%),
-		rgb(255 255 255 / 0.02);
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+		repeating-radial-gradient(circle at 50% 30%, transparent 0 26px, rgb(146 167 161 / 0.1) 26px 27px),
+		var(--pg-panel-bg);
 	animation: pg-chat-in 240ms var(--pg-ease-out);
 }
 /* a "typing…" bubble drawn entirely in gradients (no text): three fading
- * dots give the empty state an anchor without stealing the show */
+ * squares — the chart-room's hollow/stamped marks — anchor the empty state
+ * without stealing the show */
 .pg-chat-empty::before {
 	content: "";
 	display: block;
 	width: 38px;
-	height: 28px;
+	height: 26px;
 	margin: 0 auto 14px;
-	border-radius: 12px 12px 12px 3px;
-	border: 1px solid rgb(255 255 255 / 0.1);
+	border: 1px solid var(--pg-border);
+	border-radius: var(--pg-radius-sm) var(--pg-radius-sm) var(--pg-radius-sm) 2px;
 	background:
-		radial-gradient(circle at 13px 14px, rgb(152 161 176 / 0.55) 0 1.8px, transparent 2.2px),
-		radial-gradient(circle at 19px 14px, rgb(152 161 176 / 0.4) 0 1.8px, transparent 2.2px),
-		radial-gradient(circle at 25px 14px, rgb(152 161 176 / 0.28) 0 1.8px, transparent 2.2px),
-		linear-gradient(180deg, rgb(255 255 255 / 0.045), rgb(255 255 255 / 0.015));
+		radial-gradient(circle at 12px 13px, rgb(146 167 161 / 0.55) 0 1.8px, transparent 2.2px),
+		radial-gradient(circle at 19px 13px, rgb(146 167 161 / 0.4) 0 1.8px, transparent 2.2px),
+		radial-gradient(circle at 26px 13px, rgb(146 167 161 / 0.28) 0 1.8px, transparent 2.2px),
+		var(--pg-node-bg);
 }
 
 /* Off-screen bubbles skip layout/paint entirely — streaming reflows and
@@ -1367,43 +1411,38 @@ textarea.pg-form-input {
 	/* reading measure: ~40 CJK chars/line beats 88% on wide screens; 1.75
 	 * leading + a hair of tracking keeps long Chinese replies breathable */
 	max-width: min(88%, 40em);
-	/* the same top-sheen material the node cards get — bubbles read as glass
-	 * tiles under the lamp, not flat chips pasted on the background */
-	background: linear-gradient(180deg, #242a38, var(--pg-node-bg) 78%);
+	/* a printed plate — opaque, flat, engraved edge; fully occludes anything
+	 * under the text */
+	background: var(--pg-node-bg);
 	border: 1px solid var(--pg-border);
-	border-radius: 14px 14px 14px 5px;
+	border-radius: 10px 10px 10px 3px;
 	padding: 12px 16px;
 	font-size: 13.5px;
 	line-height: 1.75;
 	letter-spacing: 0.01em;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
-	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0.05),
-		0 1px 2px rgb(0 0 0 / 0.35),
-		0 8px 22px rgb(0 0 0 / 0.26);
+	box-shadow: 0 1px 0 rgb(0 0 0 / 0.4);
 }
 
 .pg-chat-bubble-user {
-	/* saturated brand gradient + a lit top bevel + a doubled same-hue aura —
-	 * user messages pop against assistant cards instead of matching their murk */
-	background: linear-gradient(165deg, #4d93f8, #2a5fe0);
-	border-color: rgb(255 255 255 / 0.18);
-	border-radius: 14px 14px 5px 14px;
-	color: #fff;
-	box-shadow:
-		inset 0 1px 0 rgb(255 255 255 / 0.2),
-		0 2px 4px rgb(0 0 0 / 0.32),
-		0 8px 22px rgb(42 99 234 / 0.38);
+	/* YOUR words are stamped in correction ink — the surveyor's hand fills the
+	 * bubble; foam on pressed magenta (5.85:1) */
+	background: var(--pg-ink-deep);
+	border-color: rgb(0 0 0 / 0.35);
+	border-radius: 10px 10px 3px 10px;
+	color: var(--pg-fg);
+	box-shadow: 0 1px 0 rgb(0 0 0 / 0.4);
 }
 
-/* tool-call count: a quiet pill from the same family as the chips */
+/* tool-call count: a quiet printed plate from the same family as the chips */
 .pg-chat-tools {
+	font-family: var(--pg-mono);
 	font-size: 11px;
 	color: var(--pg-fg-dim);
-	border: 1px solid rgb(255 255 255 / 0.08);
-	background: rgb(255 255 255 / 0.03);
-	border-radius: 999px;
+	border: 1px solid var(--pg-border);
+	background: var(--pg-node-bg);
+	border-radius: 3px;
 	padding: 1px 8px;
 	font-variant-numeric: tabular-nums;
 }
@@ -1416,7 +1455,7 @@ textarea.pg-form-input {
 	margin-left: 2px;
 	vertical-align: -2px;
 	background: var(--pg-green);
-	border-radius: 2px;
+	border-radius: 1px;
 	/* a pen nib breathing, not a terminal block hard-blinking */
 	animation: pg-chat-breathe 1.1s ease-in-out infinite;
 }
@@ -1434,7 +1473,7 @@ textarea.pg-form-input {
 	max-width: 40em; /* the same right-edge rhythm as the bubbles beside it */
 	border: 1px solid var(--pg-border);
 	background: var(--pg-node-bg);
-	border-radius: var(--pg-radius-lg);
+	border-radius: var(--pg-radius);
 	padding: 12px 16px;
 	display: flex;
 	flex-direction: column;
@@ -1451,13 +1490,14 @@ textarea.pg-form-input {
 	align-items: center;
 	gap: 7px;
 }
+/* the status mark is a STAMPED SQUARE (hue never the sole carrier — shape
+ * says "state" even for color-blind eyes) */
 .pg-chat-status::before {
 	content: "";
 	width: 7px;
 	height: 7px;
-	border-radius: 50%;
+	border-radius: 1px;
 	background: currentcolor;
-	box-shadow: 0 0 8px currentcolor;
 }
 
 .pg-chat-status-planning {
@@ -1495,26 +1535,23 @@ textarea.pg-form-input {
 	}
 }
 
-/* 回到最新 — appears over the chat list once the user scrolls away from
- * the streaming tail; re-following is one click, not a scroll hunt */
-/* 回到最新 — a frosted badge floating over the stream: present, not blocking */
+/* 回到最新 — a small printed plate floating over the stream: present, not
+ * blocking; opaque, no blur */
 .pg-scroll-bottom {
 	position: absolute;
 	right: 18px;
 	bottom: 14px;
 	z-index: 5;
-	background: rgb(22 26 34 / 0.55);
-	backdrop-filter: blur(8px);
-	border-color: rgb(255 255 255 / 0.16);
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1), 0 4px 16px rgb(0 0 0 / 0.5);
+	background: var(--pg-panel-bg);
+	border-color: var(--pg-border-strong);
+	box-shadow: var(--pg-shadow);
 	animation: pg-pop-in 160ms var(--pg-ease-out);
 }
-/* prefixed to (0,4,0) so the generic ghost hover can't paint mist over glass */
+/* prefixed to (0,4,0) so the generic ghost hover can't override the plate */
 .pg-btn-ghost.pg-scroll-bottom:hover:not(:disabled) {
 	filter: none;
-	background: rgb(30 35 45 / 0.6);
-	border-color: rgb(255 255 255 / 0.26);
-	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.12), 0 6px 18px rgb(0 0 0 / 0.55);
+	background: #16262a;
+	border-color: rgb(146 167 161 / 0.4);
 }
 
 @keyframes pg-pop-in {
@@ -1547,12 +1584,12 @@ textarea.pg-form-input {
 	font-size: 10.5px;
 }
 
-/* ⚡ toggle active state (prompt bar) */
+/* ⚡ toggle active state (prompt bar) — armed in correction ink */
 .pg-bolt-on {
-	color: var(--pg-blue) !important;
-	border-color: rgb(77 155 255 / 0.55) !important;
-	background: rgb(77 155 255 / 0.12) !important;
-	box-shadow: 0 0 0 3px rgb(77 155 255 / 0.1);
+	color: var(--pg-ink) !important;
+	border-color: rgb(232 84 212 / 0.55) !important;
+	background: rgb(232 84 212 / 0.12) !important;
+	box-shadow: 0 0 0 3px rgb(232 84 212 / 0.1);
 	/* a one-shot 8% rebound — the switch's "click" */
 	animation: pg-bolt-pop 220ms var(--pg-ease-out);
 }
@@ -1570,26 +1607,74 @@ textarea.pg-form-input {
 .pg-orch-bar select {
 	box-shadow:
 		inset 0 1px 2px rgb(0 0 0 / 0.35),
-		inset 0 -1px 0 rgb(255 255 255 / 0.03),
-		0 0 0 1px rgb(77 155 255 / 0),
-		0 0 0 4px rgb(77 155 255 / 0),
-		0 2px 12px rgb(77 155 255 / 0);
+		inset 0 -1px 0 rgb(233 242 237 / 0.03),
+		0 0 0 1px rgb(232 84 212 / 0),
+		0 0 0 4px rgb(232 84 212 / 0);
 }
 .pg-form-input:focus,
 .pg-orch-bar select:focus {
-	border-color: rgb(77 155 255 / 0.6);
+	border-color: rgb(232 84 212 / 0.6);
 	box-shadow:
 		inset 0 1px 2px rgb(0 0 0 / 0.35),
-		inset 0 -1px 0 rgb(255 255 255 / 0.03),
-		0 0 0 1px rgb(77 155 255 / 0.28),
-		0 0 0 4px rgb(77 155 255 / 0.1),
-		0 2px 12px rgb(77 155 255 / 0.12);
+		inset 0 -1px 0 rgb(233 242 237 / 0.03),
+		0 0 0 1px rgb(232 84 212 / 0.28),
+		0 0 0 4px rgb(232 84 212 / 0.12);
 }
 
 /* shared mount fade (nodes.css references this for node/edge entrances) */
 @keyframes pg-fade-in {
 	from {
 		opacity: 0;
+	}
+}
+
+/* ============================================================================
+ * THE ONE MOMENT — the route being inked, and the sheet powering on.
+ * Everything else stays still; a settled run falls silent (the stillness IS
+ * the completion cue). Paid for by deletions: the logo breathe is gone,
+ * entrance fades stay 200ms opacity-only.
+ * ========================================================================== */
+
+/* A live edge DRAWS itself once, then MARCHES: the expedition's track being
+ * inked onto the sheet. (0,3,0) out-ranks React Flow's stock .animated dash
+ * rule (0,2,1), so our dasharray + both animations own the element. */
+.react-flow__edge.pg-edge-live .react-flow__edge-path {
+	stroke: var(--pg-blue);
+	stroke-width: 2.5;
+	stroke-dasharray: 7 5;
+	animation:
+		pg-route-draw 650ms var(--pg-ease-out) backwards,
+		pg-route-march 1.5s linear 650ms infinite;
+}
+@keyframes pg-route-draw {
+	from {
+		stroke-dashoffset: 160;
+	}
+}
+@keyframes pg-route-march {
+	to {
+		stroke-dashoffset: 24;
+	}
+}
+
+/* THE POWERED TELL (graft from the loom direction, transposed to brightness
+ * only — no crawling): while any node runs, the chat|graph engraved seam
+ * brightens on the same cadence as the marching route, and the header's
+ * scale bar goes to full ink — one powered document. The direct-child
+ * combinator scopes the seam tell to the live tab's chat|side boundary; a
+ * :has()-less browser simply keeps the resting seam. */
+.pg-main > .pg-pgroup:has(.pg-node.pg-status-running) > .pg-rh::after {
+	background: rgb(146 167 161 / 0.32);
+	animation: pg-seam-breathe 1.5s ease-in-out infinite;
+}
+.pg-app:has(.pg-node.pg-status-running) .pg-header::after {
+	--pg-scale-a: rgb(232 84 212 / 1);
+	--pg-scale-b: rgb(232 84 212 / 0.3);
+	animation: pg-seam-breathe 1.5s ease-in-out infinite;
+}
+@keyframes pg-seam-breathe {
+	50% {
+		opacity: 0.55;
 	}
 }
 

@@ -414,3 +414,60 @@ describe("PiPlanner", () => {
 		expect(outcome.ok).toBe(true);
 	});
 });
+
+// ============================================================================
+// extractGraph: capability-profile normalization (节点档案)
+// ============================================================================
+
+describe("extractGraph capability-profile normalization", () => {
+	it("keeps in-range numeric knobs (clamped), drops out-of-range junk", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{
+						id: "n1",
+						task: "a",
+						minOutputChars: 20,
+						timeoutMs: 30_000,
+						outputCapBytes: 4096,
+						minOutputCharsJunk: true,
+					},
+					{ id: "n2", task: "b", minOutputChars: -5, timeoutMs: 1e12, outputCapBytes: 2.5 },
+				],
+				edges: [{ source: "n1", target: "n2" }],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			expect(out.graph.nodes[0]).toMatchObject({ minOutputChars: 20, timeoutMs: 30_000, outputCapBytes: 4096 });
+			// Clamped into range instead of failing validation (the retry is
+			// reserved for structural errors).
+			expect(out.graph.nodes[1]).toMatchObject({ minOutputChars: 0, timeoutMs: 86_400_000, outputCapBytes: 3 });
+		}
+	});
+
+	it("keeps safe workdir and tool lists, drops unsafe entries", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{
+						id: "n1",
+						task: "a",
+						workdir: "nodes/dev",
+						tools: ["read", "grep", "bad tool", "a,b"],
+						excludeTools: ["bash"],
+					},
+					{ id: "n2", task: "b", workdir: "../escape", tools: [] },
+				],
+				edges: [{ source: "n1", target: "n2" }],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			expect(out.graph.nodes[0]).toMatchObject({ workdir: "nodes/dev", tools: ["read", "grep"], excludeTools: ["bash"] });
+			// Unsafe workdir dropped; empty tools list treated as absent.
+			expect(out.graph.nodes[1]!.workdir).toBeUndefined();
+			expect(out.graph.nodes[1]!.tools).toBeUndefined();
+		}
+	});
+});

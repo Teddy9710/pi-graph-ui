@@ -65,6 +65,7 @@ DEEPSEEK_API_KEY=sk-...
 
 ```bash
 node scripts/dev.mjs        # 同时起 :8787 桥接 + :5173 前端，Ctrl+C 全退
+node scripts/stop.mjs       # 兜底清理：dev.mjs 被硬杀后残留的 server/vite（pidfile + 端口扫描）
 ```
 
 **分开两个终端**（需要单独看日志时）：
@@ -83,7 +84,7 @@ cd apps/web && pnpm dev
 ## 验证 / 测试
 
 ```bash
-pnpm -r test         # 188 个单测（shared 79 + server 109）
+pnpm -r test         # 214 个单测（shared 87 + server 127）
 pnpm -r typecheck    # 全仓类型检查（web 无单测，typecheck 即门禁）
 
 # 以下 e2e 需要桥接服务在跑（dev.mjs）且模型 key 可用，会真实调 LLM：
@@ -92,6 +93,8 @@ node scripts/e2e-orch.mjs             # 编排 e2e：2 节点链注入/归档/�
 ABORT=1 node scripts/e2e-orch.mjs     # 中止路径 + 无孤儿进程检查
 PLAN=1  node scripts/e2e-orch.mjs     # AI 规划 → 同 runId 执行 → 全节点完成
 CHAT=1  node scripts/e2e-orch.mjs     # PLAN 全套 + 结果注入主会话 + 整理回答 + hello 重放
+node scripts/e2e-parallel.mjs         # 多路并行 e2e：4 分支扇出 + AND-join 汇聚，断言真并发（窗口重叠 + 用时缩短）
+PLAN=1  node scripts/e2e-parallel.mjs # 多路并行自动编排：AI 拆图成并行 DAG → 并行执行 → 复用同一套并发断言
 node scripts/e2e-reset.mjs            # 新任务重置流：图清空后可继续对话
 ```
 
@@ -132,8 +135,12 @@ browser → server：
 | `ORCH_MAX_PARALLEL` | 编排节点并行上限 | `4` |
 | `ORCH_MODEL` | 编排节点默认模型 | `deepseek/deepseek-chat` |
 | `ORCH_NODE_TIMEOUT_MS` | 单节点超时 | `600000`（10min） |
+| `ORCH_MIN_OUTPUT_CHARS` | 节点质量门：输出短于此值触发原题重跑一次（两答取长） | `0`（关闭） |
+| `ORCH_NODE_RETRY` | 质量门违规重跑开关（`0` 关闭；空输出则直接判失败） | 开启 |
 | `ORCH_PLANNER_MODEL` | 规划器模型 | = `ORCH_MODEL` |
 | `ORCH_PLAN_TIMEOUT_MS` | 规划超时 | `180000`（3min） |
+
+节点级覆盖（`NodeDef` 可选字段，编辑器 JSON 可直接携带）：`minOutputChars` / `timeoutMs` / `outputCapBytes`（注入下游的字节预算）/ `workdir`（子进程独立工作目录，并行节点互不踩文件）/ `tools` / `excludeTools`（工具白/黑名单）。详见 `apps/server/README.md`。
 
 ## 已知限制 / Roadmap
 
