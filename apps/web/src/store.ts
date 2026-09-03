@@ -43,8 +43,10 @@ interface AppState {
 	selectedNodeId: string | null;
 	eventCount: number;
 	lastEventAt: number | null;
-	/** History browsing: when set, the canvas renders this instead of live. */
-	history: { meta: SessionMeta; graph: Graph; loading: boolean } | null;
+	/** History browsing: when set, the page renders this archive instead of
+	 *  live — the graph on the side canvas AND the folded session's transcript
+	 *  (read-only) in the chat column. */
+	history: { meta: SessionMeta; graph: Graph; session: SessionState; loading: boolean } | null;
 	historyOpen: boolean;
 	sessions: SessionMeta[];
 	/** Last sessions fetch failed (server down / blocked) — the drawer says so. */
@@ -177,6 +179,7 @@ export const useStore = create<AppState>((set, get) => ({
 			history: {
 				meta: { id, startedAt: 0, endedAt: 0, eventCount: 0, firstUserText: null, outputTokens: 0 },
 				graph: { nodes: [], edges: [] },
+				session: initState(),
 				loading: true,
 			},
 			historyError: null,
@@ -202,6 +205,9 @@ export const useStore = create<AppState>((set, get) => ({
 						outputTokens: hist.usageTotal.output,
 					},
 					graph: deriveGraph(hist),
+					// The folded session feeds the chat column's read-only
+					// transcript — same pure fold as live, frozen at archive.
+					session: hist,
 					loading: false,
 				},
 				selectedNodeId: null,

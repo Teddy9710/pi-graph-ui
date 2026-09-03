@@ -44,6 +44,10 @@ export const MAX_LABEL_CHARS = 100;
 export const MAX_PLAN_EDGES = 512;
 /** Goals travel over stdin RPC (no argv limit) but are still capped. */
 export const MAX_GOAL_CHARS = 4000;
+/** Planner-proposed gates are RISK checkpoints, not decoration — cap them so
+ *  an over-cautious model can't degrade an unattended auto-run into a
+ *  click-through. The prompt asks for ≤ this many; extractGraph enforces it. */
+export const MAX_PLANNER_GATES = 3;
 
 export type PlanOutcome = { ok: true; graph: GraphDef } | { ok: false; error: string };
 
@@ -60,6 +64,7 @@ export function buildPlanPrompt(goal: string, feedback?: string): string {
 - edges 描述数据依赖：当 b 需要 a 的产出时连 a->b。每条边必须带一个 type，只能从这六个里选：input（输入：a 的产出是 b 的直接加工材料）、context（参考：a 的产出仅供 b 作背景参考）、review（审校：b 检查/评价 a 的产出）、revise（修订：b 按上游反馈修改自己的产出）、aggregate（汇总：b 把多个上游聚合成整体结论）、decide（决策：b 依据 a 的产出做选择/判断）；拿不准就用 input。label 可选且仅当 type 说不清依赖原因时才填，不超过 20 字，如「原始数据」「逐条核对」。不许环、不许自环。节点间关系要尽量显式表达为边；只有真正互不依赖的任务才作为独立根节点并行。
 - 每个节点的 task 必须自包含：执行该节点的 agent 看不到整体目标，只看到自己的 task 与上游节点的输出。
 - 可选字段 model（"provider/model"）与 agent（persona 名）通常省略，除非目标明确需要。
+- 风险门控（可选）：当且仅当某节点的动作不可逆或影响外部环境（写/删文件、执行有实际影响的命令、对外发布/发送、产生费用）时，把它的下游**改接成经过**一个人工门控节点：风险节点 -> 门控 -> 下游（下游的输入边必须**从门控发出**，不得直连风险节点），门控形如 {"id": "g1", "label": "放行审校", "task": "写明要人工核对什么、满足什么条件才放行", "gate": true}。门控不执行任何动作：运行到此挂起，人工批准后下游才继续（下游的输入=批准备注），驳回则下游全部跳过。没有下游的风险动作不加门控。纯调研/生成/汇总类目标**不要**加门控；整张图最多 ${MAX_PLANNER_GATES} 个；门控节点不要带 model/agent 等执行字段。
 
 用户目标：
 ${goal}`;
@@ -99,14 +104,18 @@ export function extractGraph(text: string): PlanOutcome {
 	// Normalize: keep only known fields with the right types, every string
 	// length-capped (planner output is untrusted). Malformed entries pass
 	// through so validateGraph (total) reports them by rule.
+	let plannerGates = 0;
 	const nodes = raw.nodes.map((n) => {
 		if (typeof n !== "object" || n === null) return n;
 		const r = n as Record<string, unknown>;
-		// `gate` (HITL 门控) is deliberately NOT carried out of a plan: the
-		// whitelist below drops it like every other unknown field, because a
-		// gate is a human-placed editor construct — a model that learned to
-		// emit one could suspend an unattended run indefinitely.
-		const out: Record<string, string | number | string[]> = {};
+		// `gate` (风险门控): the planner MAY propose a checkpoint after a
+		// risky node. It rides as the bare boolean — a string/1 "gate" is NOT
+		// a gate — and only the FIRST MAX_PLANNER_GATES survive; the rest are
+		// demoted to plain nodes (they still execute their task).
+		const isGate = r.gate === true;
+		const keepGate = isGate && plannerGates < MAX_PLANNER_GATES;
+		if (isGate) plannerGates++;
+		const out: Record<string, string | number | string[] | boolean> = {};
 		if (typeof r.id === "string") out.id = r.id.slice(0, 64);
 		if (typeof r.task === "string") out.task = r.task.slice(0, MAX_TASK_CHARS);
 		// Label rides in prompt section headers downstream (buildSynthPrompt
@@ -115,6 +124,13 @@ export function extractGraph(text: string): PlanOutcome {
 		if (typeof r.label === "string") {
 			const rawLabel = r.label.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
 			if (rawLabel) out.label = rawLabel.slice(0, MAX_LABEL_CHARS);
+		}
+		if (keepGate) {
+			// A gate never executes — every exec-config field is dropped (not
+			// failed): validateGraph would reject the mix and burn the single
+			// planner retry on config the node can never use.
+			out.gate = true;
+			return out;
 		}
 		if (typeof r.model === "string" && r.model.trim()) out.model = r.model.slice(0, 128);
 		if (typeof r.agent === "string" && r.agent.trim()) out.agent = r.agent.slice(0, 64);
@@ -169,6 +185,26 @@ export function extractGraph(text: string): PlanOutcome {
 		nodes: nodes as GraphDef["nodes"],
 		edges: edges as GraphDef["edges"],
 	};
+	// A planner gate with no out-edge gates NOTHING: AND-join only makes a
+	// node wait on its own upstreams, so the risky action's real downstream
+	// (still wired straight to it) runs on while the run parks on a decision
+	// that changes nothing. The prompt demands 风险→门控→下游 rewiring; drop
+	// checkpoints the model wired as dead ends — the node AND its in-edges —
+	// rather than hang an unattended auto-run on them. (Manual editor gates
+	// may be terminal checkpoints by design; this applies to planner output
+	// only. A demotion would be wrong: the model wrote an audit task for a
+	// human, not something pi should execute.)
+	{
+		const sources = new Set<string>();
+		for (const e of graph.edges) sources.add(e.source);
+		const deadGates = new Set(
+			graph.nodes.filter((n) => n.gate === true && !sources.has(n.id)).map((n) => n.id),
+		);
+		if (deadGates.size > 0) {
+			graph.nodes = graph.nodes.filter((n) => !deadGates.has(n.id));
+			graph.edges = graph.edges.filter((e) => !deadGates.has(e.target));
+		}
+	}
 	const issues = validateGraph(graph);
 	if (issues.length > 0) {
 		const shown = issues

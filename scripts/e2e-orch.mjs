@@ -209,8 +209,10 @@ ws.onmessage = (msg) => {
 	if (e.type === "node_completed") console.log(`  [node] ${e.nodeId} ok (${e.durationMs}ms)`);
 	if (e.type === "node_failed") console.log(`  [node] ${e.nodeId} FAILED: ${e.error}`);
 	if (e.type === "node_skipped") console.log(`  [node] ${e.nodeId} skipped (${e.reason})`);
+	if (e.type === "node_awaiting") console.log(`  [gate] ${e.nodeId} awaiting → auto-approving (smoke)`);
 	if (e.type === "run_finished") {
 		clearTimeout(timeout);
+		if (gateTimer) clearInterval(gateTimer);
 		if (!CHAT) {
 			ws.close();
 			finish(e).catch((err) => fail(err.message));
@@ -226,6 +228,20 @@ ws.onmessage = (msg) => {
 // Orphan-check baseline: every pi process alive RIGHT BEFORE the run is
 // pre-existing (main bridge, other sessions) and excluded from the leak diff.
 const baselinePids = listPiPids();
+
+// The planner MAY propose a risk gate (风险门控) — this smoke's GOAL is benign
+// so one shouldn't appear, but a parked gate would time the run out. Approve
+// any gate that does appear; the FULL gate wire contract lives in e2e-gate.mjs.
+let gateTimer = null;
+if (PLAN || CHAT) {
+	const approved = new Set();
+	gateTimer = setInterval(() => {
+		const awaiting = events.find((e) => e.type === "node_awaiting" && !approved.has(e.nodeId));
+		if (!awaiting) return;
+		approved.add(awaiting.nodeId);
+		ws.send(JSON.stringify({ type: "approve_node", runId: awaiting.runId, nodeId: awaiting.nodeId, approved: true, note: "e2e 冒烟自动放行" }));
+	}, 50);
+}
 
 if (PLAN || CHAT) {
 	ws.send(JSON.stringify({ type: "plan_run", goal: GOAL, chat: CHAT }));
@@ -390,9 +406,20 @@ function chatWait() {
 }
 
 async function chatAssertions() {
-	// (a) the injected sentinel carries the FULL set of completed nodes.
-	if (injectedNodeCount !== chatFin.ok) {
-		fail(`injected meta nodeCount=${injectedNodeCount} but run_finished.ok=${chatFin.ok}`);
+	// (a) the injected sentinel carries the FULL set of executor-completed
+	// nodes. Gates never emit node_completed (awaiting→decided only), so both
+	// sides must EXCLUDE them — comparing against run_finished.ok would count
+	// approved gates and spuriously fail whenever the planner proposes one
+	// (the 4/4-chip vs 3-node-injection split is the documented GATE-19
+	// contract, not a defect).
+	const completed = events.filter((e) => e.type === "node_completed").length;
+	if (injectedNodeCount !== completed) {
+		fail(`injected meta nodeCount=${injectedNodeCount} but node_completed=${completed}`);
+	}
+	// (a2) ok still counts approved gates — pin the arithmetic end to end.
+	const approvedGates = events.filter((e) => e.type === "node_decided" && e.approved === true).length;
+	if (chatFin.ok !== completed + approvedGates) {
+		fail(`run_finished.ok=${chatFin.ok} but node_completed=${completed} + approved gates=${approvedGates}`);
 	}
 	// (b) the session agent produced a non-empty integrated answer.
 	if (!assistantTextAfterInjection) fail("no assistant text after injection");

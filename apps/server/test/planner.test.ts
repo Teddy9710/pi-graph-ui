@@ -4,6 +4,7 @@ import {
 	buildPlanPrompt,
 	extractGraph,
 	MAX_PLAN_NODES,
+	MAX_PLANNER_GATES,
 	PiPlanner,
 	type PlanOutcome,
 	type PlannerBridge,
@@ -202,6 +203,164 @@ describe("extractGraph", () => {
 });
 
 // ============================================================================
+// ============================================================================
+// extractGraph: planner-proposed risk gates (风险门控)
+// ============================================================================
+
+describe("extractGraph planner gates", () => {
+	it("keeps a planner gate as the bare boolean and strips ALL exec config", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{
+						id: "n1",
+						label: "写入文件",
+						task: "把结果写入 out.txt",
+						gate: false, // plain node explicitly not a gate
+					},
+					{
+						id: "g1",
+						label: "放行审校",
+						task: "核对文件内容与预期一致才放行",
+						gate: true,
+						// exec config on a gate must vanish, not fail validation
+						model: "deepseek/deepseek-chat",
+						agent: "researcher",
+						timeoutMs: 5000,
+						tools: ["bash"],
+					},
+					{ id: "n2", label: "读回核验", task: "读回 out.txt 并汇报" },
+				],
+				edges: [
+					{ source: "n1", target: "g1", type: "input" },
+					{ source: "g1", target: "n2", type: "input" },
+				],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		const [n1, g1] = out.ok ? out.graph.nodes : [];
+		expect(n1.gate).toBeUndefined();
+		expect(g1).toEqual({ id: "g1", label: "放行审校", task: "核对文件内容与预期一致才放行", gate: true });
+	});
+
+	it("treats a non-boolean gate as absent (a string/1 'gate' is not a gate)", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{ id: "n1", task: "t", gate: "true" },
+					{ id: "n2", task: "t", gate: 1 },
+				],
+				edges: [],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.graph.nodes.every((n) => n.gate === undefined)).toBe(true);
+	});
+
+	it(`demotes gates beyond MAX_PLANNER_GATES (${MAX_PLANNER_GATES}) to plain nodes, keeping the FIRST ones`, () => {
+		// Each gate dominates its own downstream so none is a dead end —
+		// this test pins the CAP, not the dominance drop.
+		const gates = Array.from({ length: MAX_PLANNER_GATES + 2 }, (_, i) => ({
+			id: `g${i + 1}`,
+			task: `审校要点 ${i + 1}`,
+			gate: true,
+		}));
+		const downs = Array.from({ length: MAX_PLANNER_GATES + 2 }, (_, i) => ({
+			id: `d${i + 1}`,
+			task: `下游 ${i + 1}`,
+		}));
+		const edges = gates.map((g, i) => ({ source: g.id, target: downs[i]!.id, type: "input" }));
+		const out = extractGraph(JSON.stringify({ nodes: [...gates, ...downs], edges }));
+		expect(out.ok).toBe(true);
+		if (!out.ok) return;
+		const gateFlags = out.graph.nodes.filter((n) => n.id.startsWith("g")).map((n) => n.gate === true);
+		expect(gateFlags.filter(Boolean)).toHaveLength(MAX_PLANNER_GATES);
+		// FIRST gates ride through in order; the tail is demoted (still executes).
+		expect(gateFlags).toEqual([true, true, true, false, false]);
+	});
+
+	it("an empty-task gate still surfaces as a validation issue (no silent defaults)", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{ id: "g1", task: " ", gate: true },
+					{ id: "n2", task: "下游" },
+				],
+				edges: [{ source: "g1", target: "n2", type: "input" }],
+			}),
+		);
+		expect(out.ok).toBe(false);
+		if (!out.ok) expect(out.error).toContain("任务 prompt 为空");
+	});
+
+	it("DROPS a dead-end gate (no out-edge) — it would park the run without gating anything", () => {
+		// Parallel-checkpoint shape the prompt now forbids: risky->gate AND
+		// risky->downstream. AND-join lets the downstream run while the gate
+		// awaits, so approval changes nothing — drop the gate (and its in-edge),
+		// keep the data edge.
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{ id: "n1", task: "写入文件" },
+					{ id: "g1", task: "核对写入", gate: true },
+					{ id: "n2", task: "读回汇报" },
+				],
+				edges: [
+					{ source: "n1", target: "g1", type: "input" },
+					{ source: "n1", target: "n2", type: "input" },
+				],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		if (!out.ok) return;
+		expect(out.graph.nodes.map((n) => n.id)).toEqual(["n1", "n2"]);
+		expect(out.graph.edges).toEqual([{ id: "n1->n2", source: "n1", target: "n2", type: "input" }]);
+	});
+
+	it("keeps a CHAIN gate (risk -> gate -> downstream) — the prompt's required shape", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{ id: "n1", task: "写入文件" },
+					{ id: "g1", task: "核对写入", gate: true },
+					{ id: "n2", task: "读回汇报" },
+				],
+				edges: [
+					{ source: "n1", target: "g1", type: "input" },
+					{ source: "g1", target: "n2", type: "input" },
+				],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		if (!out.ok) return;
+		expect(out.graph.nodes.find((n) => n.id === "g1")?.gate).toBe(true);
+		expect(out.graph.edges).toHaveLength(2);
+	});
+
+	it("drops only the dead-end gate when a dominating sibling survives", () => {
+		const out = extractGraph(
+			JSON.stringify({
+				nodes: [
+					{ id: "n1", task: "写入 A" },
+					{ id: "n2", task: "写入 B" },
+					{ id: "g1", task: "核对 A", gate: true },
+					{ id: "g2", task: "核对 B", gate: true },
+					{ id: "n3", task: "汇总" },
+				],
+				edges: [
+					{ source: "n1", target: "g1", type: "input" }, // dead end
+					{ source: "n2", target: "g2", type: "input" },
+					{ source: "g2", target: "n3", type: "input" },
+				],
+			}),
+		);
+		expect(out.ok).toBe(true);
+		if (!out.ok) return;
+		expect(out.graph.nodes.map((n) => n.id)).toEqual(["n1", "n2", "g2", "n3"]);
+		expect(out.graph.edges.map((e) => e.id)).toEqual(["n2->g2", "g2->n3"]);
+	});
+});
+
 // buildPlanPrompt
 // ============================================================================
 
@@ -226,6 +385,23 @@ describe("buildPlanPrompt", () => {
 		const p = buildPlanPrompt("目标", "JSON 解析失败: x");
 		expect(p).toContain("无法使用");
 		expect(p).toContain("JSON 解析失败: x");
+	});
+
+	it("teaches risk gates: rewired 风险→门控→下游, capped, never for benign goals", () => {
+		const p = buildPlanPrompt("目标");
+		// the JSON shape the planner must emit for a gate
+		expect(p).toContain('"gate": true');
+		// placement: the CHAIN — downstream input comes FROM the gate, never
+		// wired straight to the risky node (a dead-end/parallel gate gates
+		// nothing under AND-join and gets dropped in extractGraph)
+		expect(p).toContain("风险节点 -> 门控 -> 下游");
+		expect(p).toContain("从门控发出");
+		expect(p).toContain("没有下游的风险动作不加门控");
+		// semantics: 挂起等人工
+		expect(p).toContain("挂起");
+		// benign goals stay gate-free; hard cap matches extractGraph
+		expect(p).toContain("不要**加门控");
+		expect(p).toContain(`最多 ${MAX_PLANNER_GATES} 个`);
 	});
 });
 

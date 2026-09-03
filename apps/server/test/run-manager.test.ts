@@ -558,6 +558,48 @@ describe("RunManager chat hook (onChatRunComplete)", () => {
 		expect(manager.active).toBe(false);
 	});
 
+	it("a decided gate counts toward ok but never enters nodes (chip ≠ injection is by design)", async () => {
+		const planner = new FakePlanner();
+		const results: ChatRunResult[] = [];
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => ok(`结果:${call.node.id}`)),
+			planner,
+			store,
+			onChatRunComplete: (r) => results.push(r),
+		});
+		const gated: GraphDef = {
+			name: "chat-plan-gated",
+			nodes: [
+				{ id: "n1", task: "写入", label: "写入文件" },
+				{ id: "g1", task: "审", label: "放行审校", gate: true },
+				{ id: "n2", task: "读回", label: "读回文件" },
+			],
+			edges: [
+				{ id: "n1->g1", source: "n1", target: "g1" },
+				{ id: "g1->n2", source: "g1", target: "n2" },
+			],
+		};
+		const started = manager.startPlanned("目标", { chat: true });
+		await vi.advanceTimersByTimeAsync(0);
+		planner.settle({ ok: true, graph: gated });
+		await vi.advanceTimersByTimeAsync(0);
+		// The run is parked on the gate — no terminal event, no hook yet.
+		expect(results).toHaveLength(0);
+		expect(manager.active).toBe(true);
+		expect(manager.decideNode(started.ok ? started.runId : "", "g1", true, "已核对")).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(results).toHaveLength(1);
+		// Gates emit node_awaiting/node_decided, never node_completed — so the
+		// injection sees only the executor's two outputs (the note reaches the
+		// synthesis transitively, inside n2's `### from g1` section), while the
+		// run summary counts all three (decided gate = ok). GATE-19 contract.
+		expect(results[0]!.nodes).toEqual([
+			{ nodeId: "n1", label: "写入文件", text: "结果:n1" },
+			{ nodeId: "n2", label: "读回文件", text: "结果:n2" },
+		]);
+		expect(results[0]!.nodes.some((n) => n.nodeId === "g1")).toBe(false);
+	});
+
 	it("never fires without the chat flag", async () => {
 		const planner = new FakePlanner();
 		const results: ChatRunResult[] = [];

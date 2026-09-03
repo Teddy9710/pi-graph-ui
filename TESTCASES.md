@@ -18,7 +18,7 @@
 node scripts/dev.mjs          # 启动 dev 栈：server :8787 / web :5173（Ctrl+C 全停）
 node scripts/stop.mjs         # 兜底清理：dev.mjs 被硬杀后残留的 server/vite（pidfile + 端口扫描）
 # 浏览器打开 http://localhost:5173
-pnpm -r test                  # 全部单测（shared 95 + server 137）
+pnpm -r test                  # 全部单测（shared 95 + server 142）
 pnpm -r typecheck             # 三个包类型检查
 node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1（可选 ABORT=1）
 node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 → 批准注入下游 → 归档/重放/孤儿
@@ -29,8 +29,8 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | 层 | 内容 | 状态 |
 |---|---|---|
 | shared 单测 95 | chat.test 15（时间线合并/sentinel 识别）、orchestration.test 59（validateGraph 含节点能力档案与门控规则/assemblePrompt/buildSynthPrompt/capBytes 截断/label 防伪造/fold attempts/门控事件折叠与长效计数）、fold 13、graph 8 | ✅ 全绿 |
-| server 单测 137 | run-manager 25（含 chat 钩子 6 条 + 门控备注防伪造）、planner 25（label 归一 + 能力档案归一 + gate 剥离）、orchestrator 22（含 attempts/capBytes/门控挂起·决策·中止·槽位旁路）、pi-node-executor 14（质量门 salvage/超时/workdir/工具档案）、session-store/snake/bridge 等 | ✅ 全绿 |
-| e2e | chain（注入/归档/重放）、PLAN（规划全流程）、CHAT（sentinel 注入+整合回复+hello 重放）、**GATE（挂起→4 类非法决策仅回请求方→批准备注注入下游→归档/重放）**；ABORT 模式孤儿检查为 **PID 集合快照差**（基线之前存在的进程不计泄漏，PowerShell 查询失败即报错不静默通过） | ✅ 四模式绿 |
+| server 单测 142 | run-manager 25（含 chat 钩子 6 条 + 门控备注防伪造）、planner 30（label 归一 + 能力档案归一 + 风险门控提取/降级/防伪）、orchestrator 22（含 attempts/capBytes/门控挂起·决策·中止·槽位旁路）、pi-node-executor 14（质量门 salvage/超时/workdir/工具档案）、session-store/snake/bridge 等 | ✅ 全绿 |
+| e2e | chain（注入/归档/重放）、PLAN（规划全流程；**规划器若自提门控自动放行**，门控全契约归 GATE 模式）、CHAT（sentinel 注入+整合回复+hello 重放）、**GATE（挂起→4 类非法决策仅回请求方→批准备注注入下游→归档/重放）**；ABORT 模式孤儿检查为 **PID 集合快照差**（基线之前存在的进程不计泄漏，PowerShell 查询失败即报错不静默通过） | ✅ 四模式绿 |
 | web | 仅 typecheck（无组件测试）→ 本文 MC-CHAT / MC-BAR / MC-LAY 的手测用例即为 Web 层主要防线 | ⚠️ 靠手测 |
 
 ---
@@ -187,14 +187,14 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 
 | 编号 | P | 类型 | 前置 | 步骤 | 预期 | 代码 |
 |---|---|---|---|---|---|---|
-| HIST-01 | P0 | 手测 | 抽屉已有会话 | 点「历史」→点某会话 | ①主区回落为冻结图（key="history"，graphOverride）；②ChatPanel 完全卸载；③**未选中节点时右列整列隐藏**——冻结图占满全宽；点击冻结图节点后右列按需出现详情（× 关闭回到全宽）；④图为归档快照不随实时更新 | App.tsx 实时页布局, store.ts:114-147 |
-| HIST-02 | P0 | 手测 | 历史回放中 | 观察并尝试输入 | 输入框 disabled「正在查看历史回放，返回实时后可继续对话」；⚡/send 等全不渲染 | App.tsx:112-118 |
+| HIST-01 | P0 | 手测 | 抽屉已有会话 | 点「历史」→点某会话 | ①整页进入历史模式：**主栏仍是 ChatPanel，但渲染归档对话**（折叠态 SessionState 同一纯 fold）；②右列「历史图」始终在（key="history"，graphOverride 冻结快照不随实时更新）；③布局与实时页同一套（主/侧、详情/图均可拖拽，布局记忆共用） | App.tsx LivePage/MiniGraph, store.ts loadHistory |
+| HIST-02 | P0 | 手测 | 历史回放中 | 观察并尝试输入 | 输入框 disabled「正在查看历史会话（对话与图均为存档），返回实时后可继续对话」；⚡/send 等全不渲染 | App.tsx PromptBar |
 | HIST-03 | P0 | 手测 | 历史回放中 | 观察 header | 琥珀「📜 历史回放」横幅（加载中追加「（加载中…）」）；连接状态点/agent 状态/用量/lastError 全隐藏；横幅内有「返回实时」 | App.tsx:50-71, app.css:202-208 |
-| HIST-04 | P0 | 手测 | 历史回放中 | 点「返回实时」 | history 置 null+清选中（exitHistory 递增 historyReq 取消在途加载）；主区回到聊天布局、迷你图恢复、输入栏可用 | App.tsx:54-56, store.ts:152-155 |
+| HIST-04 | P0 | 手测 | 历史回放中 | 点「返回实时」 | history 置 null+清选中（exitHistory 递增 historyReq 取消在途加载）；主栏回到实时对话、右列恢复「实时图」、输入栏可用 | App.tsx:54-56, store.ts exitHistory |
 | HIST-05 | P0 | 手测 | bridge 可用 | 点头部「历史」 | 全屏半透明 overlay+左侧 380px 抽屉；每项显示首条用户文本（无则「(无文本输入)」）+「M-DD HH:mm · N events · ↓N tok」；关闭后不占 DOM | HistoryDrawer.tsx:21-47, store.ts:104-113 |
 | HIST-06 | P1 | 手测 | 无存档；另测接口失败（停 server） | 打开抽屉 | ①无存档且 fetch 成功 →「暂无存档（发过任务后这里会出现）」；②fetch 抛错/非 2xx → 红字「历史加载失败 — 检查 bridge server 是否在运行，关掉抽屉重开可重试」（sessionsError 标记，不再把失败伪装成空列表）；loadHistory 失败同样置标（重开抽屉可见） | HistoryDrawer.tsx:32-40, store.ts:107-125 |
-| HIST-07 | P0 | 手测 | 有可加载会话 | 点击会话项 | ①立即进入 history 模式：空图占位+「（加载中…）」；②完成后主区显示冻结图、选中清空；③该会话项 active 蓝框 | store.ts:114-147, HistoryDrawer.tsx:36-44 |
-| HIST-08 | P1 | 手测 | 已加载回放 | 在冻结图点节点 | 可点选/再点取消/点空白清除；详情按**归档图**解析选中 id（非实时图同 id 节点） | GraphCanvas.tsx:27-31, DetailPanel.tsx:114-119 |
+| HIST-07 | P0 | 手测 | 有可加载会话 | 点击会话项 | ①立即进入 history 模式：聊天头「历史对话（加载中…）」+「正在载入该会话的归档…」占位、历史图空；②完成后主栏渲染归档对话、选中清空、聊天头变「历史对话」；③该会话项 active 蓝框 | store.ts loadHistory, ChatPanel.tsx |
+| HIST-08 | P1 | 手测 | 已加载回放 | 在历史图点节点 | 可点选/再点取消/点空白清除；详情按**归档图**解析选中 id（非实时图同 id 节点），挂右列历史图上方（同实时布局） | GraphCanvas.tsx:27-31, DetailPanel.tsx:114-119, App.tsx LivePage |
 | HIST-09 | P1 | 手测 | 回放中开着抽屉 | 点 overlay 空白 / 点 × | 均只收起抽屉（historyOpen=false），回放横幅与冻结图保留；抽屉面板内点击 stopPropagation 不误关 | HistoryDrawer.tsx:24-30 |
 | HIST-10 | P1 | 手测 | 可使 events 请求失败 | 点会话项并使其失败 | catch 把 history 置 null 自动退回实时布局；仅当请求仍是最新令牌（req===historyReq）才清空，避免过期响应误清 | store.ts:126,148-150 |
 | HIST-11 | P1 | 契约 | 会话 A、B | 快速连点 A→B；点 A 后立刻返回实时 | req!==historyReq 时 set 被跳过；exitHistory 也递增令牌使在途作废；失败分支同样受保护 | store.ts:62-63,114-115,131-132,148-155 |
@@ -205,6 +205,10 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | HIST-16 | P1 | 契约 | WS 状态可控 | 非 OPEN 时 sendPrompt | send 仅 OPEN 时发，否则静默丢弃；四类命令载荷 {type:"command",command:{type:"prompt"|"steer"|"abort"|"new_session",message?}}；默认地址可被 VITE_WS_URL/VITE_API_BASE 覆盖 | store.ts:26-27,65-67,99-102 |
 | HIST-17 | P1 | 契约 | 注入各类信封 | 坏 JSON/缺字段 | ①坏 JSON 被吞直接 return；②event 信封 ingest；③run_event 驱动卡片不产生聊天消息；④run_error 只落 orchError；⑤pi-exit 置 piExit（聊天侧仅表现为事件流停止）；⑥hello 缺 snapshot 整条静默忽略 | store.ts:174-191,197-228 |
 | HIST-18 | P2 | 契约 | 杀 bridge 再重启 | 观察重连 | onopen 重置退避 1000ms+open；onclose：open→reconnecting、connecting→closed；延迟 1s 起翻倍封顶 15s；成功后经 hello 全量重建；**hello 与 reset 都会清 piExit 横幅** | store.ts:61,83-85,163-170,192-207,232-240 |
+| HIST-19 | P0 | 手测 | 会话含对话+编排注入 | 打开该会话历史 | ①归档对话完整渲染：用户/助手气泡 + 「⚙ 编排结果已注入会话」折叠卡（meta 从 sentinel 重解析）；②**无 ⚡ 编排状态卡**——历史时间线以 idle run 构建（run 事件存于 runs/ 独立归档，v1 不并入会话回放）；③工具轨迹不进时间线（canvas 侧看）；④时间线为纯只读快照，不随 WS 实时事件变化（live session 的流式 tick 不污染浏览视图） | ChatPanel.tsx browsing, store.ts loadHistory |
+| HIST-20 | P1 | 手测 | 打开有内容的会话历史 | 观察滚动 | ①**打开定位到顶部**（记录从头读，非跟尾）；②无自动跟随——向上滚动不回弹；③滚离底部 >40px 出现「↓ 回到最新」；④**浏览中切换会话 A→B 同样回顶**（滚动复位按归档身份键控，不继承 A 的偏移）；⑤「返回实时」回到实时对话并重新跟尾 | ChatPanel.tsx 滚动效应 |
+| HIST-21 | P1 | 手测 | 实时有 run 挂在门控 awaiting | 同时打开历史会话浏览 | 对话栏**不出现**琥珀门控审校卡（那是 live 态，绝不混入归档时间线）；关闭历史后门控卡回到实时对话尾部 | ChatPanel.tsx `{!browsing && <GateAwaitingCards/>}` |
+| HIST-22 | P2 | 手测 | 存档只含工具轨迹（无 user/assistant 消息） | 打开该会话历史 | 时间线显示空态「该存档只有工具轨迹，没有对话消息（图在右侧『历史图』）」；历史图正常可点 | ChatPanel.tsx 空态 |
 
 ## 8. 安全与边界加固（MC-SEC）
 
@@ -217,7 +221,7 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 
 ## 9. 人工门控 / human-in-the-loop（MC-GATE）
 
-门控节点（`NodeDef.gate === true`）不执行 pi：就绪时把 run 挂起等人工「批准/驳回」。批准 → 备注成为节点输出注入下游；驳回 → 下游按 `upstream failed` 跳过。规划器**不会**生成门控——只能编辑器手工放置。线级契约由 `scripts/e2e-gate.mjs` 端到端锁定（挂起 → 4 类非法决策仅回请求方 → 批准备注注入下游 → 归档/重放/孤儿检查）。
+门控节点（`NodeDef.gate === true`）不执行 pi：就绪时把 run 挂起等人工「批准/驳回」。批准 → 备注成为节点输出注入下游；驳回 → 下游按 `upstream failed` 跳过。门控有**两个来源**：编辑器「＋门控」手工放置；规划器对不可逆/影响外部的动作**自提风险门控**（上限 3 个、剥执行配置、超限降级，见 GATE-10）。线级契约由 `scripts/e2e-gate.mjs` 端到端锁定（挂起 → 4 类非法决策仅回请求方 → 批准备注注入下游 → 归档/重放/孤儿检查）。
 
 | 编号 | P | 类型 | 前置 | 步骤 | 预期 | 代码 |
 |---|---|---|---|---|---|---|
@@ -230,14 +234,16 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | GATE-07 | P0 | 契约 | devtools 直发 WS | 对非 awaiting 节点/过期 runId/结束后发 `approve_node`；发 approved:"true"（非布尔）、note 带换行/控制字符、note>2000 | 均被拒：decideNode 返回 false 无事件；非法载荷只向请求方回 run_error（广播流不受污染）。**已自动化**（run-manager.test + e2e-gate 四连拒） | main.ts, run-manager.ts decideNode |
 | GATE-08 | P0 | 契约 | — | 两个客户端同时批准同一门控；批准与 abort 同时到达 | ①仅第一次 decide 生效（第二次 false 无事件）；②竞态下不双重结算、不发矛盾事件。**已自动化**（orchestrator.test + e2e-gate 迟到驳回） | orchestrator.ts decideNode 守卫 |
 | GATE-09 | P1 | 契约 | 门控 awaiting 中 | 点中止 | awaiting 门控按 running 节点同款 abort 结算（跳过），run_finished aborted。**已自动化**（orchestrator.test） | orchestrator.ts abort |
-| GATE-10 | P1 | 契约 | — | 规划器输出 JSON 带 gate:true | extractGraph **剥离** gate 字段——规划器不能自造审批点，落为普通任务节点。**已自动化**（planner.test） | planner.ts |
+| GATE-10 | P0 | 契约 | — | 规划器输出 JSON 带节点 gate 字段（含滥用形态） | extractGraph **保留**规划器自提的风险门控，但收紧为：仅 `gate === true` 的裸布尔（"true"/1 不算）才生效；门控节点**剥除全部执行配置**（model/agent/能力档案/workdir/tools——不报错不耗重试）；**上限 3 个**（超限节点降级为普通任务节点照常执行）；**死胡同门控（无出边）整个丢弃**（含入边）——AND-join 下它管不住任何节点：风险动作的直连下游照跑、审批形同虚设、run 却照样挂起（提示词已要求 风险→门控→下游 改接线，此处为兜底）；空 task 门控（有下游者）仍走校验报错。**已自动化**（planner.test：裸布尔/剥配置/上限降级/死胡同丢弃/链形保留/混合 + 提示词契约） | planner.ts extractGraph |
 | GATE-11 | P0 | 手测 | 运行至门控 awaiting | 选中 awaiting 门控节点 | ①面板显示 assembledPrompt 预览（等宽 pre）+ 备注 input +「批准」（主按钮）/「驳回」（danger）；②非 awaiting 时两钮禁用；③批准后节点变绿、按钮禁用；④驳回后节点红 ✗、下游琥珀跳过。（Playwright 走查 + 截图已核验：`D:/pip_temp/gate-shots/01→03`） | OrchNodePanel.tsx |
 | GATE-12 | P1 | 手测 | 门控各状态 | 观察节点视觉 | ①pending=虚线+空心点（未勘测习语）；②awaiting=琥珀描边 + 琥珀方点 + 缓慢呼吸；③无新色相、无 glow——门控用四色系的琥珀，绝不用洋红。（截图已核验） | nodes.css, orch-nodes.tsx |
 | GATE-13 | P1 | 契约 | 门控 awaiting/已决 | F5 刷新 / 历史重放 | node_awaiting/node_decided 进归档与 hello 全量重建——awaiting 态、决策备注、驳回错误均完整复原。**已自动化**（e2e-gate 归档/重放断言） | orchestration.ts foldRunEvent |
-| GATE-14 | P1 | 手测 | ⚡ 发起编排 | 观察生成图 | 规划器生成的图**不含门控节点**（与 GATE-10 对应的端上表现）。**已自动化**（planner.test 剥离断言，端上表现归 GATE-10） | planner.ts |
+| GATE-14 | P1 | 手测 | ⚡ 发起一个含写文件/发布类动作的目标 | 观察生成图与运行 | 规划器把风险动作的下游**改接成经过**门控（写入→🚧放行审校→读回核验，下游输入边从门控发出）：生成图带「门」标节点、运行到此挂起琥珀待审批、批准后下游继续；纯调研/生成类目标**不**应出现门控；无下游的死胡同门控被 extractGraph 丢弃（GATE-10）。「转入编辑器」把门控一并带入可编辑重跑。（e2e PLAN 模式已带自动放行兜底，冒烟目标实测会提门控） | planner.ts, OrchCanvas.tsx |
 | GATE-15 | P0 | 契约 | — | fake executor：maxParallel=1，慢节点占满槽位，普通节点排队其后，gate 队尾 | 扫描必须**跨过被槽位阻塞的节点**继续找 gate 并立即挂起（parked 数组保序回填），而不是断在阻塞节点处把 gate 困到槽位释放；中止后 parked 节点从未派发。**已自动化**（orchestrator.test 回归） | orchestrator.ts 排水循环 |
 | GATE-16 | P0 | 契约 | — | 门控挂起期间读运行条 chip | ok/失败/跳过/tok **逐节点实时累计**（node_completed/failed/decided/skipped 即刻 +1，usage 累加）——挂起几分钟的 run 不再显示「ok 0」；run_finished 仍以服务端权威计数覆盖兜底。**已自动化**（orchestration.test 长效计数） | orchestration.ts foldRunEvent |
 | GATE-17 | P1 | 手测 | 门控 awaiting | ①快速双击「批准」；②填备注后切换选中节点再切回；③awaiting 中按 Backspace/Delete | ①1s 发送防抖窗（`runId:nodeId` 键控）吞掉第二次发送——无重复 decide；②备注随节点切换/状态离开 awaiting/新 run 清空，但点击批准**不**清（发送在途/掉线重试时输入保留）；③运行中删除键已禁用（drag/connect 同锁）。 | orch-store.ts approveNode, OrchNodePanel.tsx, OrchCanvas.tsx |
+| GATE-18 | P0 | 手测 | 对话页开 ⚡，直接在输入框发一条含写文件动作的目标 | 等运行推进到门控挂起 | ①**不离开对话页**即可完成审批：列表尾部出现琥珀左边线「门」审校卡（label + 等待人工审校 + assembledPrompt 预览 + 备注 input + 批准/驳回），编排状态卡在其上方实时显示进度；②批准后卡片即刻消失、状态卡走完 → 注入卡（折叠 details）→ 助手综合回复，全程零页面切换；③门控卡对**任何**来源的 live run awaiting 都渲染（编排页发起的挂起 run 切回对话页同样可批），F5 后经 hello 重放重新具现，仍可批；④门控卡是实时态非历史条目——决定落定即从时间线消失，不占位；⑤备注生命周期同 GATE-17 ③（卡片在即保留，决定即弃）。（Playwright 双阶段走查 + 截图已核验：`D:/pip_temp/gate-shots/06→09`——含 F5 前后的挂起 run 对话页放行 + ⚡ 对话发起全流程） | ChatPanel.tsx GateAwaitingCards, app.css .pg-chat-gate-card |
+| GATE-19 | P1 | 契约 | 含门控的 chat run 完成后 | 对比状态卡芯片与注入卡节点数 | 芯片 `✓ ok/total` 计**全部图节点**（门控批准计 1 ok，门控不占槽不发 node_started/completed）；注入卡「N 节点」只计 **node_completed**（门控从不发——其备注经 `### from <gateId>` 已进下游输出，随 3 节点间接进入综合）。两数口径不同、各自正确（实测 4/4 与 3 节点并存，存档核对一致）。**已自动化**（orchestrator.test 门控事件对 + run-manager.test nodes 仅收 node_completed） | orchestrator.ts, run-manager.ts fireChatComplete |
 
 ## 10. 已知问题 / 接受项（KNOWN）
 
