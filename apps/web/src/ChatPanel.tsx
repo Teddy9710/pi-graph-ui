@@ -197,8 +197,12 @@ export function ChatPanel({ onOpenOrch }: { onOpenOrch: () => void }) {
 	// read from the beginning, no tail to follow); returning to live re-arms
 	// following and jumps to the tail. Keyed on the ARCHIVE IDENTITY too —
 	// browsing stays true through an A→B switch, and B must also open at the
-	// top rather than inherit A's scroll offset.
+	// top rather than inherit A's scroll offset. The LIVE session id keys the
+	// same reset for session SWITCHES (browsing stays false): the hello
+	// rebuilt the transcript under the old scroll offset, which is now a
+	// position in a different conversation.
 	const historyId = browsing ? history.meta.id : null;
+	const sessionId = useStore((s) => s.sessionId);
 	useEffect(() => {
 		const el = listRef.current;
 		if (browsing) {
@@ -210,7 +214,7 @@ export function ChatPanel({ onOpenOrch }: { onOpenOrch: () => void }) {
 		followRef.current = true;
 		setAtBottom(true);
 		if (el) el.scrollTop = el.scrollHeight;
-	}, [browsing, historyId]);
+	}, [browsing, historyId, sessionId]);
 	useEffect(() => {
 		if (browsing) return;
 		const last = items[items.length - 1];

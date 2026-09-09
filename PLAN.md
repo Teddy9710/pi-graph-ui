@@ -114,6 +114,15 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
    - 评审修复（对抗性评审后）：节点 label 与边备注同防 `###` 分节头伪造（validateGraph 拒绝换行/控制字符 + planner extractGraph 归一 + buildSynthPrompt safeLabel 三层兜底）；ChatPanel 订阅 session 对象而非 messages 数组（store 浅拷贝但数组引用不变，数组选择器会漏 message_end 追加）
 12. **M-V 视觉打磨（2026-08-26）**：app.css/nodes.css 整体重写为暗色设计系统——四级海拔（bg/panel/node/well）+ 低透明白描边 + 语义色 token；React Flow `colorMode="dark"` + `--xy-*` 非 default 变量接管 controls/minimap（点阵改 `<Background color>` 内联）；节点卡渐变+选中蓝环、状态色边框、handle 悬停光环（**无 transform**——RF 用 translate 定位 handle，transform 会顶掉定位）；聊天气泡方向角、抽屉滑入、细滚动条、统一 focus 语言；编排双 bar 控件统一 30px 高。对抗校验（3 视角）后修复：handle transform 回归、hover 边框被状态类覆盖（0,2,1 提权）、死 CSS 清理（-default 变量/.pg-dim 双定义/orphan 覆盖）、select 焦点环、pg-ws-reconnecting 琥珀色、聊天注入卡与面板折叠箭头统一 ▸。
 13. **M-R 可拖拽分栏（2026-08-26）**：三处死宽度全部改为用户可拖——`react-resizable-panels` v4（新 API `Group/Panel/Separator`，className 落在 Panel 内层 div；Separator 内联 `flexBasis:"auto"`，厚度用 width/height；状态经 `data-separator="hover|active|focus"` 属性暴露）：实时页 聊天|侧栏（水平）+ 详情|实时图（垂直嵌套，仅两者并存时），编排页 画布|节点面板；`useDefaultLayout`（localStorage）记住比例，双击分隔条重置，方向键键盘可调；px 单位 minSize（聊天≥360、侧栏≥280、详情≥120、实时图≥160、画布≥360、检查器≥300）。npm 侧：项目级 `.npmrc` 显式代理 `192.168.1.9:16780`（用户级配的死代理被压掉）；`.gitignore` 挡住 `.npmrc` 与 apps/server 根下全部个人调研文档/脚本（README.md/snake.html 已跟踪者用否定模式保留）。
+14. **多会话管理（2026-09-08）**：ChatGPT 式会话栏（常驻左侧、可折叠 40px 细栏、行内重命名/删除、当前置顶）。核心决策：
+    - **三份状态**：桥接归档（视图源）/ pi 会话文件（上下文源）/ index.json（映射+标题）。恢复 = RPC `switch_session` 换上下文 + 归档重放重建视图 + 一次 hello 广播原子完成——`session_start(resume)` 不是 wire 事件，视图必须由归档重建。
+    - 主桥去 `--no-session`（`PI_NO_SESSION=1` 逃生口）；planner/节点执行器各自默认 no-session 不受影响。
+    - **惰性建档**：归档在首条事件时诞生，绑定挂在该时刻的 get_state 探针上（token 防陈旧回退）；`new_session` 的 refresh 先于 hello 广播——客户端 prompt 只会落在新映射之后。
+    - **双绑 bug（实战修复）**：switchTo 的 post-switch refresh 曾无参调用，而 `store.resume(id)` 尚未执行、`currentId` 仍指向离场会话 → 离场归档被重绑到目标的 pi 文件，之后恢复它就还原出错误上下文。修复 = 显式 `refreshPiSession(id)`（绑目标）+ 回归测试。
+    - 守卫链全在触 pi 之前：非当前 / agent+run 空闲 / `existsSync(pi文件)`（pi 的 `SessionManager.open` 对缺失路径静默新建空会话——"假恢复"是最坏的静默失败）/ 归档非空；`isStreaming` 二次确认兜 fold 标志的 abort→settled 间隙。
+    - pi 文件删除三重安全校验（resolve 在 `~/.pi/agent/sessions` 下 + lstat 真文件 + ≠ currentPiFile），不满足则只删归档；浏览器透传里封堵裸 `switch_session` 命令（否则可绕过守卫直塞任意 sessionPath 给 pi）。
+    - 前端：`session_bound` 轻量信封告知惰性建档的 id（不重建视图）；行主按钮用 `aria-disabled` 而非原生 disabled（Chromium 下 disabled 按钮不传播 :hover，当前行的 ✎/✕ 悬停簇会永久不可见——真 UX bug）；无 pi 文件的旧档降级「仅回放」走 loadHistory，不改当前对话。
+    - 验证：session-service 单测 14 例（fake bridge 脚本化队列）+ `e2e-sessions.mjs`（上下文恢复黄金断言：切回后问「我叫什么名字」必须答「小明」）+ `verify-sessions-ui.mjs`（playwright-core 驱动真浏览器实操 + 截图）。
 
 
 ## 风险与对策

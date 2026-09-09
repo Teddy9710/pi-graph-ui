@@ -1,10 +1,10 @@
 /**
  * App shell: header (tabs + connection + usage) and two tabs — 实时 (chat-first
- * live page: conversation as the main area, a mini live-trace graph in the side
- * column; node details appear on demand above it while a node is selected) and
- * 编排 (graph orchestration editor). Every pane boundary is user-resizable
- * (react-resizable-panels, layout remembered in localStorage). HistoryDrawer
- * stays mounted at app level.
+ * live page: a persistent session sidebar on the left, conversation as the
+ * main area, a mini live-trace graph in the side column; node details appear
+ * on demand above it while a node is selected) and 编排 (graph orchestration
+ * editor). Every pane boundary is user-resizable (react-resizable-panels,
+ * layout remembered in localStorage).
  */
 
 import { useEffect, useState } from "react";
@@ -12,8 +12,8 @@ import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panel
 import { ChatPanel } from "./ChatPanel.tsx";
 import { DetailPanel } from "./DetailPanel.tsx";
 import { GraphCanvas } from "./GraphCanvas.tsx";
-import { HistoryDrawer } from "./HistoryDrawer.tsx";
 import { OrchestratePage } from "./OrchestratePage.tsx";
+import { SessionRail, SessionSidebar } from "./SessionSidebar.tsx";
 import { useOrchStore } from "./orch-store.ts";
 import { connect, useStore } from "./store.ts";
 import "./app.css";
@@ -26,12 +26,21 @@ function formatTokens(n: number): string {
 
 type Tab = "live" | "orch";
 
-function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
+function Header({
+	tab,
+	setTab,
+	sessionsCollapsed,
+	toggleSessions,
+}: {
+	tab: Tab;
+	setTab: (t: Tab) => void;
+	sessionsCollapsed: boolean;
+	toggleSessions: () => void;
+}) {
 	const wsStatus = useStore((s) => s.wsStatus);
 	const session = useStore((s) => s.session);
 	const piExit = useStore((s) => s.piExit);
 	const history = useStore((s) => s.history);
-	const openHistory = useStore((s) => s.openHistory);
 	const exitHistory = useStore((s) => s.exitHistory);
 	const statusText =
 		wsStatus === "open"
@@ -89,8 +98,13 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 					pi exited (code {piExit.code ?? "?"}) — 检查 bridge server
 				</span>
 			)}
-			<button className="pg-btn pg-btn-ghost pg-btn-sm pg-history-btn" onClick={() => void openHistory()}>
-				历史
+			<button
+				className="pg-btn pg-btn-ghost pg-btn-sm pg-history-btn"
+				aria-expanded={!sessionsCollapsed}
+				title={sessionsCollapsed ? "展开左侧会话栏" : "折叠左侧会话栏"}
+				onClick={toggleSessions}
+			>
+				☰ 会话
 			</button>
 		</header>
 	);
@@ -117,7 +131,6 @@ function PromptBar() {
 	const sendPrompt = useStore((s) => s.sendPrompt);
 	const steer = useStore((s) => s.steer);
 	const abort = useStore((s) => s.abort);
-	const newSession = useStore((s) => s.newSession);
 	const history = useStore((s) => s.history);
 	const run = useOrchStore((s) => s.run);
 	const planRun = useOrchStore((s) => s.planRun);
@@ -173,17 +186,6 @@ function PromptBar() {
 			>
 				⚡
 			</button>
-			{!running && !bolt && (
-				<button
-					className="pg-btn pg-btn-ghost"
-					title="清空当前会话，开始全新任务（pi 上下文一并重置）"
-					onClick={() => {
-						if (window.confirm("清空当前会话并重置 pi 上下文？此操作不可撤销")) newSession();
-					}}
-				>
-					＋ 新任务
-				</button>
-			)}
 			<input
 				value={text}
 				placeholder={placeholder}
@@ -243,52 +245,87 @@ function MiniGraph() {
 }
 
 /**
- * 实时 tab: chat is the PRIMARY surface in the main pane — in history
- * browsing too, where the column shows the archived transcript and the side
- * graph shows the frozen archive. The side column holds node details (on
- * demand) over the graph. The main/side split and the detail/graph split are
- * both drag-resizable, with layouts remembered across reloads.
+ * 实时 tab: the persistent session sidebar owns the left column (collapse it
+ * to a 40px rail from the header ☰ 会话 button). Chat is the PRIMARY surface
+ * in the main pane — in history browsing too, where the column shows the
+ * archived transcript and the side graph shows the frozen archive. The side
+ * column holds node details (on demand) over the graph. Every split —
+ * sessions|content, chat|side, detail|graph — is drag-resizable with layouts
+ * remembered across reloads.
  */
-function LivePage({ setTab }: { setTab: (t: Tab) => void }) {
+function LivePage({
+	setTab,
+	sessionsCollapsed,
+	setSessionsCollapsed,
+}: {
+	setTab: (t: Tab) => void;
+	sessionsCollapsed: boolean;
+	setSessionsCollapsed: (v: boolean) => void;
+}) {
 	const history = useStore((s) => s.history);
 	const selectedNodeId = useStore((s) => s.selectedNodeId);
 	const select = useStore((s) => s.select);
+	const newSession = useStore((s) => s.newSession);
+	const rootLayout = useDefaultLayout({ id: "pg-live-root", panelIds: ["sessions", "content"], storage: localStorage });
 	const mainLayout = useDefaultLayout({ id: "pg-live-main", panelIds: ["main", "side"], storage: localStorage });
 	const sideLayout = useDefaultLayout({ id: "pg-live-side", storage: localStorage });
 	return (
 		<>
 			<div className="pg-main">
-				<Group orientation="horizontal" className="pg-pgroup" {...mainLayout}>
-					<Panel id="main" className="pg-fill" defaultSize="62" minSize={360}>
-						<ChatPanel onOpenOrch={() => setTab("orch")} />
-					</Panel>
-					{/* Side column: the trace graph fills it by default (live or the
-					    frozen archive); node details mount ON DEMAND above it while a
-					    node is selected (再点节点或 × 关闭) — the selection works on the
-					    archived graph too, so history browsing keeps node inspection. */}
-					<Separator
-						className="pg-rh pg-rh-col"
-						title="拖拽调整 · 双击复位"
-						aria-label="拖动调整对话与侧栏的宽度"
-					/>
-					<Panel id="side" className="pg-fill pg-side" defaultSize="38" minSize={280}>
-						{selectedNodeId ? (
-							<Group orientation="vertical" className="pg-pgroup" {...sideLayout}>
-								<Panel id="detail" className="pg-fill" defaultSize="55" minSize={120}>
-									<DetailPanel onClose={() => select(null)} />
-								</Panel>
-								<Separator
-									className="pg-rh pg-rh-row"
-									title="拖拽调整 · 双击复位"
-									aria-label="拖动调整节点详情与实时图的高度"
-								/>
-								<Panel id="mini" className="pg-fill" defaultSize="45" minSize={160}>
+				{sessionsCollapsed && (
+					<SessionRail onExpand={() => setSessionsCollapsed(false)} onNewSession={newSession} />
+				)}
+				<Group orientation="horizontal" className="pg-pgroup" {...rootLayout}>
+					{!sessionsCollapsed && (
+						<>
+							{/* The atlas ledger: every archived conversation, current
+							    pinned top; ＋新对话 resets pi's context without losing
+							    the old thread (it stays listed & resumable). */}
+							<Panel id="sessions" className="pg-fill" defaultSize="20" minSize={13}>
+								<SessionSidebar onNewSession={newSession} />
+							</Panel>
+							<Separator
+								className="pg-rh pg-rh-col"
+								title="拖拽调整 · 双击复位"
+								aria-label="拖动调整会话栏与对话区的宽度"
+							/>
+						</>
+					)}
+					<Panel id="content" className="pg-fill" defaultSize="80" minSize={400}>
+						<Group orientation="horizontal" className="pg-pgroup" {...mainLayout}>
+							<Panel id="main" className="pg-fill" defaultSize="62" minSize={360}>
+								<ChatPanel onOpenOrch={() => setTab("orch")} />
+							</Panel>
+							{/* Side column: the trace graph fills it by default (live or
+							    the frozen archive); node details mount ON DEMAND above it
+							    while a node is selected (再点节点或 × 关闭) — the selection
+							    works on the archived graph too, so history browsing keeps
+							    node inspection. */}
+							<Separator
+								className="pg-rh pg-rh-col"
+								title="拖拽调整 · 双击复位"
+								aria-label="拖动调整对话与侧栏的宽度"
+							/>
+							<Panel id="side" className="pg-fill pg-side" defaultSize="38" minSize={280}>
+								{selectedNodeId ? (
+									<Group orientation="vertical" className="pg-pgroup" {...sideLayout}>
+										<Panel id="detail" className="pg-fill" defaultSize="55" minSize={120}>
+											<DetailPanel onClose={() => select(null)} />
+										</Panel>
+										<Separator
+											className="pg-rh pg-rh-row"
+											title="拖拽调整 · 双击复位"
+											aria-label="拖动调整节点详情与实时图的高度"
+										/>
+										<Panel id="mini" className="pg-fill" defaultSize="45" minSize={160}>
+											<MiniGraph />
+										</Panel>
+									</Group>
+								) : (
 									<MiniGraph />
-								</Panel>
-							</Group>
-						) : (
-							<MiniGraph />
-						)}
+								)}
+							</Panel>
+						</Group>
 					</Panel>
 				</Group>
 			</div>
@@ -302,11 +339,27 @@ export default function App() {
 		connect();
 	}, []);
 	const [tab, setTab] = useState<Tab>("live");
+	// Sidebar collapse persists across reloads (the layout panels already
+	// remember their sizes; this covers the fully-collapsed state).
+	const [sessionsCollapsed, setSessionsCollapsed] = useState(
+		() => localStorage.getItem("pi-graph.sessions.collapsed") === "1",
+	);
+	useEffect(() => {
+		localStorage.setItem("pi-graph.sessions.collapsed", sessionsCollapsed ? "1" : "0");
+	}, [sessionsCollapsed]);
 	return (
 		<div className="pg-app">
-			<Header tab={tab} setTab={setTab} />
-			{tab === "orch" ? <OrchestratePage /> : <LivePage setTab={setTab} />}
-			<HistoryDrawer />
+			<Header
+				tab={tab}
+				setTab={setTab}
+				sessionsCollapsed={sessionsCollapsed}
+				toggleSessions={() => setSessionsCollapsed((v) => !v)}
+			/>
+			{tab === "orch" ? (
+				<OrchestratePage />
+			) : (
+				<LivePage setTab={setTab} sessionsCollapsed={sessionsCollapsed} setSessionsCollapsed={setSessionsCollapsed} />
+			)}
 		</div>
 	);
 }

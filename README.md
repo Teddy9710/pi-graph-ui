@@ -1,6 +1,6 @@
 # pi-graph-ui
 
-![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-241%20passed-2DA44E)
+![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-263%20passed-2DA44E)
 
 把 [pi coding agent](https://github.com/badlogic/pi-mono) 会话的完整动作过程**实时可视化成图**，并在同一界面里做**图编排执行**：主 agent 的每次工具调用是一个节点，并行 spawn 的子 agent 扇出与汇聚在 React Flow 画布上展开；编排页既可手画任务 DAG，也可输入一个目标让 AI 自动拆图——**每个节点都是一个真实独立运行的 pi agent 实例**。
 
@@ -13,6 +13,14 @@
 - 聊天流是主界面：用户/助手气泡、工具调用计数、流式光标；右栏迷你实时图把会话动作派生成节点（用户消息 → 工具调用 → 助手回复），点节点按需弹出详情面板
 - **⚡ 开关**把输入框变成「自动编排目标」入口：编排卡片实时出现在聊天流，完成后节点产出自动注入主会话、由主 agent 整理出最终回答
 - 运行中输入即转向（steer），断线自动重连、历史不丢
+
+### 会话管理 · 常驻侧栏，上下文完整恢复
+
+![会话栏：多会话列表 + 重命名 + 当前标记](docs/images/sessions-sidebar.png)
+
+- 左侧常驻会话栏：**＋新对话**、点击恢复、行内 ✎ 重命名、✕ 删除（带确认）；当前会话置顶并带「当前」标记，折叠成 40px 细栏也不离场
+- 恢复的不只是视图——pi 的**模型上下文一并切回**（RPC `switch_session`），切回旧会话问「我叫什么名字」它还记得
+- 无 pi 会话文件的旧存档自动降级为「仅回放」（▶ 按钮进只读历史视图，不改变当前对话）；agent 运行中恢复会被拒绝并提示原因
 
 ### 编排编辑器 · 手画 DAG，边有语义
 
@@ -113,10 +121,10 @@ flowchart LR
 - AND-join（等全部上游）、失败沿下游传染跳过（不浪费 token）、并行上限、每节点超时与进程树必杀；中止即刻生效且不留孤儿进程
 - 节点质量门：输出短于阈值自动原题重跑一次、两答取长（`ORCH_MIN_OUTPUT_CHARS`）
 
-**持久化与回放**
+**持久化与会话管理**
 
-- 会话与 run 全量落盘（`~/.pi-graph-ui/`），历史抽屉点开即回放——主栏归档对话（含编排注入卡）、侧栏冻结历史图（可点选看详情）
-- 刷新 / 断线重连自动恢复（含进行中的 run）
+- 会话与 run 全量落盘；三份状态各司其职——**桥接归档**（视图源，`~/.pi-graph-ui/sessions/*.jsonl`）、**pi 会话文件**（上下文源，`~/.pi/agent/sessions/`）、**index.json**（两者映射 + 用户标题）。切换 = pi RPC `switch_session` 换上下文 + 归档重放重建视图，一次 `hello` 广播原子完成
+- 刷新 / 断线重连自动恢复（含进行中的 run）；侧栏 ▶ 只读回放（冻结历史图，可点选看详情）不触碰当前对话
 
 **界面工程**
 
@@ -126,7 +134,7 @@ flowchart LR
 ## 验证 / 测试
 
 ```bash
-pnpm -r test         # 241 个单测全过（shared 95 + server 146）
+pnpm -r test         # 263 个单测全过（shared 95 + server 168）
 pnpm -r typecheck    # 全仓类型检查（web 无单测，typecheck 即门禁）
 
 # 以下 e2e 需要桥接服务在跑（dev.mjs）且模型 key 可用，会真实调 LLM：
@@ -139,6 +147,8 @@ node scripts/e2e-parallel.mjs         # 多路并行 e2e：4 分支扇出 + AND-
 PLAN=1  node scripts/e2e-parallel.mjs # 多路并行自动编排：AI 拆图成并行 DAG → 并行执行 → 复用同一套并发断言
 node scripts/e2e-gate.mjs             # 门控 HITL e2e：挂起/批准注入/驳回传染/畸形决策报错/重连重放
 node scripts/e2e-reset.mjs            # 新任务重置流：图清空后可继续对话
+node scripts/e2e-sessions.mjs         # 多会话 e2e：建档/切换/上下文恢复黄金断言（切回后还记得小明）/重命名/删除
+node scripts/verify-sessions-ui.mjs   # 浏览器端实操（playwright-core + 本地 chromium）：侧栏切换/重命名 + 截图
 ```
 
 ## WS 协议
@@ -150,10 +160,12 @@ server → browser：
 
 | 消息 | 说明 |
 |---|---|
-| `{type:"hello", snapshot, run?}` | 连接建立即重放全部历史事件；有进行中/最近一次 run 时一并重放其事件 |
+| `{type:"hello", snapshot, run?, sessionId}` | 连接建立 / `new_session` / `switch_session` 后重放世界：`snapshot` 为全部历史事件，`sessionId` 为当前会话（null = 全新会话）；有进行中/最近一次 run 时一并重放其事件 |
+| `{type:"session_bound", sessionId}` | 惰性建档落定时的轻量通知（首条事件到达时广播，客户端据此刷新会话列表，无需重建视图） |
 | `{type:"event", event}` | 实时会话事件（`tool_execution_update` 按 toolCallId 100ms 合并） |
 | `{type:"run_event", event}` | 编排 run 事件（plan_started/delta/completed、run_started、node deltas、run_finished…，150ms 连接式合并） |
 | `{type:"run_error", error}` | 编排错误（校验 issue / 引擎异常） |
+| `{type:"error", message}` | 会话操作被拒（切换/新建失败原因，中文），客户端在会话栏内提示 |
 | `{type:"response", response}` | RPC 响应（id 关联） |
 | `{type:"pi-exit", code, stderr}` | pi 子进程退出告警 |
 
@@ -161,14 +173,15 @@ browser → server：
 
 | 消息 | 说明 |
 |---|---|
-| `{type:"command", command:{type:"prompt"\|"steer"\|"abort"\|"new_session", ...}}` | 会话命令透传 |
-| `{type:"request", command}` | 同上但等待标定响应 |
+| `{type:"command", command:{type:"prompt"\|"steer"\|"abort"\|"new_session", ...}}` | 会话命令透传（`new_session` 由服务端接管：重置世界并广播 hello） |
+| `{type:"switch_session", id}` | 恢复归档会话：守卫（非当前/空闲/pi 文件在）→ RPC `switch_session` → 归档重放 → 广播 hello（拒绝则回 error） |
+| `{type:"request", command}` | 同 command 但等待标定响应 |
 | `{type:"run_graph", graph}` | 运行手动编辑器里的图 |
 | `{type:"plan_run", goal, chat?}` | AI 自动拆图执行；`chat:true` 完成后把节点产出注入主会话整理回答 |
 | `{type:"abort_run"}` | 中止编排/规划 |
 | `{type:"ping"}` | 心跳 |
 
-只读数据走 HTTP（带 CORS）：`GET /api/sessions`、`/api/sessions/:id/events`、`/api/agents`、`/api/runs`、`/api/runs/:id`、`/api/state`、`/health`。
+HTTP API（带 CORS）：只读 `GET /api/sessions`（含 `title`/`resumable`）、`/api/sessions/:id/events`、`/api/agents`、`/api/runs`、`/api/runs/:id`、`/api/state`、`/health`；会话管理 `PATCH /api/sessions/:id`（body `{title}`，200/400）、`DELETE /api/sessions/:id`（204；400 非法 id / 404 不存在 / 409 当前活跃会话，删除归档 + 索引 + 经路径安全校验的 pi 会话文件）。
 
 </details>
 
@@ -180,6 +193,7 @@ browser → server：
 |---|---|---|
 | `DEEPSEEK_API_KEY` | 模型 key（`.env`，gitignore） | — |
 | `PI_BIN` / `PI_CWD` / `PI_ARGS` | pi 可执行文件 / 工作目录 / 额外参数 | `pi` / cwd / 空 |
+| `PI_NO_SESSION` | 置 `1` 回到旧行为：主桥以 `--no-session` 运行（pi 不落会话文件，所有存档仅回放、不可恢复上下文） | 未设置（持久化多会话） |
 | `PORT` | 桥接端口 | `8787` |
 | `VITE_WS_URL` | 前端 WS 地址覆盖 | 同源推导 |
 | `ORCH_MAX_PARALLEL` | 编排节点并行上限 | `4` |
@@ -199,8 +213,8 @@ browser → server：
 ```
 packages/shared   # pi 事件类型 + delta 折叠器 + 图派生/编排纯函数 + 聊天时间线 + 内置模板（前后端同构，含单测）
 apps/server       # Hono + ws 桥接：主会话 pi 子进程、编排引擎/规划器/节点执行器、run 与会话归档、只读 API（CORS）+ 贪吃蛇 demo
-apps/web          # React 前端：实时页（聊天+图）+ 编排页（编辑器+运行图）、可拖拽分栏、历史抽屉
-scripts/          # dev / check-env / stop / e2e-{smoke,orch,parallel,gate,reset}
+apps/web          # React 前端：实时页（聊天+图+会话侧栏）+ 编排页（编辑器+运行图）、可拖拽分栏
+scripts/          # dev / check-env / stop / e2e-{smoke,orch,parallel,gate,reset,sessions} / verify-sessions-ui
 docs/             # 设计与调研文档；README 截图在 docs/images/
 pi/               # pi-mono 参考克隆（gitignore，仅源码参考）
 ```
@@ -211,4 +225,6 @@ pi/               # pi-mono 参考克隆（gitignore，仅源码参考）
 
 - 实时 trace 图仍每次事件全量 dagre 重排（编排图已按内容签名稳定布局），大图有跳动 → 计划做位置保持
 - 同一会话多次编排只在聊天流保留最新 run 卡片（历史注入消息仍在 transcript）→ v2
+- `GET /api/sessions` 每次全量读取所有归档（头几行）来取摘要，存档积累到数百个后会变慢 → 计划在 index.json 里缓存摘要
+- 切换进行中到达的 pi 事件只进内存快照、不补写归档尾部（极端断电窗口可能丢一两条）→ 计划补落盘
 - 导出 PNG/SVG、按节点/单价的费用统计、多会话画布未做；窄屏（<650px 宽）下面板拖动会接近下限

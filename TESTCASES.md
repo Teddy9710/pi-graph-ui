@@ -245,7 +245,27 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | GATE-18 | P0 | 手测 | 对话页开 ⚡，直接在输入框发一条含写文件动作的目标 | 等运行推进到门控挂起 | ①**不离开对话页**即可完成审批：列表尾部出现琥珀左边线「门」审校卡（label + 等待人工审校 + assembledPrompt 预览 + 备注 input + 批准/驳回），编排状态卡在其上方实时显示进度；②批准后卡片即刻消失、状态卡走完 → 注入卡（折叠 details）→ 助手综合回复，全程零页面切换；③门控卡对**任何**来源的 live run awaiting 都渲染（编排页发起的挂起 run 切回对话页同样可批），F5 后经 hello 重放重新具现，仍可批；④门控卡是实时态非历史条目——决定落定即从时间线消失，不占位；⑤备注生命周期同 GATE-17 ③（卡片在即保留，决定即弃）。（Playwright 双阶段走查 + 截图已核验：`D:/pip_temp/gate-shots/06→09`——含 F5 前后的挂起 run 对话页放行 + ⚡ 对话发起全流程） | ChatPanel.tsx GateAwaitingCards, app.css .pg-chat-gate-card |
 | GATE-19 | P1 | 契约 | 含门控的 chat run 完成后 | 对比状态卡芯片与注入卡节点数 | 芯片 `✓ ok/total` 计**全部图节点**（门控批准计 1 ok，门控不占槽不发 node_started/completed）；注入卡「N 节点」只计 **node_completed**（门控从不发——其备注经 `### from <gateId>` 已进下游输出，随 3 节点间接进入综合）。两数口径不同、各自正确（实测 4/4 与 3 节点并存，存档核对一致）。**已自动化**（orchestrator.test 门控事件对 + run-manager.test nodes 仅收 node_completed） | orchestrator.ts, run-manager.ts fireChatComplete |
 
-## 10. 已知问题 / 接受项（KNOWN）
+## 10. 多会话管理（MC-SESS）
+
+| 编号 | P | 类型 | 前置 | 操作 | 预期 | 代码 |
+|---|---|---|---|---|---|---|
+| SESS-01 | P0 | 自动(e2e) | dev 栈 + 真 LLM | `node scripts/e2e-sessions.mjs` | hello 带 sessionId → A「我叫小明」settled → 归档 resumable → new_session 后 hello sessionId=null → B「1+1」→ switch A（hello.sessionId=A 且快照含小明消息）→ 问「我叫什么名字」**答含「小明」**（上下文恢复黄金断言）→ PATCH 重命名持久 → DELETE B=204 / DELETE 活跃 A=409 | scripts/e2e-sessions.mjs |
+| SESS-02 | P0 | 自动 | 单测 | switchTo happy path | 调用序恰为 `[get_state, switch_session, get_state]`、**恰好一次** hello（sessionId+快照）、hub=归档、后续事件续写同 id、归档悬 running 强制 idle | session-service.test.ts |
+| SESS-03 | P0 | 自动 | 单测 | 各拒绝分支 | 非法 id / 已是当前 / run busy / agent busy / 索引无 pi 文件 / 文件不存在 / 归档为空 → **零 bridge 调用** + 中文原因 replyError，世界不动 | session-service.test.ts |
+| SESS-04 | P0 | 自动 | 单测 | pi 拒绝切换 | success:false 或 cancelled → buffer 回放进 live 路径、报错、状态不动 | session-service.test.ts |
+| SESS-05 | P1 | 自动 | 单测 | 切换中 straggler | switch_session 在途时到达的事件入 buffer，最终拼进新快照尾部（hello 可见；不补写归档——见 KNOWN-9） | session-service.test.ts |
+| SESS-06 | P0 | 自动 | 单测 | 双绑回归 | 切换后的 refresh **显式绑目标 id**：离场归档的 pi 绑定保持原值（修复前无参刷新会把离场归档绑到目标 pi 文件，此后恢复它 = 错误上下文） | session-service.test.ts |
+| SESS-07 | P0 | 自动 | 单测 | 出生探针纠偏 | 归档诞生时若手上映射陈旧（prompt 抢先于 new_session 的 get_state），新鲜 get_state 探针改绑正确文件；token 防旧响应回退 | session-service.test.ts |
+| SESS-08 | P0 | 自动 | 单测 | removeSession | 400/404/409 正确映射；pi 文件仅当 resolve 于 `~/.pi/agent/sessions` 下、lstat 真文件、≠ currentPiFile 才删（越界/链接/在用均跳过但归档照删） | session-service.test.ts |
+| SESS-09 | P1 | 自动 | 单测 | session-store | bindPiSession 幂等覆盖、resumable=!!path&&existsSync、rename 校验（trim 非空/≤120/无控制符）、resume 强制旧 id 续写、index.json 损坏备份重建后可续用 | session-store.test.ts |
+| SESS-10 | P1 | 自动 | 单测 | EventHub.load | 只填 history 不扇出订阅者、不影响节流状态（切换重放不产生事件风暴） | event-hub.test.ts |
+| SESS-11 | P0 | 自动(浏览器) | dev 栈 | `node scripts/verify-sessions-ui.mjs` | 侧栏 ＋新对话×2 各一轮对话 → 点旧会话行切回（聊天由归档重建）→ 黄金断言通过 → ✎ 行内重命名生效（Enter 提交/Esc 取消）→ ☰ 折叠成细栏可再展开；截图落 docs/images/sessions-*.png | scripts/verify-sessions-ui.mjs |
+| SESS-12 | P1 | 手测 | agent 运行中 | 点另一会话的恢复 | 行置灰（aria-disabled）+ title 显示原因（agent 运行中/编排运行中/未连接/切换中）；hover 行仍能展开 ✎/✕ 簇（原生 disabled 在 Chromium 不传播 :hover——刻意不用） | SessionSidebar.tsx |
+| SESS-13 | P1 | 手测 | 旧档（无 pi 文件） | 点击行 / hover | 主点击=只读回放（非切换）+「仅回放」badge；▶ 按钮同样回放、不改变当前对话 | SessionSidebar.tsx |
+| SESS-14 | P1 | 手测 | 两个标签页 | 同切同一会话 | hello 广播：两标签同世界同 sessionId；一方 new_session 另一方也重置 | main.ts 装配 |
+| SESS-15 | P2 | 手测 | `PI_NO_SESSION=1` 起栈 | 发对话后看会话栏 | pi 不落文件：所有档「仅回放」、无恢复语义（逃生口回归旧行为） | main.ts |
+
+## 11. 已知问题 / 接受项（KNOWN）
 
 | 编号 | 描述 | 影响 | 依据 |
 |---|---|---|---|
@@ -257,6 +277,8 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | KNOWN-6 | agent_settled 无 message_end 的异常结算：流式草稿消失且回复不入 messages（消息丢失） | 依赖 pi 事件形状 | fold.ts:260-264 |
 | KNOWN-7 | 同毫秒同角色两条消息产生重复 React key | 极端边界无崩溃 | fold.ts:125-130 |
 | KNOWN-8 | hello 重放下标变化导致注入卡 details 重挂载折叠 | 展开态丢失 | chat.ts:104 |
+| KNOWN-9 | 切换进行中到达的 pi 事件只进内存快照与 hello，不补写归档尾部 | 极端窗口（切换瞬间有事件在途 + 随即断电）可能丢一两条，重连后视图少这几条 | session-service.ts switchTo |
+| KNOWN-10 | `GET /api/sessions` 每次全量读所有归档头部取摘要 | 存档积累到数百个后列表变慢（计划 index.json 缓存摘要） | session-store.ts list |
 
 ---
 
@@ -270,3 +292,4 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 6. **刷新**：F5→聊天+注入卡+编排卡完整恢复（HIST-12, CARD-17）
 7. **回放**：历史→冻结图+禁用输入→返回实时（HIST-01/02/04）
 8. **编排页对照**：编排页手动运行完成后**无**注入（SRV-02）
+9. **会话管理**：＋新对话两轮 → 侧栏点旧会话恢复 → 问「我叫什么名字」答小明 → ✎ 重命名 → ✕ 删除带确认（SESS-01/11/12）

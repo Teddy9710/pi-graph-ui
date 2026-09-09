@@ -243,7 +243,21 @@ export type RpcCommand =
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
-	| { id?: string; type: "new_session"; parentSession?: string };
+	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "get_state" }
+	| { id?: string; type: "switch_session"; sessionPath: string };
+
+/** `get_state` response `data` — the subset the bridge consumes (session
+ *  identity + streaming flag). `sessionFile` is null while pi runs with
+ *  --no-session; the file only exists on disk after the first assistant
+ *  message has flushed. */
+export interface RpcGetStateData {
+	sessionId: string | null;
+	sessionFile: string | null;
+	sessionName?: string | null;
+	isStreaming: boolean;
+	[model: string]: unknown;
+}
 
 /** RPC response envelope on stdout: {id, type:"response", command, success, data}. */
 export interface RpcResponse {

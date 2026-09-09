@@ -15,3 +15,13 @@ apps/server/*.docx
 apps/server/*.html
 !apps/server/snake.html
 apps/server/docs/
+
+# 个人调研数据（任务产物）与本机杂项——不入库
+apps/server/*.json
+!apps/server/package.json
+!apps/server/tsconfig.json
+apps/server/nul
+docs/TRIAL-RUN-PLAN.md
+
+# Claude 本机配置/技能库/调研笔记——机器私有，绝不 push
+.claude/

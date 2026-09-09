@@ -7,15 +7,27 @@
  * WS protocol (server -> client, JSON):
  *   {type: "hello", snapshot: JsonAgentSessionEvent[]}  - on connect, full history
  *          + run: RunEvent[] (retained last orchestration run, may be absent)
+ *          + sessionId: string | null (archive id of the LIVE session; also
+ *          broadcast after new_session / switch_session so every client
+ *          rebuilds atomically)
+ *   {type: "session_bound", sessionId}                   - the fresh session's
+ *          first event lazily created its archive; whisper the new LIVE id
+ *          (no snapshot — the stream is unchanged)
  *   {type: "event", event: JsonAgentSessionEvent}        - live events (throttled)
  *   {type: "response", response: RpcResponse}            - correlated RPC replies
  *   {type: "run_event", event: RunEvent}                 - orchestration stream
  *   {type: "run_error", message, issues}                 - run_graph/approve_node rejected (requester only)
+ *   {type: "error", message}                             - command/session-action rejected (requester only)
  *   {type: "pi-exit", code, stderr}                      - subprocess died
  *
  * WS protocol (client -> server):
  *   {type: "command", command: RpcCommand}               - forwarded verbatim
+ *          (new_session is intercepted: guarded reset + hello broadcast;
+ *          switch_session passthrough is REJECTED - use the message below)
  *   {type: "request", command: RpcCommand}               - forwarded, reply relayed
+ *   {type: "switch_session", id}                         - resume an archived session
+ *          as the LIVE session (guards: idle agent/run, resumable archive;
+ *          success = hello broadcast with the rebuilt snapshot)
  *   {type: "run_graph", graph: GraphDef}                 - start an orchestration run
  *   {type: "plan_run", goal: string, chat?: true}        - plan a goal into a graph, then run it;
  *          chat: true = on completion the node outputs are compiled into one
@@ -32,6 +44,9 @@
  *   GET /api/state  - folded session summary (from @pi-graph/shared)
  *   GET /api/agents - available agent personas (feeds the editor datalist)
  *   GET /api/runs(/:id) - orchestration run archive (debug)
+ *   GET /api/sessions(/:id/events) - session archive list / raw events
+ *   DELETE /api/sessions/:id - remove an archived session (409 if active)
+ *   PATCH /api/sessions/:id {title} - rename a session
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -48,7 +63,8 @@ import { PiNodeExecutor } from "./pi-node-executor.ts";
 import { PiPlanner } from "./planner.ts";
 import { isValidGateNote, MAX_GATE_NOTE_CHARS, RunManager } from "./run-manager.ts";
 import { RunStore } from "./run-store.ts";
-import { SessionStore } from "./session-store.ts";
+import { SessionStore, isValidTitle } from "./session-store.ts";
+import { SessionService } from "./session-service.ts";
 import { Leaderboard } from "./snake/leaderboard.ts";
 import { snakeRoutes } from "./snake/routes.ts";
 
@@ -72,6 +88,15 @@ const ORCH_NODE_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_NODE_TIMEOU
 const ORCH_MIN_OUTPUT_CHARS = Math.max(0, Math.floor(Number(process.env.ORCH_MIN_OUTPUT_CHARS ?? 0)) || 0);
 const ORCH_NODE_RETRY = process.env.ORCH_NODE_RETRY !== "0";
 const ORCH_AGENTS_DIR = join(homedir(), ".pi", "agent", "agents");
+/**
+ * Main-session pi persistence. Default ON: the main bridge spawns pi WITHOUT
+ * --no-session so pi writes its own session file (~/.pi/agent/sessions/...),
+ * which is what makes a past conversation RESUMABLE (RPC switch_session).
+ * PI_NO_SESSION=1 restores the old in-memory behavior (archives stay
+ * read-only). The orchestrator's planner/node executors always run no-session
+ * — they are one-shot and never resumed.
+ */
+const PI_NO_SESSION = process.env.PI_NO_SESSION === "1";
 /** Auto-orchestration planner (goal → graph); defaults to the node model. */
 const ORCH_PLANNER_MODEL = process.env.ORCH_PLANNER_MODEL ?? ORCH_MODEL;
 const ORCH_PLAN_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_PLAN_TIMEOUT_MS ?? 180_000) || 180_000);
@@ -80,7 +105,7 @@ const ORCH_PLAN_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_PLAN_TIMEOU
 // Bridge + hub wiring
 // ============================================================================
 
-const bridge = new PiBridge({ bin: PI_BIN, cwd: PI_CWD, extraArgs: PI_ARGS });
+const bridge = new PiBridge({ bin: PI_BIN, cwd: PI_CWD, extraArgs: PI_ARGS, noSession: PI_NO_SESSION });
 const hub = new EventHub({ intervalMs: 100 });
 const store = new SessionStore();
 const runStore = new RunStore();
@@ -123,24 +148,41 @@ runManager.subscribe((event) => {
 	}
 });
 
-/** Reset bridge-side state (new_session) and tell every client to rebuild. */
-function resetSession(): void {
-	hub.clear();
-	session = initState();
-	store.finalize();
-	for (const client of wsClients()) {
-		client.send(JSON.stringify({ type: "reset" }));
-	}
-	console.log("[session] reset");
-}
-
-bridge.on("event", (event) => {
-	foldEvent(session, event);
-	hub.ingest(event);
-	store.append(event);
+// ----------------------------------------------------------------------------
+// Session lifecycle (new / switch / remove) — the multi-session core. The
+// ordering guarantees live in SessionService; this wiring only hands it the
+// singletons and the live-event path.
+// ----------------------------------------------------------------------------
+const sessions = new SessionService({
+	bridge,
+	hub,
+	store,
+	isAgentBusy: () => session.agentStatus === "running",
+	isRunBusy: () => runManager.active,
+	applySession: (next) => {
+		session = next;
+	},
+	broadcast: (payload) => {
+		const text = JSON.stringify(payload); // stringify once for every client
+		for (const ws of wsClients()) {
+			if (ws.readyState === ws.OPEN) ws.send(text);
+		}
+	},
+	replyError: (ws, message) => {
+		ws?.send(JSON.stringify({ type: "error", message }));
+	},
+	retainedRunEvents: () => runManager.retainedEvents(),
+	deliverEvent: (event) => {
+		foldEvent(session, event);
+		hub.ingest(event);
+		store.append(event);
+	},
 });
+
+bridge.on("event", (event) => sessions.handleEvent(event));
 bridge.on("exit", (code, stderr) => {
 	console.error(`[pi] exited code=${code}\n${stderr}`);
+	sessions.handleBridgeExit();
 	store.finalize();
 	for (const client of wsClients()) {
 		client.send(JSON.stringify({ type: "pi-exit", code, stderr }));
@@ -199,6 +241,28 @@ app.get("/health", (c) =>
 );
 app.get("/api/sessions", async (c) => c.json(await store.list()));
 app.get("/api/sessions/:id/events", async (c) => c.json(await store.read(c.req.param("id"))));
+// Delete an archived session (archive + index + pi session file). The active
+// session is refused — switch away first.
+app.delete("/api/sessions/:id", (c) => {
+	const result = sessions.removeSession(c.req.param("id"));
+	if (result.status === 204) return c.body(null, 204);
+	return c.json({ error: result.message }, result.status);
+});
+// Rename a session (stored in index.json; auto title = firstUserText preview).
+app.patch("/api/sessions/:id", async (c) => {
+	const id = c.req.param("id");
+	let body: { title?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "请求体需为 JSON（{title}" }, 400);
+	}
+	if (typeof body.title !== "string" || !isValidTitle(body.title)) {
+		return c.json({ error: "title 需为 1–120 字符、无换行/控制符且首尾无空白的字符串" }, 400);
+	}
+	if (!store.rename(id, body.title)) return c.json({ error: "会话不存在或 title 非法" }, 404);
+	return c.json({ title: body.title });
+});
 app.get("/api/agents", (c) => {
 	try {
 		return c.json(readdirSync(ORCH_AGENTS_DIR).filter((f) => f.endsWith(".md")).map((f) => f.slice(0, -3)));
@@ -243,6 +307,9 @@ const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
 	console.log(`  pi cwd: ${PI_CWD}`);
 	bridge.start();
 	console.log(bridge.running ? "  pi rpc subprocess started" : "  pi rpc subprocess FAILED to start");
+	// Record which pi session file backs the fresh session (stdin buffers
+	// until pi's rpc loop is up; a dead pi just rejects into the warn).
+	void sessions.refreshPiSession();
 });
 
 // serve()'s declared return union includes http2 variants; with these options
@@ -266,7 +333,10 @@ wss.on("connection", (ws) => {
 
 	// Replay full history so the new client reconstructs the same session,
 	// plus the retained orchestration run (refresh mid/after a run works).
-	ws.send(JSON.stringify({ type: "hello", snapshot: hub.history(), run: runManager.retainedEvents() }));
+	// sessionId tells the client which archive is LIVE (sidebar highlight).
+	ws.send(
+		JSON.stringify({ type: "hello", snapshot: hub.history(), run: runManager.retainedEvents(), sessionId: store.currentId }),
+	);
 	console.log(`[ws] ${info.id} connected (${clients.size} total)`);
 
 	const unsubscribe = hub.subscribe((event) => {
@@ -284,6 +354,7 @@ wss.on("connection", (ws) => {
 			nodeId?: unknown;
 			approved?: unknown;
 			note?: unknown;
+			id?: unknown;
 		};
 		try {
 			msg = JSON.parse(String(data));
@@ -293,18 +364,19 @@ wss.on("connection", (ws) => {
 		if (msg.type === "command" || msg.type === "request") {
 			try {
 				const command = msg.command as { type?: string } | undefined;
-				// Session reset: wait for pi's confirmation before dropping state —
-				// an immediately-following prompt raced ahead of the reset gets
-				// swallowed by pi otherwise (prompt response arrives before the
-				// new_session response).
+				// Session reset: the service waits for pi's confirmation before
+				// dropping state — an immediately-following prompt raced ahead of
+				// the reset gets swallowed by pi otherwise — then rebuilds every
+				// client with a fresh hello (snapshot: []).
 				if (command?.type === "new_session") {
-					bridge
-						.request({ type: "new_session" })
-						.then((response) => {
-							if (response.success) resetSession();
-							else ws.send(JSON.stringify({ type: "error", message: "new_session failed" }));
-						})
-						.catch((err: Error) => ws.send(JSON.stringify({ type: "error", message: err.message })));
+					void sessions.newSession(ws);
+					return;
+				}
+				// Session switching goes through {type:"switch_session"} (guards,
+				// archive rebuild, hello broadcast) — a bare passthrough would
+				// hand pi an arbitrary sessionPath with zero checks.
+				if (command?.type === "switch_session") {
+					ws.send(JSON.stringify({ type: "error", message: "请通过会话栏切换会话（switch_session 不支持直接透传）" }));
 					return;
 				}
 				bridge.send(msg.command as never);
@@ -314,6 +386,13 @@ wss.on("connection", (ws) => {
 			} catch (err) {
 				ws.send(JSON.stringify({ type: "error", message: (err as Error).message }));
 			}
+			return;
+		}
+		if (msg.type === "switch_session") {
+			// Restore a past conversation as the LIVE session (RPC
+			// switch_session + archive rebuild). Guards answer the requester
+			// only; success broadcasts hello to every client.
+			void sessions.switchTo(ws, typeof msg.id === "string" ? msg.id : "");
 			return;
 		}
 		if (msg.type === "run_graph") {

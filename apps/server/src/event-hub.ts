@@ -97,4 +97,13 @@ export class EventHub {
 		this.lastSentAt.clear();
 		this.replay = [];
 	}
+
+	/** Replace the replay buffer WITHOUT fanning out to subscribers — the
+	 *  switch_session path rebuilds server state from the archive and then
+	 *  tells clients via a fresh `hello`; broadcasting each archived event
+	 *  first would be an N-message storm the hello immediately overwrites.
+	 *  Throttle state stays untouched (archive reads don't re-throttle). */
+	load(events: JsonAgentSessionEvent[]): void {
+		this.replay = [...events];
+	}
 }

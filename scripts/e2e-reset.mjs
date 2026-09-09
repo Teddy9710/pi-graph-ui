@@ -62,8 +62,10 @@ ws.onmessage = (msg) => {
 			}
 		}
 	}
-	if (envelope.type === "reset" && phase === "reset") {
-		console.log("got reset marker, history cleared; sending fresh prompt");
+	if (envelope.type === "hello" && phase === "reset") {
+		// new_session now answers with a fresh hello (snapshot: [], sessionId:
+		// null) instead of the legacy reset marker.
+		console.log("got fresh hello, history cleared; sending fresh prompt");
 		phase = "prompt2";
 		resetLocal();
 		sendPrompt("用 bash 执行 echo reset-test-2 然后告诉我输出");

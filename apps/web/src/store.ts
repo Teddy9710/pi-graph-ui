@@ -26,13 +26,17 @@ export type WsStatus = "connecting" | "open" | "closed" | "reconnecting";
 export const WS_URL = (import.meta.env.VITE_WS_URL as string | undefined) || "ws://localhost:8787";
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || "http://localhost:8787";
 
-interface SessionMeta {
+export interface SessionMeta {
 	id: string;
 	startedAt: number;
 	endedAt: number;
 	eventCount: number;
 	firstUserText: string | null;
 	outputTokens: number;
+	/** User-chosen title (index.json); UI falls back to firstUserText. */
+	title?: string;
+	/** pi session file exists → the conversation can be RESUMED as live. */
+	resumable?: boolean;
 }
 
 interface AppState {
@@ -47,30 +51,48 @@ interface AppState {
 	 *  live — the graph on the side canvas AND the folded session's transcript
 	 *  (read-only) in the chat column. */
 	history: { meta: SessionMeta; graph: Graph; session: SessionState; loading: boolean } | null;
-	historyOpen: boolean;
 	sessions: SessionMeta[];
-	/** Last sessions fetch failed (server down / blocked) — the drawer says so. */
+	/** Last sessions fetch failed (server down / blocked) — the sidebar says so. */
 	sessionsError: boolean;
-	/** Sessions fetch in flight — the drawer shows 加载中 instead of flashing
+	/** Sessions fetch in flight — the sidebar shows 加载中 instead of flashing
 	 * 「暂无存档」 before the list lands. */
 	sessionsLoading: boolean;
 	/** A REPLAY load failed after the list was already showing — without this
-	 * the drawer stayed silent and the app silently fell back to live mode. */
+	 * the sidebar stayed silent and the app silently fell back to live mode. */
 	historyError: { id: string; message: string } | null;
+	/** Archive id of the LIVE session (hello.sessionId). Drives the sidebar's
+	 * 「当前」 marker; null = fresh session, nothing archived yet. */
+	sessionId: string | null;
+	/** A switch_session round-trip is in flight (guards double-clicks). */
+	switching: boolean;
+	/** Last session action (switch/delete/rename) failure, surfaced near the
+	 * sidebar; cleared on the next action or successful hello. */
+	sessionActionError: string | null;
 	sendPrompt: (message: string) => void;
 	steer: (message: string) => void;
 	abort: () => void;
 	newSession: () => void;
 	select: (nodeId: string | null) => void;
-	openHistory: () => Promise<void>;
 	loadHistory: (id: string) => Promise<void>;
 	exitHistory: () => void;
+	refreshSessions: () => Promise<void>;
+	/** Resume an archived conversation as the LIVE session. One-shot guarded;
+	 *  completion is the hello broadcast (or the error envelope / a 15s
+	 *  timeout clears the pending flag). */
+	switchSession: (id: string) => void;
+	deleteSession: (id: string) => Promise<void>;
+	renameSession: (id: string, title: string) => Promise<boolean>;
 }
 
 let ws: WebSocket | null = null;
 let reconnectDelay = 1000;
 /** Monotonic token for in-flight history loads; bumped to cancel stale ones. */
 let historyReq = 0;
+/** Monotonic token for the switch_session 15s timeout; bumped on every new
+ * switch and on every hello so only the LATEST timer can clear `switching`. */
+let switchGuard = 0;
+/** Debounce timer for the hello/session_bound→refreshSessions nudge. */
+let sessionsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 function send(payload: unknown): void {
 	if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
@@ -121,6 +143,18 @@ function dropQueuedEvents(): void {
 	}
 }
 
+/** The LIVE archive id changed (hello / session_bound) — the sidebar's
+ *  resumable badges and 「当前」 marker are stale. Debounced so a burst of
+ *  nudges costs one fetch. */
+function nudgeSessionsRefresh(next: string | null, prev: string | null): void {
+	if (next === prev) return;
+	if (sessionsRefreshTimer) clearTimeout(sessionsRefreshTimer);
+	sessionsRefreshTimer = setTimeout(() => {
+		sessionsRefreshTimer = null;
+		void useStore.getState().refreshSessions();
+	}, 300);
+}
+
 function queueEvents(events: JsonAgentSessionEvent[]): void {
 	eventQueue.push(...events);
 	// rAF stalls while the tab is hidden — flush synchronously past the cap
@@ -149,19 +183,21 @@ export const useStore = create<AppState>((set, get) => ({
 	eventCount: 0,
 	lastEventAt: null,
 	history: null,
-	historyOpen: false,
 	sessions: [],
 	sessionsError: false,
 	sessionsLoading: false,
 	historyError: null,
+	sessionId: null,
+	switching: false,
+	sessionActionError: null,
 
 	sendPrompt: (message) => send({ type: "command", command: { type: "prompt", message } }),
 	steer: (message) => send({ type: "command", command: { type: "steer", message } }),
 	abort: () => send({ type: "command", command: { type: "abort" } }),
 	newSession: () => send({ type: "command", command: { type: "new_session" } }),
 	select: (nodeId) => set({ selectedNodeId: nodeId }),
-	openHistory: async () => {
-		set({ historyOpen: true, sessionsLoading: true });
+	refreshSessions: async () => {
+		set({ sessionsLoading: true });
 		try {
 			const res = await fetch(`${API_BASE}/api/sessions`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -227,6 +263,53 @@ export const useStore = create<AppState>((set, get) => ({
 		historyReq++; // cancel any in-flight load
 		set({ history: null, historyError: null, selectedNodeId: null });
 	},
+	switchSession: (id) => {
+		const { switching, wsStatus } = get();
+		if (switching || wsStatus !== "open") return;
+		set({ switching: true, sessionActionError: null });
+		send({ type: "switch_session", id });
+		// The hello broadcast completes the switch; if neither it nor an error
+		// arrives (pi hung / socket died mid-switch), release the flag so the
+		// sidebar isn't wedged in 「切换中…」 forever.
+		const token = ++switchGuard;
+		setTimeout(() => {
+			if (token !== switchGuard) return;
+			useStore.setState((s) => (s.switching ? { switching: false, sessionActionError: "切换会话超时，请重试" } : {}));
+		}, 15000);
+	},
+	deleteSession: async (id) => {
+		try {
+			const res = await fetch(`${API_BASE}/api/sessions/${id}`, { method: "DELETE" });
+			if (!res.ok && res.status !== 404) {
+				const body = (await res.json().catch(() => null)) as { error?: string } | null;
+				throw new Error(body?.error ?? `HTTP ${res.status}`);
+			}
+			// Deleting the archive being replayed would leave a ghost read-only
+			// view of a session that no longer exists — drop back to live.
+			if (get().history?.meta.id === id) get().exitHistory();
+			await get().refreshSessions();
+		} catch (err) {
+			set({ sessionActionError: err instanceof Error ? err.message : "删除失败" });
+		}
+	},
+	renameSession: async (id, title) => {
+		try {
+			const res = await fetch(`${API_BASE}/api/sessions/${id}`, {
+				method: "PATCH",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ title }),
+			});
+			if (!res.ok) {
+				const body = (await res.json().catch(() => null)) as { error?: string } | null;
+				throw new Error(body?.error ?? `HTTP ${res.status}`);
+			}
+			await get().refreshSessions();
+			return true;
+		} catch (err) {
+			set({ sessionActionError: err instanceof Error ? err.message : "重命名失败" });
+			return false;
+		}
+	},
 }));
 
 /** Open the WebSocket (idempotent) and wire it into the store. */
@@ -254,6 +337,8 @@ export function connect(): void {
 			stderr?: string;
 			/** Orchestration: hello replays the retained run events (RunEvent[]). */
 			run?: unknown;
+			/** Session archive id that is now LIVE (hello / new_session / switch). */
+			sessionId?: string | null;
 			/** Orchestration: run_error payload. */
 			message?: string;
 			issues?: unknown;
@@ -267,21 +352,53 @@ export function connect(): void {
 			// Bridge dropped the session - clear canvas, keep connection.
 			// Queued events belong to the dropped session — discard them.
 			dropQueuedEvents();
-			useStore.setState((s) => ({ ...resetSession(), selectedNodeId: null }));
+			useStore.setState((s) => ({ ...resetSession(), selectedNodeId: null, sessionId: null }));
 			return;
 		}
 		if (envelope.type === "hello" && envelope.snapshot) {
 			// Fresh replay of the whole session - rebuild state from scratch.
 			// The snapshot supersedes anything still queued from the old socket.
+			// Serves connect-replay, ＋新对话 AND switch_session — the presence
+			// of sessionId distinguishes an archive-backed session from a fresh
+			// one, and completes any pending switch (guards its timeout).
 			dropQueuedEvents();
+			switchGuard++;
+			const prevSessionId = useStore.getState().sessionId;
+			const nextSessionId = typeof envelope.sessionId === "string" ? envelope.sessionId : null;
 			useStore.setState((s) => {
 				const fresh = resetSession();
 				ingest(fresh as AppState, envelope.snapshot!);
-				return { ...fresh, eventCount: s.eventCount + envelope.snapshot!.length };
+				return {
+					...fresh,
+					eventCount: s.eventCount + envelope.snapshot!.length,
+					sessionId: nextSessionId,
+					switching: false,
+					sessionActionError: null,
+				};
 			});
 			// Orchestration: also restore the retained run snapshot (absent
 			// when the server has never run a graph).
 			setRunSnapshot(envelope.run as RunEvent[] | undefined);
+			nudgeSessionsRefresh(nextSessionId, prevSessionId);
+			return;
+		}
+		if (envelope.type === "session_bound" && typeof envelope.sessionId === "string") {
+			// Mid-live archive creation: the first event of a fresh session
+			// lazily creates its archive server-side, and this whisper (not a
+			// hello — the snapshot is unchanged) tells clients which id is LIVE
+			// so the sidebar can pin it and mark it resumable-on-settle.
+			const prev = useStore.getState().sessionId;
+			useStore.setState({ sessionId: envelope.sessionId });
+			nudgeSessionsRefresh(envelope.sessionId, prev);
+			return;
+		}
+		if (envelope.type === "error") {
+			// Rejected command / session action, requester-only. Only a pending
+			// switch surfaces it (its failure has no other signal); other
+			// errors keep the old silent-drop behavior.
+			useStore.setState((s) =>
+				s.switching ? { switching: false, sessionActionError: envelope.message ?? "操作失败" } : {},
+			);
 			return;
 		}
 		if (envelope.type === "event" && envelope.event) {

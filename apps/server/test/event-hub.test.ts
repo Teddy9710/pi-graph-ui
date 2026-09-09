@@ -88,4 +88,36 @@ describe("EventHub", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("load() replaces history WITHOUT fanning out to subscribers", () => {
+		const hub = new EventHub({ intervalMs: 1000 });
+		hub.ingest({ type: "agent_start" });
+		const seen: string[] = [];
+		hub.subscribe((e) => seen.push(e.type));
+		// The switch_session path: rebuild the replay buffer from the archive,
+		// then ONE hello tells the clients — N event broadcasts would be a
+		// storm the hello immediately overwrites.
+		hub.load([{ type: "turn_start" }, { type: "agent_settled" }] as JsonAgentSessionEvent[]);
+		expect(seen).toEqual([]);
+		expect(hub.history().map((e) => e.type)).toEqual(["turn_start", "agent_settled"]);
+	});
+
+	it("load() leaves throttle state untouched — the next update passes immediately", () => {
+		vi.useFakeTimers();
+		try {
+			const hub = new EventHub({ intervalMs: 1000 });
+			hub.ingest({ type: "tool_execution_update", toolCallId: "tc", toolName: "t", args: {}, partialResult: { n: 1 } });
+			hub.clear();
+			hub.load([]);
+			const seen: number[] = [];
+			hub.subscribe((e) => {
+				if (e.type === "tool_execution_update") seen.push(e.partialResult.n);
+			});
+			// A fresh toolCallId after a switch must not inherit stale pacing.
+			hub.ingest({ type: "tool_execution_update", toolCallId: "tc2", toolName: "t", args: {}, partialResult: { n: 9 } });
+			expect(seen).toEqual([9]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
