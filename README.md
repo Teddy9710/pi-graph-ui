@@ -1,6 +1,6 @@
 # pi-graph-ui
 
-![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-263%20passed-2DA44E)
+![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-325%20passed-2DA44E)
 
 把 [pi coding agent](https://github.com/badlogic/pi-mono) 会话的完整动作过程**实时可视化成图**，并在同一界面里做**图编排执行**：主 agent 的每次工具调用是一个节点，并行 spawn 的子 agent 扇出与汇聚在 React Flow 画布上展开；编排页既可手画任务 DAG，也可输入一个目标让 AI 自动拆图——**每个节点都是一个真实独立运行的 pi agent 实例**。
 
@@ -39,13 +39,22 @@
 - 生成图按内容签名布局，流式期间**绝不重排**；顶部 chips 实时汇总 ok / 失败 / 跳过、token 与用时
 - 生成图可「转入编辑器」，改完手动重跑
 
+### 模型配置页 · provider / 密钥 / 默认模型，免手改文件
+
+- 左列 provider 台账，右侧编辑器：Base URL、API 类型、模型列表（id/显示名/推理标记）；不认识的字段（compat、headers…）原样保留
+- 密钥只进仓库根 `.env`（gitignore）+ 进程环境，`models.json` 永远只存 `$VAR` 引用；「测试连接」对端点发一次零 token 的列模型请求，验证 URL 与密钥
+- 「应用」一键切换：主会话 `set_model` + 编排节点/AI 规划器默认 + `settings.json` 持久默认（重启后仍是它）
+- pi 在启动时快照可用模型——**新增 provider / 新密钥需要勾选「重启 pi」**（对话上下文自动恢复），页面会就此提示
+
 ## 快速开始
 
 ### 一次性环境准备
 
 1. **Node ≥ 20 + pnpm**，仓库根目录 `pnpm install`
 2. **pi CLI**：`npm install -g @earendil-works/pi-coding-agent`（Windows 上即 `pi.cmd`）
-3. **模型配置**：`~/.pi/agent/models.json` 定义 OpenAI 格式的自定义 provider（示例为 DeepSeek，key 走环境变量不落盘）：
+3. **模型配置**（两种方式，二选一）：
+   - **页面配置（推荐）**：首次可跳过本步——启动后打开 http://localhost:5173 的「模型」tab，新增 provider（Base URL + 密钥 + 模型列表）、测试连接、保存并应用，全程不碰文件。密钥明文只写入仓库根 `.env`（gitignore），`models.json` 只存 `$VAR` 引用。
+   - **手写文件**：`~/.pi/agent/models.json` 定义 OpenAI 格式的自定义 provider（示例为 DeepSeek，key 走环境变量不落盘）：
    ```json
    {
      "providers": {
@@ -68,7 +77,7 @@
 
 ### 日常启动
 
-**一键（推荐）**：仓库根目录建 `.env`（已被 gitignore）：
+**一键（推荐）**：仓库根目录建 `.env`（已被 gitignore；也可以不建，直接在页面「模型」tab 里粘贴密钥，保存时会自动创建）：
 
 ```
 DEEPSEEK_API_KEY=sk-...
@@ -98,7 +107,7 @@ cd apps/web && pnpm dev
 
 ```mermaid
 flowchart LR
-    UI["浏览器 · apps/web<br/>实时页 + 编排页<br/>(React 19 + React Flow)"]
+    UI["浏览器 · apps/web<br/>实时页 + 编排页 + 模型配置页<br/>(React 19 + React Flow)"]
 
     subgraph SRV["桥接服务 · apps/server（Hono + ws，:8787）"]
         BR["pi-bridge<br/>主会话管理"]
@@ -109,7 +118,7 @@ flowchart LR
     MAIN["pi --mode rpc<br/>主会话 agent"]
     NODES["pi --mode rpc --no-session<br/>节点 agent × N（并行上限内）"]
 
-    UI <-->|"WebSocket 事件流/命令<br/>HTTP 只读 API"| BR
+    UI <-->|"WebSocket 事件流/命令<br/>HTTP（会话/模型配置）"| BR
     UI -->|"run_graph / plan_run"| RM
     PL -->|"goal → 任务 DAG（流式）"| RM
     RM -->|"每节点一进程：persona + 上游产出注入<br/>超时必杀 · 失败传染 · 质量门"| NODES
@@ -134,7 +143,7 @@ flowchart LR
 ## 验证 / 测试
 
 ```bash
-pnpm -r test         # 263 个单测全过（shared 95 + server 168）
+pnpm -r test         # 325 个单测全过（shared 95 + server 230）
 pnpm -r typecheck    # 全仓类型检查（web 无单测，typecheck 即门禁）
 
 # 以下 e2e 需要桥接服务在跑（dev.mjs）且模型 key 可用，会真实调 LLM：

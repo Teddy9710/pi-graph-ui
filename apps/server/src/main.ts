@@ -43,6 +43,10 @@
  *   GET /health     - liveness + pi subprocess status
  *   GET /api/state  - folded session summary (from @pi-graph/shared)
  *   GET /api/agents - available agent personas (feeds the editor datalist)
+ *   GET /api/models - model config (providers/active/persisted default)
+ *   PUT  /api/models - save providers (+secrets → .env, literals → $VAR refs)
+ *   POST /api/models/test    - probe a provider's model-list endpoint
+ *   POST /api/models/apply   - switch active model (+optional bridge restart)
  *   GET /api/runs(/:id) - orchestration run archive (debug)
  *   GET /api/sessions(/:id/events) - session archive list / raw events
  *   DELETE /api/sessions/:id - remove an archived session (409 if active)
@@ -59,6 +63,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { buildSynthPrompt, deriveGraph, foldEvent, initState, type GraphDef, type SessionState } from "@pi-graph/shared";
 import { EventHub } from "./event-hub.ts";
 import { PiBridge } from "./pi-bridge.ts";
+import { findRepoRoot, loadDotEnvFile, ModelsConfigService, modelsRoutes, piAgentDir, readPersistedDefault } from "./models-config.ts";
 import { PiNodeExecutor } from "./pi-node-executor.ts";
 import { PiPlanner } from "./planner.ts";
 import { isValidGateNote, MAX_GATE_NOTE_CHARS, RunManager } from "./run-manager.ts";
@@ -68,6 +73,10 @@ import { SessionService } from "./session-service.ts";
 import { Leaderboard } from "./snake/leaderboard.ts";
 import { snakeRoutes } from "./snake/routes.ts";
 
+// 仓库根 .env（dev.mjs 已加载过；裸 `node src/main.ts` 时这里补上同样的
+// only-if-undefined 语义，密钥才进得了之后 spawn 的 pi 子进程）。
+loadDotEnvFile(join(findRepoRoot(process.cwd()), ".env"));
+
 const PORT = Number(process.env.PORT ?? 8787);
 const PI_BIN = process.env.PI_BIN;
 const PI_CWD = process.env.PI_CWD ?? process.cwd();
@@ -75,7 +84,12 @@ const PI_CWD = process.env.PI_CWD ?? process.cwd();
 const PI_ARGS = process.env.PI_ARGS?.split(/\s+/).filter(Boolean) ?? [];
 /** Orchestration tuning; defaults mirror pi's own subagent pool (concurrency 4). */
 const ORCH_MAX_PARALLEL = Math.max(1, Number(process.env.ORCH_MAX_PARALLEL ?? 4) || 4);
-const ORCH_MODEL = process.env.ORCH_MODEL ?? "deepseek/deepseek-chat";
+// 编排默认模型：env 优先；否则用 settings.json 的持久默认（模型配置页写的）；
+// 都没有才退回 DeepSeek 出厂默认——配置页一旦选过模型即是唯一事实源。
+const persistedModel = readPersistedDefault(piAgentDir());
+const ORCH_MODEL =
+	process.env.ORCH_MODEL ??
+	(persistedModel ? `${persistedModel.provider}/${persistedModel.modelId}` : "deepseek/deepseek-chat");
 const ORCH_NODE_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_NODE_TIMEOUT_MS ?? 600_000) || 600_000);
 /**
  * Quality gate + salvage retry (pi-graph-tool 互鉴): nodes whose trimmed
@@ -109,17 +123,19 @@ const bridge = new PiBridge({ bin: PI_BIN, cwd: PI_CWD, extraArgs: PI_ARGS, noSe
 const hub = new EventHub({ intervalMs: 100 });
 const store = new SessionStore();
 const runStore = new RunStore();
+const executor = new PiNodeExecutor({
+	bin: PI_BIN,
+	cwd: PI_CWD,
+	defaultModel: ORCH_MODEL,
+	agentsDir: ORCH_AGENTS_DIR,
+	timeoutMs: ORCH_NODE_TIMEOUT_MS,
+	minOutputChars: ORCH_MIN_OUTPUT_CHARS,
+	salvageRetry: ORCH_NODE_RETRY,
+});
+const planner = new PiPlanner({ bin: PI_BIN, cwd: PI_CWD, model: ORCH_PLANNER_MODEL, timeoutMs: ORCH_PLAN_TIMEOUT_MS });
 const runManager = new RunManager({
-	executor: new PiNodeExecutor({
-		bin: PI_BIN,
-		cwd: PI_CWD,
-		defaultModel: ORCH_MODEL,
-		agentsDir: ORCH_AGENTS_DIR,
-		timeoutMs: ORCH_NODE_TIMEOUT_MS,
-		minOutputChars: ORCH_MIN_OUTPUT_CHARS,
-		salvageRetry: ORCH_NODE_RETRY,
-	}),
-	planner: new PiPlanner({ bin: PI_BIN, cwd: PI_CWD, model: ORCH_PLANNER_MODEL, timeoutMs: ORCH_PLAN_TIMEOUT_MS }),
+	executor,
+	planner,
 	maxParallel: ORCH_MAX_PARALLEL,
 	store: runStore,
 	// Chat-first runs: when the graph completes, compile the node outputs and
@@ -189,6 +205,41 @@ bridge.on("exit", (code, stderr) => {
 	}
 });
 
+// ----------------------------------------------------------------------------
+// 模型配置页的后端（见 models-config.ts 头注释）。orchestration 的两个默认
+// 模型在这里镜像跟踪：apply 时热替换 executor/planner 的内存值，对之后的
+// 每次 spawn 立即生效（它们不重启）。
+// ----------------------------------------------------------------------------
+let orchNodeModel = ORCH_MODEL;
+let orchPlannerModel = ORCH_PLANNER_MODEL;
+const modelsService = new ModelsConfigService({
+	bridge,
+	getOrchDefaults: () => ({ nodeDefault: orchNodeModel, plannerModel: orchPlannerModel }),
+	setOrchDefaults: (model) => {
+		orchNodeModel = model;
+		orchPlannerModel = model;
+		executor.setDefaultModel(model);
+		planner.setModel(model);
+	},
+	isAgentBusy: () => session.agentStatus === "running",
+	isRunBusy: () => runManager.active,
+	currentPiFile: () => sessions.currentPiFile,
+	refreshPiSession: () => sessions.refreshPiSession(),
+	broadcastHello: () => {
+		// 计划内重启会先触发 pi-exit（红条）——hello 让客户端原子重建并清掉它
+		const payload = JSON.stringify({
+			type: "hello",
+			snapshot: hub.history(),
+			run: runManager.retainedEvents(),
+			sessionId: store.currentId,
+		});
+		for (const ws of wsClients()) {
+			if (ws.readyState === ws.OPEN) ws.send(payload);
+		}
+	},
+	piNoSession: PI_NO_SESSION,
+});
+
 // ============================================================================
 // HTTP
 // ============================================================================
@@ -214,20 +265,33 @@ app.use("*", async (c, next) => {
 });
 
 // ----------------------------------------------------------------------------
-// CORS for the read-only archive APIs the web app fetches cross-origin (Vite
-// serves the app on :5173, this server on :8787; WebSockets are CORS-exempt,
-// fetch is not). Without ACAO the browser silently drops these responses —
-// the history drawer showed 「暂无存档」 even with archives on disk. Scoped
-// to these GET endpoints; the snake sub-API keeps same-origin policy.
+// CORS for the archive + model-config APIs the web app fetches cross-origin
+// (Vite serves the app on :5173, this server on :8787; WebSockets are
+// CORS-exempt, fetch is not). Without ACAO the browser silently drops these
+// responses — the history drawer showed 「暂无存档」 even with archives on
+// disk. The snake sub-API keeps same-origin policy.
 // ----------------------------------------------------------------------------
 app.use("/api/sessions", cors());
 app.use("/api/sessions/*", cors());
 app.use("/api/agents", cors());
 app.use("/api/runs", cors());
 app.use("/api/runs/*", cors());
+// 模型配置页是「写」接口（PUT 写 models.json/.env、POST 触发进程重启与外
+// 发探测请求）——CORS 不能像上面的只读 API 那样 origin:* 全放开，否则任何
+// 网页都能借受害者的浏览器改模型配置（改 baseUrl 即可静默劫持全部请求与
+// 密钥）。只允许本机开发前端（vite :5173 / 127.0.0.1 任意端口）；同源部署
+// （server 直接服务打包产物）不发跨域请求，不受影响。
+const modelsCors = cors({
+	origin: (origin) => (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin) ? origin : undefined),
+});
+app.use("/api/models", modelsCors);
+app.use("/api/models/*", modelsCors);
 
 // Snake game sub-API (leaderboard + token issuance).
 app.route("/api/snake", snakeRoutes({ leaderboard: new Leaderboard() }));
+
+// Model config sub-API (providers / active model / test / apply).
+app.route("/api/models", modelsRoutes({ service: modelsService }));
 
 app.get("/snake", (c) => c.html(snakeHtml()));
 app.get("/", (c) => c.html(snakeHtml()));

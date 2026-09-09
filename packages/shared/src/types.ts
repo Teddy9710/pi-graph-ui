@@ -245,6 +245,8 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "new_session"; parentSession?: string }
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_available_models" }
+	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "switch_session"; sessionPath: string };
 
 /** `get_state` response `data` — the subset the bridge consumes (session

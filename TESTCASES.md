@@ -1,6 +1,6 @@
 # pi-graph-ui 测试用例（M-C 对话式编排）
 
-覆盖范围：实时页「对话为主」布局、聊天面板、⚡ 自动编排、编排卡片与结果注入、服务端注入管线、失败/中止路径、历史回放与恢复、安全边界、人工门控（HITL）。
+覆盖范围：实时页「对话为主」布局、聊天面板、⚡ 自动编排、编排卡片与结果注入、服务端注入管线、失败/中止路径、历史回放与恢复、安全边界、人工门控（HITL）、模型配置页。
 
 每条用例均从源码提取并经对抗性复核（预期结果与代码行为逐条核对，`代码` 列为依据位置）。
 
@@ -18,7 +18,7 @@
 node scripts/dev.mjs          # 启动 dev 栈：server :8787 / web :5173（Ctrl+C 全停）
 node scripts/stop.mjs         # 兜底清理：dev.mjs 被硬杀后残留的 server/vite（pidfile + 端口扫描）
 # 浏览器打开 http://localhost:5173
-pnpm -r test                  # 全部单测（shared 95 + server 142）
+pnpm -r test                  # 全部单测（shared 95 + server 230）
 pnpm -r typecheck             # 三个包类型检查
 node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1（可选 ABORT=1）
 node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 → 批准注入下游 → 归档/重放/孤儿
@@ -29,7 +29,7 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | 层 | 内容 | 状态 |
 |---|---|---|
 | shared 单测 95 | chat.test 15（时间线合并/sentinel 识别）、orchestration.test 59（validateGraph 含节点能力档案与门控规则/assemblePrompt/buildSynthPrompt/capBytes 截断/label 防伪造/fold attempts/门控事件折叠与长效计数）、fold 13、graph 8 | ✅ 全绿 |
-| server 单测 142 | run-manager 25（含 chat 钩子 6 条 + 门控备注防伪造）、planner 30（label 归一 + 能力档案归一 + 风险门控提取/降级/防伪）、orchestrator 22（含 attempts/capBytes/门控挂起·决策·中止·槽位旁路）、pi-node-executor 14（质量门 salvage/超时/workdir/工具档案）、session-store/snake/bridge 等 | ✅ 全绿 |
+| server 单测 230 | run-manager 26（含 chat 钩子 6 条 + 门控备注防伪造）、planner 30（label 归一 + 能力档案归一 + 风险门控提取/降级/防伪）、orchestrator 22（含 attempts/capBytes/门控挂起·决策·中止·槽位旁路）、pi-node-executor 14（质量门 salvage/超时/workdir/工具档案）、models-config 62（校验器/密钥哨兵往返/.env 与 models.json 写序/apply 运行时兜底/test 三通道/CORS 无关的服务层）、session-service 14 / session-store / snake 40 / event-hub 8 / bridge 等 | ✅ 全绿 |
 | e2e | chain（注入/归档/重放）、PLAN（规划全流程；**规划器若自提门控自动放行**，门控全契约归 GATE 模式）、CHAT（sentinel 注入+整合回复+hello 重放）、**GATE（挂起→4 类非法决策仅回请求方→批准备注注入下游→归档/重放）**；ABORT 模式孤儿检查为 **PID 集合快照差**（基线之前存在的进程不计泄漏，PowerShell 查询失败即报错不静默通过） | ✅ 四模式绿 |
 | web | 仅 typecheck（无组件测试）→ 本文 MC-CHAT / MC-BAR / MC-LAY 的手测用例即为 Web 层主要防线 | ⚠️ 靠手测 |
 
@@ -260,12 +260,37 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | SESS-09 | P1 | 自动 | 单测 | session-store | bindPiSession 幂等覆盖、resumable=!!path&&existsSync、rename 校验（trim 非空/≤120/无控制符）、resume 强制旧 id 续写、index.json 损坏备份重建后可续用 | session-store.test.ts |
 | SESS-10 | P1 | 自动 | 单测 | EventHub.load | 只填 history 不扇出订阅者、不影响节流状态（切换重放不产生事件风暴） | event-hub.test.ts |
 | SESS-11 | P0 | 自动(浏览器) | dev 栈 | `node scripts/verify-sessions-ui.mjs` | 侧栏 ＋新对话×2 各一轮对话 → 点旧会话行切回（聊天由归档重建）→ 黄金断言通过 → ✎ 行内重命名生效（Enter 提交/Esc 取消）→ ☰ 折叠成细栏可再展开；截图落 docs/images/sessions-*.png | scripts/verify-sessions-ui.mjs |
+| SESS-16 | P1 | 手测 | 侧栏展开 | 点侧栏头部「«」/ 点窗口右上「☰ 会话」/ 点细栏「»」 | 三处入口一致：« 与 ☰ 都收起成 40px 细栏（折叠态记 localStorage），细栏 » 展开；收起后当前会话不丢（细栏 + 新对话仍可用） | SessionSidebar.tsx 头部, App.tsx ☰/rail |
 | SESS-12 | P1 | 手测 | agent 运行中 | 点另一会话的恢复 | 行置灰（aria-disabled）+ title 显示原因（agent 运行中/编排运行中/未连接/切换中）；hover 行仍能展开 ✎/✕ 簇（原生 disabled 在 Chromium 不传播 :hover——刻意不用） | SessionSidebar.tsx |
 | SESS-13 | P1 | 手测 | 旧档（无 pi 文件） | 点击行 / hover | 主点击=只读回放（非切换）+「仅回放」badge；▶ 按钮同样回放、不改变当前对话 | SessionSidebar.tsx |
 | SESS-14 | P1 | 手测 | 两个标签页 | 同切同一会话 | hello 广播：两标签同世界同 sessionId；一方 new_session 另一方也重置 | main.ts 装配 |
 | SESS-15 | P2 | 手测 | `PI_NO_SESSION=1` 起栈 | 发对话后看会话栏 | pi 不落文件：所有档「仅回放」、无恢复语义（逃生口回归旧行为） | main.ts |
 
-## 11. 已知问题 / 接受项（KNOWN）
+## 11. 模型配置页（MC-MODEL）
+
+页面取代手改三处文件（`~/.pi/agent/models.json`、仓库 `.env`、`~/.pi/agent/settings.json`）。核心安全不变式：**密钥明文只进 .env + process.env，models.json 只存 $VAR 引用，GET 永不回明文**。
+
+| 编号 | P | 类型 | 前置 | 操作 | 预期 | 代码 |
+|---|---|---|---|---|---|---|
+| MODEL-01 | P0 | 手测 | dev 栈已起 | 点头部「模型」tab | ①工具条：当前模型 chip / 持久默认 / 编排默认 + 下拉（配置模型 + 运行时模型标「（运行时）」）；②左列 provider 台账（「当前」/「新」标记、N 模型·密钥状态、高级字段徽标）；③空台账有引导文案 | ModelsPage.tsx, models-store.ts |
+| MODEL-02 | P0 | 手测 | 空台账 | ＋新增 → 填 id=deepseek / Base URL=api.deepseek.com/v1 / 密钥 / 模型 → 测试连接 → 保存 | ①测试连接对 `/models` 发零 token 请求，成功显示 HTTP 200 + 模型样例；②保存后 models.json 只落 `$DEEPSEEK_API_KEY` 引用，`.env` 出现明文（gitignore），进程 env 立即可见；③底部出现「重启 pi」提示（新 provider 对运行中 pi 不可见） | ModelsPage.tsx buildProviders, models-config.ts validateProvider/save |
+| MODEL-03 | P0 | 手测 | MODEL-02 已保存 | 下拉选 deepseek/deepseek-chat → 勾「重启 pi」→ 应用 | confirm（说明上下文自动恢复）→ 编排默认热替换 + settings.json 持久默认 + set_model；重启链 kill→start→switch_session 恢复上下文→hello 重建；结果条显示各步骤成败 | models-config.ts apply/restartBridge |
+| MODEL-04 | P0 | 契约 | 单测 | 密钥哨兵往返 | GET 脱敏：字面量→`""`、纯 `$VAR`/`!cmd` 原样；保存时 `""`=沿用（字面量顺带规范化为 $VAR+.env）、`null`=删除、新明文=转写。**已自动化**（models-config.test save/loadStatus 6 条） | models-config.ts sanitizeRawForClient/save |
+| MODEL-05 | P0 | 契约 | 冒烟（curl） | OPTIONS 预检 PUT /api/models：Origin=localhost:5173 vs evil.example | localhost/127.0.0.1/[::1] 任意端口 → 回显 ACAO；其他 origin → **无 ACAO 头**（预检即拦截，写接口不被任意网页借浏览器调用——改 baseUrl 即可劫持全部请求与密钥）。只读 API 仍 origin:*。**已自动化冒烟**（本地 curl 验证 2026-09） | main.ts:284-288 |
+| MODEL-06 | P0 | 契约 | 单测 | PUT secrets 通道注入尝试 | 只接受「本次配置里被某 provider apiKey 引用」的变量名；NODE_OPTIONS/PATH/HOME/PI_* 等敏感名 400；值 1–4096 且无换行（防 .env 整行注入）。**已自动化**（models-config.test 3 条） | models-config.ts save 步骤 2 |
+| MODEL-07 | P0 | 契约 | 单测 | .env 写失败（envPath 指向目录） | 先写密钥后写 models.json：.env 失败 → 500「models.json 未改动」，不产生悬空 $VAR 引用（反向顺序会销毁唯一明文）。**已自动化** | models-config.ts save 步骤 4 |
+| MODEL-08 | P0 | 契约 | 单测 | apply 目标不在 models.json | 在 bridge get_available_models 运行时快照内（内置/OAuth provider 如 anthropic）→ 仍可 set_model；两处都不在 → 400。**已自动化** | models-config.ts apply |
+| MODEL-09 | P1 | 契约 | 单测 | POST /test 三通道 | 按 id（models.json + env 解引用）/ 草稿字面量（只进内存请求不落盘）/ 草稿 apiKeyRef（仅限 models.json 已引用变量——不是任意环境变量读取器；`!cmd` 拒测；baseUrl 必须 http(s)）。**已自动化**（models-config.test 6 条） | models-config.ts test |
+| MODEL-10 | P0 | 手测 | 页面有未保存草稿 | 切「实时」tab 再切回 | 草稿（含已输入未保存的密钥）原样还在——草稿状态在 zustand store（跨 tab 卸载存活），非组件本地 state | models-store.ts drafts |
+| MODEL-11 | P1 | 契约 | 单测 | 删除持久默认指向的 provider | settings.json 只删 defaultProvider/defaultModel 两键（其他键保留）；默认 model 被移除同样清除；默认仍有效则不动。**已自动化**（models-config.test 2 条） | models-config.ts dropStalePersistedDefault |
+| MODEL-12 | P0 | 手测 | 编辑中 | 制造校验问题（id 重复 / model id 空 / Base URL 非 http(s) / `!cmd` 密钥又输入了新值） | 底部 issue 条逐条列出（悬停看全部）、保存按钮禁用；`!cmd` + 输入是阻断级（密钥会被静默丢弃 → 阻止保存） | ModelsPage.tsx draftIssues |
+| MODEL-13 | P1 | 手测 | 保存请求慢时 | 点「保存全部改动」后立刻继续输入字段 | 保存成功后草稿**保留保存窗口内的输入**（editGen 守卫：保存期间有新编辑则不用服务器状态覆盖），表现为持续「有未保存的改动」 | ModelsPage.tsx editGen |
+| MODEL-14 | P1 | 契约 | 单测 | 对抗输入 | 混合模板 `sk-${VAR}` / 伪引用 `$4GL_API_KEY` / 数字开头 id（4gl→`4GL_API_KEY` 非法变量名）→ 400（页面无法安全转写，提示手工维护）；model id 含 `/`（openrouter 式）**合法**。**已自动化**（models-config.test 5 条） | models-config.ts validateProvider |
+| MODEL-15 | P1 | 契约 | 单测 | models.json 手工编辑 | 读取侧与 pi 加载器同宽容度：BOM + `//` 注释 + 尾逗号可解析（字符串感知剔除，`https://` 不误伤）；写侧只产出纯 JSON。**已自动化**（loadStatus 2 条） | models-config.ts stripBomAndComments |
+| MODEL-16 | P1 | 契约 | 单测 | foo.bar 与 foo_bar 同时配字面量密钥 | 折叠到同一变量 FOO_BAR_API_KEY → 400（后写静默覆盖前写密钥）。**已自动化** | models-config.ts save 步骤 3 |
+| MODEL-17 | P2 | 手测 | 运行中会话 | 勾「重启 pi」应用 | pi 未 8 秒退出 → 放弃重启并如实报错；重启后 15 秒未就绪 → restarted=true + restartError；上下文恢复失败 → contextResumed=false（不谎报成功） | models-config.ts restartBridge |
+
+## 12. 已知问题 / 接受项（KNOWN）
 
 | 编号 | 描述 | 影响 | 依据 |
 |---|---|---|---|
@@ -293,3 +318,4 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 7. **回放**：历史→冻结图+禁用输入→返回实时（HIST-01/02/04）
 8. **编排页对照**：编排页手动运行完成后**无**注入（SRV-02）
 9. **会话管理**：＋新对话两轮 → 侧栏点旧会话恢复 → 问「我叫什么名字」答小明 → ✎ 重命名 → ✕ 删除带确认（SESS-01/11/12）
+10. **模型配置页**：新增 provider（DeepSeek）→ 测试连接 ✓（HTTP 200 + 模型样例）→ 保存（models.json 只落 $VAR）→ 勾重启应用 → 主会话切换成功（MODEL-02/03）

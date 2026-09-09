@@ -1,10 +1,11 @@
 /**
- * App shell: header (tabs + connection + usage) and two tabs — 实时 (chat-first
+ * App shell: header (tabs + connection + usage) and three tabs — 实时 (chat-first
  * live page: a persistent session sidebar on the left, conversation as the
  * main area, a mini live-trace graph in the side column; node details appear
- * on demand above it while a node is selected) and 编排 (graph orchestration
- * editor). Every pane boundary is user-resizable (react-resizable-panels,
- * layout remembered in localStorage).
+ * on demand above it while a node is selected), 编排 (graph orchestration
+ * editor) and 模型 (provider/key/default-model configuration for pi's
+ * models.json + repo .env). Every pane boundary is user-resizable
+ * (react-resizable-panels, layout remembered in localStorage).
  */
 
 import { useEffect, useState } from "react";
@@ -12,6 +13,7 @@ import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panel
 import { ChatPanel } from "./ChatPanel.tsx";
 import { DetailPanel } from "./DetailPanel.tsx";
 import { GraphCanvas } from "./GraphCanvas.tsx";
+import { ModelsPage } from "./ModelsPage.tsx";
 import { OrchestratePage } from "./OrchestratePage.tsx";
 import { SessionRail, SessionSidebar } from "./SessionSidebar.tsx";
 import { useOrchStore } from "./orch-store.ts";
@@ -24,7 +26,7 @@ function formatTokens(n: number): string {
 	return `${(n / 1000000).toFixed(1)}M`;
 }
 
-type Tab = "live" | "orch";
+type Tab = "live" | "orch" | "models";
 
 function Header({
 	tab,
@@ -66,6 +68,14 @@ function Header({
 				onClick={() => setTab("orch")}
 			>
 				编排
+			</button>
+			<button
+				className={`pg-tab${tab === "models" ? " active" : ""}`}
+				aria-current={tab === "models" ? "page" : undefined}
+				onClick={() => setTab("models")}
+				title="模型 provider / 密钥 / 默认模型配置（models.json + .env）"
+			>
+				模型
 			</button>
 			{history ? (
 				<span className="pg-history-banner">
@@ -246,7 +256,8 @@ function MiniGraph() {
 
 /**
  * 实时 tab: the persistent session sidebar owns the left column (collapse it
- * to a 40px rail from the header ☰ 会话 button). Chat is the PRIMARY surface
+ * to a 40px rail from the sidebar-header « or the header ☰ 会话 button;
+ * expand from the rail's » button). Chat is the PRIMARY surface
  * in the main pane — in history browsing too, where the column shows the
  * archived transcript and the side graph shows the frozen archive. The side
  * column holds node details (on demand) over the graph. Every split —
@@ -282,7 +293,7 @@ function LivePage({
 							    pinned top; ＋新对话 resets pi's context without losing
 							    the old thread (it stays listed & resumable). */}
 							<Panel id="sessions" className="pg-fill" defaultSize="20" minSize={13}>
-								<SessionSidebar onNewSession={newSession} />
+								<SessionSidebar onNewSession={newSession} onCollapse={() => setSessionsCollapsed(true)} />
 							</Panel>
 							<Separator
 								className="pg-rh pg-rh-col"
@@ -357,6 +368,8 @@ export default function App() {
 			/>
 			{tab === "orch" ? (
 				<OrchestratePage />
+			) : tab === "models" ? (
+				<ModelsPage />
 			) : (
 				<LivePage setTab={setTab} sessionsCollapsed={sessionsCollapsed} setSessionsCollapsed={setSessionsCollapsed} />
 			)}

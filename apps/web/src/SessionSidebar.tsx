@@ -38,7 +38,7 @@ export function SessionRail({ onExpand, onNewSession }: { onExpand: () => void; 
 	);
 }
 
-export function SessionSidebar({ onNewSession }: { onNewSession: () => void }) {
+export function SessionSidebar({ onNewSession, onCollapse }: { onNewSession: () => void; onCollapse: () => void }) {
 	const sessions = useStore((s) => s.sessions);
 	const sessionsError = useStore((s) => s.sessionsError);
 	const sessionsLoading = useStore((s) => s.sessionsLoading);
@@ -128,6 +128,15 @@ export function SessionSidebar({ onNewSession }: { onNewSession: () => void }) {
 					}}
 				>
 					＋ 新对话
+				</button>
+				{/* 就地收起——不用跑去窗口右上角的 ☰（展开由 40px 细栏上的 » 负责，箭头成对） */}
+				<button
+					className="pg-btn pg-btn-ghost pg-btn-sm"
+					title="折叠会话栏（细栏上的 » 再展开）"
+					aria-label="折叠会话栏"
+					onClick={onCollapse}
+				>
+					«
 				</button>
 			</header>
 			{sessionActionError && (

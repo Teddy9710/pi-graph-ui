@@ -94,7 +94,7 @@ function lastAssistant(messages: ReturnType<typeof initState>["messages"]): Assi
 export class PiNodeExecutor implements Executor {
 	private readonly bin: string | undefined;
 	private readonly cwd: string | undefined;
-	private readonly defaultModel: string;
+	private defaultModel: string;
 	private readonly agentsDir: string;
 	private readonly timeoutMs: number;
 	private readonly minOutputChars: number;
@@ -110,6 +110,11 @@ export class PiNodeExecutor implements Executor {
 		this.minOutputChars = Math.max(0, Math.floor(options.minOutputChars ?? 0)) || 0;
 		this.salvageRetry = options.salvageRetry !== false;
 		this.bridgeFactory = options.bridgeFactory ?? ((opts) => new PiBridge({ bin: this.bin, cwd: opts.cwd, extraArgs: opts.extraArgs }));
+	}
+
+	/** 节点默认模型（模型配置页 apply 时热替换；对之后的 spawn 生效）。 */
+	setDefaultModel(model: string): void {
+		if (MODEL_RE.test(model)) this.defaultModel = model;
 	}
 
 	async run(

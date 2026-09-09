@@ -15,7 +15,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,9 +35,27 @@ if (!process.env.DEEPSEEK_API_KEY) {
 	console.warn("  可在仓库根目录创建 .env 文件写入 DEEPSEEK_API_KEY=sk-...（已被 gitignore）");
 }
 
-// Default model: the DeepSeek provider declared in ~/.pi/agent/models.json.
-// Override with PI_ARGS in .env or the shell.
-process.env.PI_ARGS ??= "--model deepseek/deepseek-chat";
+// Default model: the DeepSeek provider declared in ~/.pi/agent/models.json —
+// UNLESS ~/.pi/agent/settings.json already carries a persisted default (written
+// by the 模型配置 page); then pi resolves it itself and injecting --model would
+// silently override the user's choice on every restart.
+process.env.PI_ARGS ??= persistedDefaultModel() ?? "--model deepseek/deepseek-chat";
+
+/** Read {defaultProvider, defaultModel} from ~/.pi/agent/settings.json (best effort). */
+function persistedDefaultModel() {
+	try {
+		const agentDir = process.env.PI_CODING_AGENT_DIR
+			? resolve(process.env.PI_CODING_AGENT_DIR.replace(/^~(?=$|[\\/])/, homedir()))
+			: join(homedir(), ".pi", "agent");
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+		if (typeof settings.defaultProvider === "string" && typeof settings.defaultModel === "string") {
+			return `--model ${settings.defaultProvider}/${settings.defaultModel}`;
+		}
+	} catch {
+		/* no settings.json / no default — fall through to the factory default */
+	}
+	return null;
+}
 
 const children = [];
 

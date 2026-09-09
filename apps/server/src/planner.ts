@@ -250,7 +250,7 @@ const DEFAULT_TIMEOUT_MS = 3 * 60 * 1000;
 // ============================================================================
 
 export class PiPlanner {
-	private readonly model: string;
+	private model: string;
 	private readonly timeoutMs: number;
 	private readonly maxAttempts: number;
 	private readonly bridgeFactory: (extraArgs: string[]) => PlannerBridge;
@@ -261,6 +261,11 @@ export class PiPlanner {
 		this.maxAttempts = Math.max(1, options.maxAttempts ?? 2);
 		this.bridgeFactory =
 			options.bridgeFactory ?? ((extraArgs) => new PiBridge({ bin: options.bin, cwd: options.cwd, extraArgs }));
+	}
+
+	/** Planner 模型（模型配置页 apply 时热替换；对下一次规划 spawn 生效）。 */
+	setModel(model: string): void {
+		if (MODEL_RE.test(model)) this.model = model;
 	}
 
 	/**
