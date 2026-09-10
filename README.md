@@ -1,6 +1,6 @@
 # pi-graph-ui
 
-![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-325%20passed-2DA44E)
+![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-359%20passed-2DA44E)
 
 把 [pi coding agent](https://github.com/badlogic/pi-mono) 会话的完整动作过程**实时可视化成图**，并在同一界面里做**图编排执行**：主 agent 的每次工具调用是一个节点，并行 spawn 的子 agent 扇出与汇聚在 React Flow 画布上展开；编排页既可手画任务 DAG，也可输入一个目标让 AI 自动拆图——**每个节点都是一个真实独立运行的 pi agent 实例**。
 
@@ -42,9 +42,11 @@
 ### 模型配置页 · provider / 密钥 / 默认模型，免手改文件
 
 - 左列 provider 台账，右侧编辑器：Base URL、API 类型、模型列表（id/显示名/推理标记）；不认识的字段（compat、headers…）原样保留
-- 密钥只进仓库根 `.env`（gitignore）+ 进程环境，`models.json` 永远只存 `$VAR` 引用；「测试连接」对端点发一次零 token 的列模型请求，验证 URL 与密钥
+- **「＋ 内置」**：pi 内置 provider 目录（随仓库提交的快照，40 个）直接选、只填密钥——`models.json` 里只写 `{apiKey:"$VAR"}`（pi 官方挂载形态，内置 Base URL/模型原样生效）；OAuth/特殊认证型置灰（`pi auth login`），要改 URL/模型就「以此为基础自定义」换个 id
+- **撞名守卫**：自建 id 撞上内置 id 且覆盖 baseUrl/models/api 等 → 保存被拦（pi 的选择性合并正是 minimax 撞名 404 事故的机制）；只挂密钥的挂载条目与磁盘上已有的覆盖条目（出 ⚠ 警告）不受影响
+- 密钥只进仓库根 `.env`（gitignore）+ 进程环境，`models.json` 永远只存 `$VAR` 引用（内置 id 折到目录的 env 名——google → `$GEMINI_API_KEY`）；「测试连接」对端点发一次零 token 的列模型请求，验证 URL 与密钥
 - 「应用」一键切换：主会话 `set_model` + 编排节点/AI 规划器默认 + `settings.json` 持久默认（重启后仍是它）
-- pi 在启动时快照可用模型——**新增 provider / 新密钥需要勾选「重启 pi」**（对话上下文自动恢复），页面会就此提示
+- pi 在启动时快照可用模型——**新增 provider / 新密钥需要勾选「重启 pi」**（对话上下文自动恢复），页面会就此提示；升级 pi 后目录快照重新生成：`node scripts/generate-builtin-providers.mjs`
 
 ## 快速开始
 
@@ -53,7 +55,7 @@
 1. **Node ≥ 20 + pnpm**，仓库根目录 `pnpm install`
 2. **pi CLI**：`npm install -g @earendil-works/pi-coding-agent`（Windows 上即 `pi.cmd`）
 3. **模型配置**（两种方式，二选一）：
-   - **页面配置（推荐）**：首次可跳过本步——启动后打开 http://localhost:5173 的「模型」tab，新增 provider（Base URL + 密钥 + 模型列表）、测试连接、保存并应用，全程不碰文件。密钥明文只写入仓库根 `.env`（gitignore），`models.json` 只存 `$VAR` 引用。
+   - **页面配置（推荐）**：首次可跳过本步——启动后打开 http://localhost:5173 的「模型」tab：pi 内置的 provider（MiniMax、Moonshot、Google…）「＋ 内置」选一个、粘密钥即可；OpenAI 兼容的自建端点「＋ 新增」填 Base URL + 密钥 + 模型列表。测试连接、保存并应用，全程不碰文件。密钥明文只写入仓库根 `.env`（gitignore），`models.json` 只存 `$VAR` 引用。
    - **手写文件**：`~/.pi/agent/models.json` 定义 OpenAI 格式的自定义 provider（示例为 DeepSeek，key 走环境变量不落盘）：
    ```json
    {

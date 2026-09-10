@@ -23,6 +23,8 @@ import { Hono } from "hono";
 import {
 	MODEL_RE,
 	type ActiveModelInfo,
+	type BuiltinCatalogFile,
+	type BuiltinCatalogProvider,
 	type ModelConfigProviderInfo,
 	type ModelsConfigApplyRequest,
 	type ModelsConfigApplyResponse,
@@ -34,6 +36,7 @@ import {
 	type RpcCommand,
 	type RpcResponse,
 } from "@pi-graph/shared";
+import { builtinModelExists, loadBuiltinCatalog, toBuiltinProviderInfos } from "./builtin-providers.ts";
 
 // ============================================================================
 // 路径与 env 文件工具
@@ -147,6 +150,30 @@ const DENIED_ENV_VARS = new Set([
 /** 页面编辑的核心字段；此外的字段（compat/headers/modelOverrides…）原样保留。 */
 const CORE_PROVIDER_FIELDS = new Set(["name", "baseUrl", "api", "apiKey", "models"]);
 
+/**
+ * 内置 id 条目上属于「覆盖内置定义」的字段——pi 的 applyModelsJson 对这些
+ * 做选择性合并（内置模型继承 baseUrl 却不继承 api，模型 id 大小写不同产生
+ * 影子条目），正是 minimax 撞名 404 事故的机制。apiKey/name 不在其列：
+ * 仅携带密钥的挂载条目是 pi 官方支持的形态（内置定义原样生效）。
+ */
+const BUILTIN_OVERRIDE_FIELDS = ["baseUrl", "models", "api", "compat", "headers", "modelOverrides", "oauth", "authHeader"];
+
+/** 条目实际覆盖了哪些内置字段；models: [] 不算（pi 的 !config.models?.length 同语义）。 */
+function builtinOverrideFields(entry: Record<string, unknown>): string[] {
+	return BUILTIN_OVERRIDE_FIELDS.filter((f) =>
+		f === "models" ? Array.isArray(entry.models) && entry.models.length > 0 : entry[f] !== undefined,
+	);
+}
+
+/** 撞名警告核心文案（save 阻断版与 GET builtinConflict 版共用）。 */
+function builtinConflictMessage(builtin: BuiltinCatalogProvider, fields: string[]): string {
+	return (
+		`与 pi 内置 provider「${builtin.name}」同 id 且覆盖了 ${fields.join(" / ")}。` +
+		"合并陷阱：内置模型会继承你的 baseUrl 但不继承 api 字段；模型 id 大小写不同还会产生影子条目。" +
+		"只配密钥 → 用「＋ 内置」入口（仅写 apiKey）；自定义 URL/模型 → 换一个 id（如 minimaxcn）"
+	);
+}
+
 /** provider id → 密钥环境变量名（deepseek → DEEPSEEK_API_KEY）。 */
 export function toEnvVarName(providerId: string): string {
 	return `${providerId.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}_API_KEY`;
@@ -172,6 +199,11 @@ export function validateProvider(
 	id: string,
 	input: unknown,
 	issues: string[],
+	/**
+	 * 字面量密钥折叠的目标变量名：内置 id 必须传目录里的 env 名（pi 读
+	 * GEMINI_API_KEY，toEnvVarName 只会折出 GOOGLE_API_KEY → 静默失效）。
+	 */
+	preferEnvVar?: string,
 ): [ValidatedProvider] | [null] {
 	if (!PROVIDER_ID_RE.test(id)) {
 		issues.push(`provider id「${id}」非法：需以字母/数字开头，仅含 字母数字._- 且 ≤64 字符（"/" 会破坏 provider/model 解析）`);
@@ -233,7 +265,7 @@ export function validateProvider(
 				issues.push(`provider「${id}」的 apiKey 需为 1–4096 字符且无换行`);
 				return [null];
 			}
-			const varName = toEnvVarName(id);
+			const varName = preferEnvVar ?? toEnvVarName(id);
 			if (!ENV_VAR_RE.test(varName)) {
 				// 数字开头的 id（如 4gl）→ "4GL_API_KEY"：pi 的 env 引用规则与
 				// .env 解析都要求首字符 [A-Za-z_]，密钥永远无法生效
@@ -491,12 +523,17 @@ export class ModelsConfigService {
 	readonly agentDir: string;
 	readonly modelsPath: string;
 	readonly envPath: string;
+	/** 内置 provider 目录快照（缺省从随仓库提交的 builtin-providers.json 加载）。 */
+	private readonly builtin: BuiltinCatalogFile;
+	private readonly builtinById: Map<string, BuiltinCatalogProvider>;
 
-	constructor(deps: ModelsConfigDeps, agentDir = piAgentDir(), envPath?: string) {
+	constructor(deps: ModelsConfigDeps, agentDir = piAgentDir(), envPath?: string, builtinCatalog?: BuiltinCatalogFile) {
 		this.deps = deps;
 		this.agentDir = agentDir;
 		this.modelsPath = join(agentDir, "models.json");
 		this.envPath = envPath ?? join(findRepoRoot(process.cwd()), ".env");
+		this.builtin = builtinCatalog ?? loadBuiltinCatalog();
+		this.builtinById = new Map(this.builtin.providers.map((p) => [p.id, p]));
 	}
 
 	/** bridge RPC + 超时（PiBridge.request 本身没有超时——pi 挂起时 HTTP 不能跟着挂）。 */
@@ -519,10 +556,15 @@ export class ModelsConfigService {
 		for (const [id, raw] of Object.entries(file.providers)) {
 			// 已保存的条目走同一个校验器（只取信息，不改文件）；raw 出网前
 			// 脱敏（字面量密钥 → ""），页面未编辑的字段随 raw 原样带回
-			const [v] = validateProvider(id, raw, []);
+			const [v] = validateProvider(id, raw, [], this.builtinById.get(id)?.apiKeyEnv);
+			// 内置 id + 覆盖字段 → 非阻断警告（save 只拦「新建」，存量条目照常）
+			const builtin = this.builtinById.get(id);
+			const override = builtin ? builtinOverrideFields(raw) : [];
+			const conflict =
+				builtin && override.length > 0 ? { builtinConflict: builtinConflictMessage(builtin, override) } : {};
 			providers[id] = v
-				? { ...v.info, raw: sanitizeRawForClient(raw) }
-				: { apiKeyInline: false, apiKeyEnvSet: false, models: [], advancedFields: [], raw: sanitizeRawForClient(raw) };
+				? { ...v.info, ...conflict, raw: sanitizeRawForClient(raw) }
+				: { apiKeyInline: false, apiKeyEnvSet: false, models: [], advancedFields: [], ...conflict, raw: sanitizeRawForClient(raw) };
 		}
 		const state = await this.rpc({ type: "get_state" }, 5000);
 		let activeModel: ActiveModelInfo | null = null;
@@ -558,6 +600,8 @@ export class ModelsConfigService {
 			runtimeModels,
 			persistedDefault: readPersistedDefault(this.agentDir),
 			orchDefaults: this.deps.getOrchDefaults(),
+			builtinProviders: toBuiltinProviderInfos(this.builtin, new Set(Object.keys(file.providers)), new Set(runtimeModels.map((m) => m.provider))),
+			builtinCatalogInfo: { piVersion: this.builtin.piVersion, generatedAt: this.builtin.generatedAt },
 			configError: file.error,
 		};
 	}
@@ -628,7 +672,7 @@ export class ModelsConfigService {
 		const validated: Record<string, Record<string, unknown>> = {};
 		const secretSources = new Map<string, string>();
 		for (const [id, incoming] of Object.entries(incomingById)) {
-			const [v] = validateProvider(id, incoming, issues);
+			const [v] = validateProvider(id, incoming, issues, this.builtinById.get(id)?.apiKeyEnv);
 			if (!v) break;
 			let collided = false;
 			for (const [varName, value] of Object.entries(v.secret)) {
@@ -643,6 +687,19 @@ export class ModelsConfigService {
 			}
 			if (collided) break;
 			validated[id] = v.raw;
+		}
+		// 3.5) 内置撞名守卫：新建的内置 id 条目若覆盖 baseUrl/models/api 等
+		//      → pi 的选择性合并会制造 404 式事故（minimax 撞名案例），阻断。
+		//      纯挂载（仅 apiKey[+name]，pi 官方支持的形态）与磁盘上已有的
+		//      覆盖条目不拦——后者由 loadStatus 出非阻断警告（builtinConflict）。
+		//      在写盘之前、issues 返回处收口，保证不产生半写状态。
+		for (const [id, incoming] of Object.entries(incomingById)) {
+			const builtin = this.builtinById.get(id);
+			if (!builtin || file.providers[id]) continue;
+			const override = builtinOverrideFields(incoming);
+			if (override.length > 0) {
+				issues.push(`provider「${id}」${builtinConflictMessage(builtin, override)}——已拒绝保存`);
+			}
 		}
 		if (issues.length > 0) return { status: 400, body: { error: "配置校验未通过", issues } };
 
@@ -671,7 +728,11 @@ export class ModelsConfigService {
 		const persisted = readPersistedDefault(this.agentDir);
 		if (!persisted) return;
 		const raw = validated[persisted.provider];
-		let stale = !raw;
+		// 内置 provider 可以不在 models.json 里就当默认（apply 的运行时/目录
+		// 通道——OAuth 的 anthropic、挂载重启后的 minimax 都没有自带 models）；
+		// 目录里仍有的这个 provider/model 不算失效，否则一次无关保存就会把
+		// 用户刚应用的默认悄悄清掉
+		let stale = !raw && !builtinModelExists(this.builtin, persisted.provider, persisted.modelId);
 		if (!stale && Array.isArray(raw?.models)) {
 			stale = !raw.models.some((m) => isPlainObject(m) && m.id === persisted.modelId);
 		}
@@ -700,8 +761,11 @@ export class ModelsConfigService {
 			const file = readModelsFile(this.modelsPath);
 			const raw = file.providers[byId.provider];
 			if (!raw) return { status: 404, body: { ok: false, message: `provider「${byId.provider}」不在 models.json 里（先保存）` } };
-			baseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl : undefined;
-			api = typeof raw.api === "string" ? raw.api : undefined;
+			// 挂载条目（仅 apiKey）自己没有 baseUrl/api → 回退到内置目录
+			// （文件值优先；多 api 形态的内置 provider 只测第一个）
+			const builtin = this.builtinById.get(byId.provider);
+			baseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl : builtin?.baseUrl;
+			api = typeof raw.api === "string" ? raw.api : builtin?.apis[0];
 			const ref = typeof raw.apiKey === "string" ? raw.apiKey : undefined;
 			if (ref?.startsWith("!")) {
 				return { status: 400, body: { ok: false, message: "apiKey 为 !command 形式，页面不支持测试——请在终端手动验证" } };
@@ -732,7 +796,7 @@ export class ModelsConfigService {
 			}
 			apiKey = literal ?? resolveKeyRef(ref);
 		}
-		if (!baseUrl) return { status: 400, body: { ok: false, message: "缺少 baseUrl（该 provider 未配置 Base URL）" } };
+		if (!baseUrl) return { status: 400, body: { ok: false, message: "缺少 baseUrl（该 provider 与内置目录都未提供 Base URL——如 Azure/Bedrock 类按模型配置的 provider 无法在此测试）" } };
 		if (!/^https?:\/\//.test(baseUrl) || !isValidHttpUrl(baseUrl)) {
 			return { status: 400, body: { ok: false, message: "baseUrl 需为合法的 http(s) URL" } };
 		}
@@ -765,8 +829,14 @@ export class ModelsConfigService {
 					isPlainObject(available.data) &&
 					Array.isArray(available.data.models) &&
 					available.data.models.some((m) => isPlainObject(m) && m.provider === target!.provider && m.id === target!.modelId);
-				if (!inRuntime) {
-					return { status: 400, body: { error: `模型 ${target.provider}/${target.modelId} 不在 models.json，也不在 pi 当前可用模型里（内置 provider 需先配好密钥）——先在配置页保存` } };
+				// 目录+重启通道：新挂载的内置条目不在旧运行时快照里，但勾了
+				// 「重启 pi」就会出现在新进程——放行，set_model 打到重启后的
+				// bridge（目录匹配大小写敏感，与 pi 的模型 id 精确匹配一致）。
+				// 没配密钥则新进程里该 provider 不认证，set_model 会如实报错。
+				const inCatalogWithRestart =
+					body?.restartBridge === true && builtinModelExists(this.builtin, target.provider, target.modelId);
+				if (!inRuntime && !inCatalogWithRestart) {
+					return { status: 400, body: { error: `模型 ${target.provider}/${target.modelId} 不在 models.json，也不在 pi 当前可用模型里（内置 provider 需先保存密钥并勾选「重启 pi」）` } };
 				}
 			}
 		}

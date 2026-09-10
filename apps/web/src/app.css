@@ -1922,3 +1922,84 @@ textarea.pg-form-input {
 	margin-top: 16px;
 	flex-wrap: wrap;
 }
+
+/* 非阻断警告（撞名守卫的警告/新建即时提示）——琥珀墨，与错误的红区分 */
+.pg-warn-text {
+	color: var(--pg-amber);
+}
+
+/* 内置目录选择器（左栏模式）：复用 sessions 侧栏铬件；行 = 主按钮 + 自定义按钮 */
+.pg-models-picker-head {
+	padding: 8px 12px 6px;
+	border-bottom: 1px solid var(--pg-border);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	flex-shrink: 0;
+}
+.pg-models-picker-head .pg-form-input {
+	font-size: 12.5px;
+}
+.pg-models-picker-head p {
+	font-size: 11px;
+	margin: 0;
+}
+.pg-builtin-row {
+	display: flex;
+	align-items: stretch;
+	gap: 6px;
+}
+.pg-builtin-main {
+	flex: 1;
+	min-width: 0;
+	text-align: left;
+	background: var(--pg-node-bg);
+	border: 1px solid var(--pg-border);
+	border-radius: var(--pg-radius-sm);
+	color: var(--pg-fg);
+	padding: 11px 12px;
+	cursor: pointer;
+	font-size: 12.5px;
+}
+.pg-builtin-main:hover:not(:disabled) {
+	border-color: var(--pg-border-strong);
+	background: #1b2e32;
+}
+/* 置灰 = OAuth/特殊认证型或已配置：title 说明去处，自定义按钮仍可用 */
+.pg-builtin-main:disabled {
+	cursor: default;
+	opacity: 0.55;
+}
+.pg-builtin-main .pg-session-title {
+	margin-bottom: 5px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.pg-builtin-main .pg-dim {
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.pg-builtin-customize {
+	align-self: center;
+	flex-shrink: 0;
+}
+/* 挂载编辑器里的内置模型清单 */
+.pg-builtin-models {
+	margin: 4px 0;
+}
+.pg-builtin-models summary {
+	cursor: pointer;
+	user-select: none;
+}
+.pg-builtin-models ul {
+	margin: 6px 0 0;
+	padding-left: 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	font-size: 12px;
+	color: var(--pg-fg-dim);
+}

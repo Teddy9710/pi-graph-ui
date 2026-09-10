@@ -272,7 +272,7 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 
 | 编号 | P | 类型 | 前置 | 操作 | 预期 | 代码 |
 |---|---|---|---|---|---|---|
-| MODEL-01 | P0 | 手测 | dev 栈已起 | 点头部「模型」tab | ①工具条：当前模型 chip / 持久默认 / 编排默认 + 下拉（配置模型 + 运行时模型标「（运行时）」）；②左列 provider 台账（「当前」/「新」标记、N 模型·密钥状态、高级字段徽标）；③空台账有引导文案 | ModelsPage.tsx, models-store.ts |
+| MODEL-01 | P0 | 手测 | dev 栈已起 | 点头部「模型」tab | ①工具条：当前模型 chip / 持久默认 / 编排默认 + 下拉（配置模型 + 已配置内置 provider 的目录模型标「（内置）」+ 运行时模型标「（运行时）」）；②左列 provider 台账（「当前」/「新」/「内置」标记、N 模型·密钥状态、高级字段徽标）；③空台账有引导文案 | ModelsPage.tsx, models-store.ts |
 | MODEL-02 | P0 | 手测 | 空台账 | ＋新增 → 填 id=deepseek / Base URL=api.deepseek.com/v1 / 密钥 / 模型 → 测试连接 → 保存 | ①测试连接对 `/models` 发零 token 请求，成功显示 HTTP 200 + 模型样例；②保存后 models.json 只落 `$DEEPSEEK_API_KEY` 引用，`.env` 出现明文（gitignore），进程 env 立即可见；③底部出现「重启 pi」提示（新 provider 对运行中 pi 不可见） | ModelsPage.tsx buildProviders, models-config.ts validateProvider/save |
 | MODEL-03 | P0 | 手测 | MODEL-02 已保存 | 下拉选 deepseek/deepseek-chat → 勾「重启 pi」→ 应用 | confirm（说明上下文自动恢复）→ 编排默认热替换 + settings.json 持久默认 + set_model；重启链 kill→start→switch_session 恢复上下文→hello 重建；结果条显示各步骤成败 | models-config.ts apply/restartBridge |
 | MODEL-04 | P0 | 契约 | 单测 | 密钥哨兵往返 | GET 脱敏：字面量→`""`、纯 `$VAR`/`!cmd` 原样；保存时 `""`=沿用（字面量顺带规范化为 $VAR+.env）、`null`=删除、新明文=转写。**已自动化**（models-config.test save/loadStatus 6 条） | models-config.ts sanitizeRawForClient/save |
@@ -289,6 +289,14 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 | MODEL-15 | P1 | 契约 | 单测 | models.json 手工编辑 | 读取侧与 pi 加载器同宽容度：BOM + `//` 注释 + 尾逗号可解析（字符串感知剔除，`https://` 不误伤）；写侧只产出纯 JSON。**已自动化**（loadStatus 2 条） | models-config.ts stripBomAndComments |
 | MODEL-16 | P1 | 契约 | 单测 | foo.bar 与 foo_bar 同时配字面量密钥 | 折叠到同一变量 FOO_BAR_API_KEY → 400（后写静默覆盖前写密钥）。**已自动化** | models-config.ts save 步骤 3 |
 | MODEL-17 | P2 | 手测 | 运行中会话 | 勾「重启 pi」应用 | pi 未 8 秒退出 → 放弃重启并如实报错；重启后 15 秒未就绪 → restarted=true + restartError；上下文恢复失败 → contextResumed=false（不谎报成功） | models-config.ts restartBridge |
+| MODEL-18 | P1 | 契约 | 单测 | `node scripts/generate-builtin-providers.mjs` | 从已安装 pi-ai dist 生成 `apps/server/src/builtin-providers.json`（提交进仓库）：≥39 provider、piVersion 元信息、id 唯一、minimax/minimax-cn 双条目字段正确、env-key 必带合法 apiKeyEnv（google=GEMINI_API_KEY）；fail-loud（注册表≠40/data<39/round-trip 失败 → 非零退出）。重跑仅 generatedAt 变。**已自动化**（builtin-providers.test 4 条断言提交的 JSON） | scripts/generate-builtin-providers.mjs, builtin-providers.ts |
+| MODEL-19 | P0 | 手测/冒烟 | dev 栈已起 | 「＋ 内置」→ 搜索 minimax（2 行：国际/国内）→ 选国际版 → 保存 | ①models.json 恰好多 `{"minimax":{"apiKey":"$MINIMAX_API_KEY"}}`（pi 官方挂载形态，内置 baseUrl/models 原样生效）；②列表行「内置」标记 + 模型数取自目录；③「测试连接」走 {provider} 通道回退目录 URL（api.minimax.io/anthropic/v1/models）；④已配置/列表中的目录行置灰防重复挂载。**已冒烟**（隔离栈 Playwright 全流程 2026-09） | ModelsPage.tsx BuiltinPicker/addBuiltinDraft, models-config.ts test |
+| MODEL-20 | P0 | 契约 | 单测 | 新建内置 id 条目 | 带 baseUrl/api/非空 models/compat/headers/modelOverrides/oauth/authHeader → 400「已拒绝保存」且文件未动（pi 选择性合并正是 minimax 撞名 404 的根源）；纯挂载（apiKey[+name]）→ 200；`models: []` → 200（pi 的 !config.models?.length 同语义）；非内置 id 全量自定义 → 200；编辑器对新建草稿出同义即时警告。**已自动化**（models-config.test 8 条） | models-config.ts save 步骤 3.5, ModelsPage.tsx clientOverrideFields |
+| MODEL-21 | P1 | 契约 | 单测 | 磁盘上已有的内置 id 覆盖条目（用户 deepseek 场景） | 不拦：保存 200；GET 出 `builtinConflict` 非阻断警告（编辑器 ⚠ 块 + 列表 ⚠ 撞名 徽标，建议换 id）；重存仍 200。**已自动化**（models-config.test 3 条） | models-config.ts loadStatus, ModelsPage.tsx |
+| MODEL-22 | P0 | 契约 | 单测+冒烟 | 新挂载内置条目 + 旧运行时快照 + 勾「重启 pi」应用 | 放行（目录+重启通道）：200 + bridge 重启 + set_model 打到新进程——修复「校验先于重启用旧快照必 400」的 bug；不勾重启 → 400 提示；模型 id 大小写不对（minimax-m3）→ 400（目录匹配大小写敏感，与 pi 一致）。**已自动化**（3 条）+ **已冒烟**（真实 pi 重启后当前模型 chip = minimax/MiniMax-M3） | models-config.ts apply, builtin-providers.ts builtinModelExists |
+| MODEL-23 | P1 | 契约 | 单测 | 内置 id 的字面量密钥折叠 | 折到**目录的 env 名**而非 toEnvVarName(id)：google 明文 → `$GEMINI_API_KEY`（不是 $GOOGLE_API_KEY——pi 读前者，静默失效 bug 的回归测试）。**已自动化** | models-config.ts validateProvider preferEnvVar |
+| MODEL-24 | P2 | 手测/冒烟 | 已保存挂载条目 | 「删除挂载」 | models.json 条目移除（其余条目与高级字段原样）；`.env` 里的密钥**保留**（mergeEnvSecrets 只写本次提供的变量）。**已冒烟** | ModelsPage.tsx removeDraft, models-config.ts |
+| MODEL-25 | P2 | 手测/冒烟 | 内置目录任意行 | 「以此为基础自定义」（含置灰的 OAuth/特殊认证行） | 预填 name/baseUrl/api/模型（contextWindow/maxTokens 随行），id 建议 `<id>cn → <id>-custom → …` 取第一个不撞 内置∪已配置∪未保存草稿 的（minimax → minimaxcn）；自定义 id 不受内置合并规则影响 | ModelsPage.tsx addCustomFromBuiltin/suggestCustomId |
 
 ## 12. 已知问题 / 接受项（KNOWN）
 

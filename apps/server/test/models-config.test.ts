@@ -7,6 +7,10 @@
  *     （保留无关行）+ process.env 补丁 + 写失败时不碰 models.json
  *   - apply：busy 守卫、编排默认热替换、持久默认、set_model、运行时快照
  *     兜底（内置 provider）、计划内重启
+ *   - 内置 provider 目录：撞名守卫（新建内置 id 覆盖 → 400 / 挂载与既有
+ *     条目放行）、loadStatus 冲突警告与 builtinProviders 标记、apply 的
+ *     目录+重启通道（挂载条目不在旧快照也放行）、test 的目录 baseUrl/api
+ *     回退、内置 id 字面量密钥折到目录 env 名（google → GEMINI_API_KEY）
  *   - test：字面量/引用/草稿三通道、apiKeyRef 仅限已引用变量、URL 校验
  *   - 纯工具：splitModelRef / buildModelProbe / runModelProbe（stub fetch）
  * 全部跑在 tmpdir 上，绝不触碰真实 ~/.pi 与仓库 .env。
@@ -16,7 +20,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RpcCommand, RpcResponse } from "@pi-graph/shared";
+import type { BuiltinCatalogFile, RpcCommand, RpcResponse } from "@pi-graph/shared";
 import {
 	buildModelProbe,
 	ModelsConfigService,
@@ -90,6 +94,54 @@ function makeDeps(bridge: FakeBridge, overrides: Partial<ModelsConfigDeps> = {})
 let dir: string;
 let envPath: string;
 
+/**
+ * 目录 fixture（真实目录的缩影：env-key 三家 + oauth 一家）。真实快照的
+ * 结构断言在 builtin-providers.test.ts；这里用受控数据驱动守卫/回退逻辑。
+ */
+function makeCatalog(): BuiltinCatalogFile {
+	return {
+		piVersion: "0.84.2-test",
+		generatedAt: "2026-09-09T00:00:00.000Z",
+		providers: [
+			{
+				id: "minimax",
+				name: "MiniMax",
+				baseUrl: "https://api.minimax.io/anthropic",
+				apis: ["anthropic-messages"],
+				apiKeyEnv: "MINIMAX_API_KEY",
+				authKind: "env-key",
+				models: [{ id: "MiniMax-M3", reasoning: true, contextWindow: 1000000 }],
+			},
+			{
+				id: "deepseek",
+				name: "DeepSeek",
+				baseUrl: "https://api.deepseek.com/v1",
+				apis: ["openai-completions"],
+				apiKeyEnv: "DEEPSEEK_API_KEY",
+				authKind: "env-key",
+				models: [{ id: "deepseek-v4-flash" }, { id: "deepseek-v4-pro", reasoning: true }],
+			},
+			{
+				id: "google",
+				name: "Google",
+				apis: ["google-generative-ai"],
+				apiKeyEnv: "GEMINI_API_KEY",
+				authKind: "env-key",
+				models: [{ id: "gemini-2.5-pro" }],
+			},
+			{
+				id: "github-copilot",
+				name: "GitHub Copilot",
+				baseUrl: "https://api.githubcopilot.com",
+				apis: ["openai-completions"],
+				apiKeyEnv: "GITHUB_COPILOT_TOKEN",
+				authKind: "oauth",
+				models: [],
+			},
+		],
+	};
+}
+
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "pg-models-"));
 	envPath = join(dir, ".env");
@@ -99,6 +151,10 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 	for (const key of Object.keys(process.env)) {
 		if (key.startsWith("PG_TEST_")) delete process.env[key];
+	}
+	// fixture 目录的真实 env 名（mergeEnvSecrets / envSet 测试会写入）
+	for (const key of ["MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GITHUB_COPILOT_TOKEN"]) {
+		delete process.env[key];
 	}
 	vi.unstubAllGlobals();
 });
@@ -273,6 +329,16 @@ describe("validateProvider", () => {
 		expect(validateProvider("4gl", { apiKey: "sk-1", models: [{ id: "m" }] }, issues)[0]).toBeNull();
 		expect(issues[0]).toContain("变量名");
 	});
+	it("preferEnvVar：内置 id 的字面量密钥折到目录 env 名（google → $GEMINI_API_KEY 而非 $GOOGLE_API_KEY）", () => {
+		const issues: string[] = [];
+		const [v] = validateProvider("google", { apiKey: "sk-g" }, issues, "GEMINI_API_KEY");
+		expect(issues).toEqual([]);
+		expect(v!.secret).toEqual({ GEMINI_API_KEY: "sk-g" });
+		expect(v!.raw.apiKey).toBe("$GEMINI_API_KEY");
+		// 不传 preferEnvVar 时维持旧行为（id 折叠）——兼容自定义 provider
+		const [fallback] = validateProvider("google", { apiKey: "sk-g" }, []);
+		expect(fallback!.raw.apiKey).toBe("$GOOGLE_API_KEY");
+	});
 });
 
 // ============================================================================
@@ -302,13 +368,23 @@ describe("mergeEnvSecrets", () => {
 // Service：文件读写
 // ============================================================================
 
-function makeService(bridge: FakeBridge, overrides: Partial<ModelsConfigDeps> = {}): ModelsConfigService {
-	return new ModelsConfigService(makeDeps(bridge, overrides), dir, envPath);
+function makeService(
+	bridge: FakeBridge,
+	overrides: Partial<ModelsConfigDeps> = {},
+	catalog: BuiltinCatalogFile = makeCatalog(),
+): ModelsConfigService {
+	return new ModelsConfigService(makeDeps(bridge, overrides), dir, envPath, catalog);
 }
 
 describe("ModelsConfigService.save", () => {
 	it("写入 models.json（tab 缩进）+ 顶层未知键保留 + 字面量密钥进 .env", async () => {
-		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { old: { baseUrl: "https://o" } }, customTop: 1 }), "utf8");
+		// deepseek 预写为「既有覆盖条目」——新建的内置 id 覆盖条目会被撞名
+		// 守卫拦下（见「内置撞名守卫」组），既有条目照常保存（用户真实场景）
+		writeFileSync(
+			join(dir, "models.json"),
+			JSON.stringify({ providers: { old: { baseUrl: "https://o" }, deepseek: { baseUrl: "https://old" } }, customTop: 1 }),
+			"utf8",
+		);
 		const service = makeService(new FakeBridge());
 		const res = await service.save({
 			providers: {
@@ -413,6 +489,22 @@ describe("ModelsConfigService.save", () => {
 		expect((await service.save({ providers: { d: { models: [{ id: "m" }] } } })).status).toBe(200);
 		expect(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))).toEqual({ defaultProvider: "d", defaultModel: "m", keep: 1 });
 	});
+	it("持久默认指向内置目录 provider（不在 models.json——运行时/目录通道的产物）→ 无关保存不清除", async () => {
+		// 用户经「（运行时）/（内置）」选项应用了 google（OAuth 内置，无 models.json
+		// 条目），之后只动 deepseek 保存——默认不能被悄悄清掉
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { deepseek: { baseUrl: "https://api.deepseek.com/v1" } } }), "utf8");
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ defaultProvider: "google", defaultModel: "gemini-2.5-pro" }), "utf8");
+		const service = makeService(new FakeBridge());
+		expect((await service.save({ providers: { deepseek: { baseUrl: "https://api.deepseek.com/v1" } } })).status).toBe(200);
+		expect(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))).toEqual({ defaultProvider: "google", defaultModel: "gemini-2.5-pro" });
+	});
+	it("持久默认指向内置 provider 但 model id 与目录不符（大小写敏感）→ 仍清除", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { d: { models: [{ id: "m" }] } } }), "utf8");
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ defaultProvider: "minimax", defaultModel: "minimax-m3" }), "utf8");
+		const service = makeService(new FakeBridge());
+		expect((await service.save({ providers: { d: { models: [{ id: "m" }] } } })).status).toBe(200);
+		expect(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))).toEqual({});
+	});
 	it("密钥携带规则：''/缺省=沿用（并规范化为 $VAR + .env）；null=删除；新明文=覆盖转写", async () => {
 		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { p: { apiKey: "sk-keep-me", models: [{ id: "m" }] } } }), "utf8");
 		const service = makeService(new FakeBridge());
@@ -432,6 +524,87 @@ describe("ModelsConfigService.save", () => {
 		const removed = await service.save({ providers: { p: { ...status.providers.p!.raw, apiKey: null } } });
 		expect(removed.status).toBe(200);
 		expect(JSON.parse(readFileSync(join(dir, "models.json"), "utf8")).providers.p.apiKey).toBeUndefined();
+	});
+});
+
+// ============================================================================
+// 内置撞名守卫（新建的内置 id 覆盖条目 → 400；挂载与既有条目放行）
+// ============================================================================
+
+describe("内置撞名守卫", () => {
+	it("新建内置 id + baseUrl/api/models → 400，models.json 与 .env 都不动", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: {} }), "utf8");
+		const service = makeService(new FakeBridge());
+		const res = await service.save({
+			providers: {
+				minimax: { baseUrl: "https://api.minimax.cn/v1", api: "openai-completions", apiKey: "sk-x", models: [{ id: "Minimax-M3" }] },
+			},
+		});
+		expect(res.status).toBe(400);
+		if ("issues" in res.body) {
+			expect(res.body.issues[0]).toContain("MiniMax");
+			expect(res.body.issues[0]).toContain("已拒绝保存");
+		}
+		expect(JSON.parse(readFileSync(join(dir, "models.json"), "utf8"))).toEqual({ providers: {} });
+		expect(existsSync(envPath)).toBe(false);
+	});
+	it("仅覆盖非空 models（无 baseUrl）同样拦", async () => {
+		const service = makeService(new FakeBridge());
+		const res = await service.save({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY", models: [{ id: "MiniMax-M3" }] } } });
+		expect(res.status).toBe(400);
+	});
+	it.each([["compat"], ["headers"], ["modelOverrides"], ["authHeader"]])("高级字段 %s 也是覆盖 → 400", async (field) => {
+		const service = makeService(new FakeBridge());
+		const res = await service.save({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY", [field]: { x: 1 } } } });
+		expect(res.status).toBe(400);
+	});
+	it("models: [] 不算覆盖（pi 的 !config.models?.length 同语义）→ 200", async () => {
+		const service = makeService(new FakeBridge());
+		const res = await service.save({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY", models: [] } } });
+		expect(res.status).toBe(200);
+	});
+	it("纯挂载（仅 apiKey）+ secrets → 200，models.json 恰为挂载条目、明文落 .env", async () => {
+		const service = makeService(new FakeBridge());
+		const res = await service.save({
+			providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } },
+			secrets: { MINIMAX_API_KEY: "sk-m" },
+		});
+		expect(res.status).toBe(200);
+		expect(JSON.parse(readFileSync(join(dir, "models.json"), "utf8"))).toEqual({
+			providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } },
+		});
+		expect(readFileSync(envPath, "utf8")).toBe("MINIMAX_API_KEY=sk-m\n");
+		expect(process.env.MINIMAX_API_KEY).toBe("sk-m");
+	});
+	it("挂载条目 + name（显示名不算覆盖）→ 200", async () => {
+		const service = makeService(new FakeBridge());
+		const res = await service.save({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY", name: "MiniMax 国际" } } });
+		expect(res.status).toBe(200);
+	});
+	it("新建 google 挂载 + 字面量密钥 → 折成 $GEMINI_API_KEY 而非 $GOOGLE_API_KEY（env 名以目录为准）", async () => {
+		const service = makeService(new FakeBridge());
+		const res = await service.save({ providers: { google: { apiKey: "sk-g" } } });
+		expect(res.status).toBe(200);
+		const written = JSON.parse(readFileSync(join(dir, "models.json"), "utf8"));
+		expect(written.providers.google.apiKey).toBe("$GEMINI_API_KEY");
+		expect(readFileSync(envPath, "utf8")).toBe("GEMINI_API_KEY=sk-g\n");
+	});
+	it("既有挂载条目换密钥 → 200（挂载条目的正常维护路径）", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } } }), "utf8");
+		const service = makeService(new FakeBridge());
+		const res = await service.save({
+			providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } },
+			secrets: { MINIMAX_API_KEY: "sk-m2" },
+		});
+		expect(res.status).toBe(200);
+		expect(readFileSync(envPath, "utf8")).toBe("MINIMAX_API_KEY=sk-m2\n");
+	});
+	it("非内置 id 的全量自定义（minimaxcn 式）→ 200 不受守卫影响", async () => {
+		const service = makeService(new FakeBridge());
+		const res = await service.save({
+			providers: { minimaxcn: { baseUrl: "https://api.minimax.cn/v1", api: "openai-completions", apiKey: "sk-x", models: [{ id: "Minimax-M3" }] } },
+		});
+		expect(res.status).toBe(200);
 	});
 });
 
@@ -496,6 +669,54 @@ describe("ModelsConfigService.loadStatus", () => {
 		expect(status.providers.a?.raw.apiKey).toBe("$PG_TEST_KEEP");
 		expect(status.providers.c?.raw.apiKey).toBe("!op read key");
 	});
+	it("builtinProviders 标记：envSet / configuredInFile / authedAtRuntime 三方状态", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } } }), "utf8");
+		delete process.env.MINIMAX_API_KEY;
+		const bridge = new FakeBridge({
+			get_available_models: {
+				type: "response",
+				command: "get_available_models",
+				success: true,
+				data: { models: [{ provider: "minimax", id: "MiniMax-M3" }] },
+			},
+		});
+		const status = await makeService(bridge).loadStatus();
+		expect(status.builtinCatalogInfo).toEqual({ piVersion: "0.84.2-test", generatedAt: "2026-09-09T00:00:00.000Z" });
+		const minimax = status.builtinProviders.find((p) => p.id === "minimax")!;
+		expect(minimax).toMatchObject({ configuredInFile: true, authedAtRuntime: true, envSet: false, authKind: "env-key" });
+		const copilot = status.builtinProviders.find((p) => p.id === "github-copilot")!;
+		expect(copilot).toMatchObject({ authKind: "oauth", configuredInFile: false, authedAtRuntime: false });
+		// env 一设置 → envSet 翻转（目录快照不变，标记是本机状态）
+		process.env.MINIMAX_API_KEY = "sk-m";
+		const status2 = await makeService(new FakeBridge()).loadStatus();
+		expect(status2.builtinProviders.find((p) => p.id === "minimax")!.envSet).toBe(true);
+	});
+	it("挂载条目（仅 apiKey）不触发 builtinConflict；deepseek 式覆盖条目 → 警告但可正常保存", async () => {
+		writeFileSync(
+			join(dir, "models.json"),
+			JSON.stringify({
+				providers: {
+					minimax: { apiKey: "$MINIMAX_API_KEY" },
+					deepseek: { baseUrl: "https://api.deepseek.com/v1", api: "openai-completions", apiKey: "$DEEPSEEK_API_KEY", models: [{ id: "deepseek-chat" }] },
+				},
+			}),
+			"utf8",
+		);
+		const service = makeService(new FakeBridge());
+		const status = await service.loadStatus();
+		expect(status.providers.minimax.builtinConflict).toBeUndefined();
+		const conflict = status.providers.deepseek.builtinConflict!;
+		expect(conflict).toContain("DeepSeek");
+		expect(conflict).toContain("baseUrl");
+		// 非阻断：既有覆盖条目照常保存（用户的真实 deepseek 配置不可破）
+		const res = await service.save({
+			providers: {
+				minimax: { apiKey: "$MINIMAX_API_KEY" },
+				deepseek: { baseUrl: "https://api.deepseek.com/v1", api: "openai-completions", apiKey: "$DEEPSEEK_API_KEY", models: [{ id: "deepseek-chat" }] },
+			},
+		});
+		expect(res.status).toBe(200);
+	});
 });
 
 // ============================================================================
@@ -557,6 +778,37 @@ describe("ModelsConfigService.apply", () => {
 		if ("error" in res.body) throw new Error(res.body.error);
 		expect(res.body.chatSwitched).toBe(true);
 		expect(bridge.requests.some((c) => c.type === "set_model")).toBe(true);
+	});
+	it("挂载条目不在旧运行时快照 + 勾重启 → 目录通道放行：重启 + set_model（回归：旧代码先校验后重启，必 400）", async () => {
+		// 模拟「刚保存挂载条目」：models.json 只有 apiKey 挂载，运行 bridge
+		// 的已认证快照里没有它（重启前当然没有）
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } } }), "utf8");
+		const bridge = new FakeBridge({
+			get_available_models: { type: "response", command: "get_available_models", success: true, data: { models: [] } },
+		});
+		const service = makeService(bridge);
+		const res = await service.apply({ activeModel: "minimax/MiniMax-M3", restartBridge: true });
+		expect(res.status).toBe(200);
+		if ("error" in res.body) throw new Error(res.body.error);
+		expect(res.body.restarted).toBe(true);
+		expect(res.body.chatSwitched).toBe(true); // set_model 打到重启后的 bridge
+		expect(bridge.requests.some((c) => c.type === "set_model" && (c as { provider?: string }).provider === "minimax")).toBe(true);
+	});
+	it("挂载条目不在运行时快照 + 未勾重启 → 400 并提示勾选重启", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } } }), "utf8");
+		const bridge = new FakeBridge({
+			get_available_models: { type: "response", command: "get_available_models", success: true, data: { models: [] } },
+		});
+		const service = makeService(bridge);
+		const res = await service.apply({ activeModel: "minimax/MiniMax-M3" });
+		expect(res.status).toBe(400);
+		if ("error" in res.body) expect(res.body.error).toContain("重启");
+	});
+	it("勾了重启但模型 id 大小写与目录不符（minimax-m3 ≠ MiniMax-M3）→ 400（目录匹配大小写敏感）", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } } }), "utf8");
+		const service = makeService(new FakeBridge());
+		const res = await service.apply({ activeModel: "minimax/minimax-m3", restartBridge: true });
+		expect(res.status).toBe(400);
 	});
 	it("restartBridge：kill→exit→start→switch_session（恢复上下文）→refresh→hello", async () => {
 		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { d: { models: [{ id: "m" }] } } }), "utf8");
@@ -680,5 +932,45 @@ describe("ModelsConfigService.test", () => {
 		const res = await makeService(new FakeBridge()).test({ provider: "c" });
 		expect(res.status).toBe(400);
 		expect(res.body.message).toContain("!command");
+	});
+	it("挂载条目测试：文件无 baseUrl/api → 回退内置目录（anthropic 形态探测）", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } } }), "utf8");
+		process.env.MINIMAX_API_KEY = "sk-m";
+		const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "MiniMax-M3" }] }), { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const res = await makeService(new FakeBridge()).test({ provider: "minimax" });
+		expect(res.status).toBe(200);
+		expect(res.body.ok).toBe(true);
+		expect(res.body.probedUrl).toBe("https://api.minimax.io/anthropic/v1/models");
+		const [url, init] = fetchMock.mock.calls[0]!;
+		expect(url).toBe("https://api.minimax.io/anthropic/v1/models");
+		expect((init as { headers: Record<string, string> }).headers["x-api-key"]).toBe("sk-m");
+	});
+	it("挂载条目测试：文件自带 baseUrl/api → 文件值优先于目录", async () => {
+		writeFileSync(
+			join(dir, "models.json"),
+			JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY", baseUrl: "https://custom.example", api: "openai-completions" } } }),
+			"utf8",
+		);
+		process.env.MINIMAX_API_KEY = "sk-m";
+		const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const res = await makeService(new FakeBridge()).test({ provider: "minimax" });
+		expect(res.status).toBe(200);
+		expect(res.body.probedUrl).toBe("https://custom.example/models");
+	});
+	it("挂载条目测试：$VAR 未设置 → 400（目录回退救不了缺失的密钥）", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { minimax: { apiKey: "$MINIMAX_API_KEY" } } }), "utf8");
+		delete process.env.MINIMAX_API_KEY;
+		const res = await makeService(new FakeBridge()).test({ provider: "minimax" });
+		expect(res.status).toBe(400);
+		expect(res.body.message).toContain("$VAR");
+	});
+	it("无 baseUrl 的内置（目录也没有）→ 400 带说明（google 按模型提供 URL，无法探测）", async () => {
+		writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { google: { apiKey: "$GEMINI_API_KEY" } } }), "utf8");
+		process.env.GEMINI_API_KEY = "sk-g";
+		const res = await makeService(new FakeBridge()).test({ provider: "google" });
+		expect(res.status).toBe(400);
+		expect(res.body.message).toContain("Base URL");
 	});
 });

@@ -30,6 +30,11 @@ export interface ModelConfigProviderInfo {
 	/** 原样保留、页面不编辑的高级字段名（compat / headers / modelOverrides…）。 */
 	advancedFields: string[];
 	/**
+	 * 与 pi 内置 provider 同 id 且覆盖了 baseUrl/models 等字段 → 合并陷阱
+	 * 警告（非阻断，仅提示；详见 builtin-providers.json 的目录来源）。
+	 */
+	builtinConflict?: string;
+	/**
 	 * provider 的完整原始 JSON（PUT 时原样带回，保全页面不编辑的字段；
 	 * 字面量 apiKey 已被置 ""——保存时留 ""/缺省 = 沿用旧值，null = 删除，
 	 * 其余（$VAR 引用或新明文）= 覆盖）。
@@ -42,6 +47,50 @@ export interface ActiveModelInfo {
 	provider: string;
 	id: string;
 	name?: string;
+}
+
+/** builtin-providers.json 里一个内置模型条目（生成脚本产出的静态快照）。 */
+export interface BuiltinCatalogModel {
+	id: string;
+	name?: string;
+	reasoning?: boolean;
+	contextWindow?: number;
+	maxTokens?: number;
+}
+
+/**
+ * builtin-providers.json 里一个内置 provider 条目。pi 没有任何运行时机器
+ * 可读目录（RPC 只列已认证 provider、不含 env var 名），这份快照由
+ * scripts/generate-builtin-providers.mjs 从已安装 pi-ai 的 dist 生成、
+ * 随仓库提交，pi 升级后重跑脚本再生成。
+ */
+export interface BuiltinCatalogProvider {
+	id: string;
+	name: string;
+	/** 内置 provider 的 baseUrl（azure/bedrock 等按模型提供的没有此字段）。 */
+	baseUrl?: string;
+	/** 该 provider 的 API 形态（多形态 provider 有多个）。 */
+	apis: string[];
+	/** 密钥环境变量名（pi 的 envApiKeyAuth 读取；OAuth/特殊认证型没有）。 */
+	apiKeyEnv?: string;
+	authKind: "env-key" | "oauth" | "custom";
+	models: BuiltinCatalogModel[];
+}
+
+export interface BuiltinCatalogFile {
+	piVersion: string;
+	generatedAt: string;
+	providers: BuiltinCatalogProvider[];
+}
+
+/** GET /api/models —— 内置 provider 摘要（目录快照 + 本机状态标记）。 */
+export interface BuiltinProviderInfo extends BuiltinCatalogProvider {
+	/** apiKeyEnv 是否已在 server 进程环境里设置。 */
+	envSet: boolean;
+	/** 是否已在 models.json 里配置（挂载或覆盖条目）。 */
+	configuredInFile: boolean;
+	/** 是否在主 bridge 的已认证运行时快照里（OAuth provider 的实际状态）。 */
+	authedAtRuntime: boolean;
 }
 
 /** GET /api/models 响应。 */
@@ -59,6 +108,10 @@ export interface ModelsConfigResponse {
 	persistedDefault: { provider: string; modelId: string } | null;
 	/** 编排节点 / planner 当前使用的默认模型（server 内存值）。 */
 	orchDefaults: { nodeDefault: string; plannerModel: string };
+	/** 内置 provider 目录快照（含本机 envSet/configuredInFile/authedAtRuntime 标记）。 */
+	builtinProviders: BuiltinProviderInfo[];
+	/** 目录元信息；piVersion 为 "unknown" 表示目录文件缺失/损坏——页面降级提示。 */
+	builtinCatalogInfo: { piVersion: string; generatedAt: string };
 	/** models.json 读取/解析失败的错误信息（provider 列表可能为空）。 */
 	configError?: string;
 }
