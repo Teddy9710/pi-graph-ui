@@ -50,6 +50,19 @@ const json = (payload: unknown): RequestInit => ({
 	body: JSON.stringify(payload),
 });
 
+/**
+ * 版本错位兜底：服务器进程比前端旧时，响应里没有 builtinProviders /
+ * builtinCatalogInfo——缺省补空目录（piVersion "unknown"），页面走「目录
+ * 不可用」降级而不是 for...of undefined 黑屏。
+ */
+function normalizeConfig(config: ModelsConfigResponse): ModelsConfigResponse {
+	return {
+		...config,
+		builtinProviders: Array.isArray(config.builtinProviders) ? config.builtinProviders : [],
+		builtinCatalogInfo: config.builtinCatalogInfo ?? { piVersion: "unknown", generatedAt: "" },
+	};
+}
+
 interface ModelsState {
 	config: ModelsConfigResponse | null;
 	loading: boolean;
@@ -95,7 +108,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 		set({ loading: true, error: null });
 		try {
 			const config = await apiCall<ModelsConfigResponse>("/api/models");
-			set({ config, loading: false });
+			set({ config: normalizeConfig(config), loading: false });
 		} catch (err) {
 			set({ error: err instanceof Error ? err.message : "加载失败", loading: false });
 		}

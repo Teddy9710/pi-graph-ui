@@ -335,7 +335,7 @@ function BuiltinPicker({
 	const drafts = useModelsStore((s) => s.drafts);
 	const [q, setQ] = useState("");
 	const providers = config?.builtinProviders ?? [];
-	const unknown = config?.builtinCatalogInfo.piVersion === "unknown";
+	const unknown = config?.builtinCatalogInfo?.piVersion === "unknown";
 	const filtered = useMemo(() => {
 		const needle = q.trim().toLowerCase();
 		if (!needle) return providers;
@@ -361,7 +361,7 @@ function BuiltinPicker({
 				<p className="pg-dim">
 					{unknown
 						? "内置目录不可用（builtin-providers.json 缺失或损坏）——重新生成：node scripts/generate-builtin-providers.mjs"
-						: `目录生成自 pi ${config?.builtinCatalogInfo.piVersion} · ${providers.length} 个内置 provider`}
+						: `目录生成自 pi ${config?.builtinCatalogInfo?.piVersion} · ${providers.length} 个内置 provider`}
 				</p>
 			</div>
 			<ul className="pg-sessions-list">
