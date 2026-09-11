@@ -312,7 +312,10 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		// Client-side gate: never send a graph that doesn't validate.
 		if (s.issues.length > 0) return;
 		set({ orchError: null });
-		sendWs({ type: "run_graph", graph: s.graphDef });
+		// Disconnect-window guard, same as planRun/approveNode (#11): a send
+		// that never left the browser must tell the user, not silently no-op.
+		if (!sendWs({ type: "run_graph", graph: s.graphDef }))
+			useOrchStore.setState({ orchError: { message: "发送失败（连接已断开）——请重试", issues: [] } });
 	},
 
 	abortRun: () => sendWs({ type: "abort_run" }),
@@ -323,9 +326,18 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		if (s.run.nodes[nodeId]?.status !== "awaiting") return;
 		const guardKey = `${s.run.runId}:${nodeId}`;
 		if (Date.now() - (lastApproveSentAt.get(guardKey) ?? 0) < APPROVE_SEND_GUARD_MS) return;
-		lastApproveSentAt.set(guardKey, Date.now());
 		// Empty note omitted — the server settles a bare approve as（已批准）.
-		sendWs({ type: "approve_node", runId: s.run.runId, nodeId, approved, note: note || undefined });
+		const sent = sendWs({ type: "approve_node", runId: s.run.runId, nodeId, approved, note: note || undefined });
+		if (sent) {
+			// 守卫只在消息真的离开浏览器后才开始计时——断线窗口里 sendWs
+			// 静默丢弃，若先计时决策会既没送达、1s 内又不能重点。
+			lastApproveSentAt.set(guardKey, Date.now());
+			return;
+		}
+		// 决策未送达：节点仍是 awaiting。摆到 run_error 同一展示位（没有
+		// 反馈的静默丢失会让用户以为已批准、run 挂起等人），守卫未占用，
+		// 按钮立即可重点。
+		useOrchStore.setState({ orchError: { message: "决策未发送（连接已断开）——请重试", issues: [] } });
 	},
 
 	planRun: (goal, opts) => {
@@ -334,10 +346,11 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		const trimmed = goal.trim();
 		if (!trimmed) return;
 		if (Date.now() - lastPlanSentAt < PLAN_SEND_GUARD_MS) return;
-		lastPlanSentAt = Date.now();
 		set({ orchError: null });
-		// plan_started echoes back and flips the view to "run".
-		sendWs({ type: "plan_run", goal: trimmed, chat: opts?.chat === true });
+		// plan_started echoes back and flips the view to "run". Guard only on
+		// a successful send (same disconnect window as approveNode).
+		if (sendWs({ type: "plan_run", goal: trimmed, chat: opts?.chat === true })) lastPlanSentAt = Date.now();
+		else useOrchStore.setState({ orchError: { message: "发送失败（连接已断开）——请重试", issues: [] } });
 	},
 
 	setView: (view) => set({ view }),

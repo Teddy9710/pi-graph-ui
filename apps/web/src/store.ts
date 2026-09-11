@@ -94,13 +94,23 @@ let switchGuard = 0;
 /** Debounce timer for the hello/session_bound→refreshSessions nudge. */
 let sessionsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-function send(payload: unknown): void {
-	if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+function send(payload: unknown): boolean {
+	if (ws && ws.readyState === WebSocket.OPEN) {
+		ws.send(JSON.stringify(payload));
+		return true;
+	}
+	return false; // 断线/重连窗口：消息没有离开浏览器
 }
 
-/** Public send for sibling stores (orch) that share this socket. */
-export function sendWs(payload: unknown): void {
-	send(payload);
+/**
+ * Public send for sibling stores (orch) that share this socket. Returns
+ * whether the payload actually left (socket OPEN) — callers that consume a
+ * UI guard on send (approveNode/planRun) must only do so on success, or a
+ * disconnect silently eats the decision AND blocks the retry for the guard
+ * window.
+ */
+export function sendWs(payload: unknown): boolean {
+	return send(payload);
 }
 
 function ingest(store: AppState, events: JsonAgentSessionEvent[]): void {
