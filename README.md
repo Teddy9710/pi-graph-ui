@@ -1,6 +1,6 @@
 # pi-graph-ui
 
-![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-359%20passed-2DA44E)
+![Node](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933) ![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220) ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white) ![React Flow](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white) ![tests](https://img.shields.io/badge/tests-407%20passed-2DA44E)
 
 把 [pi coding agent](https://github.com/badlogic/pi-mono) 会话的完整动作过程**实时可视化成图**，并在同一界面里做**图编排执行**：主 agent 的每次工具调用是一个节点，并行 spawn 的子 agent 扇出与汇聚在 React Flow 画布上展开；编排页既可手画任务 DAG，也可输入一个目标让 AI 自动拆图——**每个节点都是一个真实独立运行的 pi agent 实例**。
 
@@ -103,7 +103,7 @@ PI_ARGS="--model deepseek/deepseek-chat" DEEPSEEK_API_KEY=sk-... node src/main.t
 cd apps/web && pnpm dev
 ```
 
-浏览器打开 **http://localhost:5173**，底部输入框发任务即可（⚡ 开关切换普通对话 / 自动编排）。桥接服务根路径另挂一个独立的贪吃蛇 demo：http://localhost:8787/。
+浏览器打开 **http://localhost:5173**，底部输入框发任务即可（⚡ 开关切换普通对话 / 自动编排）。桥接服务根路径另挂一个独立的贪吃蛇 demo（纯演示用途，`SNAKE_DEMO=0` 可整体摘除）：http://localhost:8787/。
 
 ## 工作原理
 
@@ -145,7 +145,7 @@ flowchart LR
 ## 验证 / 测试
 
 ```bash
-pnpm -r test         # 325 个单测全过（shared 95 + server 230）
+pnpm -r test         # 407 个单测全过（shared 96 + server 311）
 pnpm -r typecheck    # 全仓类型检查（web 无单测，typecheck 即门禁）
 
 # 以下 e2e 需要桥接服务在跑（dev.mjs）且模型 key 可用，会真实调 LLM：

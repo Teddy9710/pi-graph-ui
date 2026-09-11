@@ -18,7 +18,7 @@
 node scripts/dev.mjs          # 启动 dev 栈：server :8787 / web :5173（Ctrl+C 全停）
 node scripts/stop.mjs         # 兜底清理：dev.mjs 被硬杀后残留的 server/vite（pidfile + 端口扫描）
 # 浏览器打开 http://localhost:5173
-pnpm -r test                  # 全部单测（shared 95 + server 230）
+pnpm -r test                  # 全部单测（shared 96 + server 311）
 pnpm -r typecheck             # 三个包类型检查
 node scripts/e2e-orch.mjs     # e2e 三模式：默认 chain / PLAN=1 / CHAT=1（可选 ABORT=1）
 node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 → 批准注入下游 → 归档/重放/孤儿
@@ -28,8 +28,8 @@ node scripts/e2e-gate.mjs     # 门控 e2e：挂起 → 非法决策四连拒 �
 
 | 层 | 内容 | 状态 |
 |---|---|---|
-| shared 单测 95 | chat.test 15（时间线合并/sentinel 识别）、orchestration.test 59（validateGraph 含节点能力档案与门控规则/assemblePrompt/buildSynthPrompt/capBytes 截断/label 防伪造/fold attempts/门控事件折叠与长效计数）、fold 13、graph 8 | ✅ 全绿 |
-| server 单测 230 | run-manager 26（含 chat 钩子 6 条 + 门控备注防伪造）、planner 30（label 归一 + 能力档案归一 + 风险门控提取/降级/防伪）、orchestrator 22（含 attempts/capBytes/门控挂起·决策·中止·槽位旁路）、pi-node-executor 14（质量门 salvage/超时/workdir/工具档案）、models-config 62（校验器/密钥哨兵往返/.env 与 models.json 写序/apply 运行时兜底/test 三通道/CORS 无关的服务层）、session-service 14 / session-store / snake 40 / event-hub 8 / bridge 等 | ✅ 全绿 |
+| shared 单测 96 | chat.test 15（时间线合并/sentinel 识别）、orchestration.test 60（validateGraph 含节点能力档案、门控规则与总量上限 nodes/edges/task/label/name/assemblePrompt/buildSynthPrompt/capBytes 截断/label 防伪造/fold attempts/门控事件折叠与长效计数）、fold 13、graph 8 | ✅ 全绿 |
+| server 单测 311 | run-manager 26（含 chat 钩子 6 条 + 门控备注防伪造）、planner 33（label 归一 + 能力档案归一 + 风险门控提取/降级/防伪）、orchestrator 22（含 attempts/capBytes/门控挂起·决策·中止·槽位旁路）、pi-node-executor 16（质量门 salvage/重跑共享墙钟预算/超时/workdir/工具档案）、models-config 86（校验器/密钥哨兵往返/.env 与 models.json 写序/apply 运行时兜底+内置目录重启通道/test 三通道/内置撞名守卫）、session-service 14 / session-store 11 / snake 40 / event-hub 8 / request-guard 45（Host/Origin 本机信任边界：DNS rebinding + 跨站 WS/fetch/HTTP 接线 + env 扩展名单）/ builtin-providers 10 | ✅ 全绿 |
 | e2e | chain（注入/归档/重放）、PLAN（规划全流程；**规划器若自提门控自动放行**，门控全契约归 GATE 模式）、CHAT（sentinel 注入+整合回复+hello 重放）、**GATE（挂起→4 类非法决策仅回请求方→批准备注注入下游→归档/重放）**；ABORT 模式孤儿检查为 **PID 集合快照差**（基线之前存在的进程不计泄漏，PowerShell 查询失败即报错不静默通过） | ✅ 四模式绿 |
 | web | 仅 typecheck（无组件测试）→ 本文 MC-CHAT / MC-BAR / MC-LAY 的手测用例即为 Web 层主要防线 | ⚠️ 靠手测 |
 
