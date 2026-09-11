@@ -63,6 +63,18 @@ export const MAX_EDGE_NOTE_CHARS = 20;
  */
 export const TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const MAX_NODE_TOOLS = 32;
+/**
+ * Whole-graph totals: run_graph 载荷的规模上限。节点数是真正的资源维度
+ * （每节点一个 pi 子进程 × 10 分钟级超时），task/name 与 label 是 WS 供应
+ * 的字符串——校验逐项很细，但没有总量上限时一张「合法」的万节点图照样
+ * 通过。planner 自身的上限（16 节点 / 512 边 / 8000 字 task / 100 字
+ * label，见 planner.ts）都低于这里，自动编排的图不会被这份校验拦下。
+ */
+export const MAX_GRAPH_NODES = 64;
+export const MAX_GRAPH_EDGES = 512;
+export const MAX_TASK_CHARS = 10_000;
+export const MAX_LABEL_CHARS = 200;
+export const MAX_GRAPH_NAME_CHARS = 200;
 /** Quality gate bounds (chars of the trimmed final output). 0 = gate off. */
 export const MAX_MIN_OUTPUT_CHARS = 1_000_000;
 /** Per-node wall clock bounds (ms): 1s … 24h. */
@@ -204,6 +216,18 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		issues.push({ message: "图中没有节点" });
 		return issues;
 	}
+	// Totals: over-limit graphs are rejected OUTRIGHT without scanning items —
+	// the caps are the resource boundary, and iterating a hostile payload to
+	// collect per-item issues would itself be the DoS.
+	if (def.nodes.length > MAX_GRAPH_NODES) {
+		return [{ message: `节点数超过上限（${def.nodes.length} > ${MAX_GRAPH_NODES}）` }];
+	}
+	if (def.edges.length > MAX_GRAPH_EDGES) {
+		return [{ message: `边数超过上限（${def.edges.length} > ${MAX_GRAPH_EDGES}）` }];
+	}
+	if (typeof def.name === "string" && def.name.length > MAX_GRAPH_NAME_CHARS) {
+		issues.push({ message: `图 name 超长（>${MAX_GRAPH_NAME_CHARS} 字符）` });
+	}
 	const seen = new Set<string>();
 	for (const n of def.nodes) {
 		if (typeof n !== "object" || n === null || typeof n.id !== "string" || typeof n.task !== "string") {
@@ -219,6 +243,9 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		if (seen.has(n.id)) issues.push({ nodeOrEdge: n.id, message: "节点 id 重复" });
 		seen.add(n.id);
 		if (!n.task.trim()) issues.push({ nodeOrEdge: n.id, message: "任务 prompt 为空" });
+		if (n.task.length > MAX_TASK_CHARS) {
+			issues.push({ nodeOrEdge: n.id, message: `任务 prompt 超长（${n.task.length} > ${MAX_TASK_CHARS} 字符）` });
+		}
 		if (n.model !== undefined && (typeof n.model !== "string" || !MODEL_RE.test(n.model))) {
 			issues.push({ nodeOrEdge: n.id, message: "model 含非法字符（仅限字母/数字/./_/+/-//，且不以 / 开头）" });
 		}
@@ -241,6 +268,9 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		// on chat runs — same header-forgery rule as edge notes.
 		if (typeof n.label === "string" && LABEL_UNSAFE_RE.test(n.label)) {
 			issues.push({ nodeOrEdge: n.id, message: "节点 label 不能包含换行或控制字符" });
+		}
+		if (typeof n.label === "string" && n.label.length > MAX_LABEL_CHARS) {
+			issues.push({ nodeOrEdge: n.id, message: `节点 label 超长（>${MAX_LABEL_CHARS} 字符）` });
 		}
 		// Capability profile knobs (all optional). Numbers must be integers in
 		// range; tool names and workdir shapes are validated here so the

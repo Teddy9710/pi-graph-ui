@@ -43,6 +43,40 @@ describe("validateGraph", () => {
 		expect(validateGraph({ nodes: [], edges: [] })[0]?.message).toContain("没有节点");
 	});
 
+	it("caps graph totals: nodes/edges over-limit rejected outright, task/label/name per item", () => {
+		// 节点数超限：直接整体拒绝（不去逐项扫描一个敌意大载荷）
+		const manyNodes = Array.from({ length: 65 }, (_, i) => ({ id: `n${i}`, task: "t" }));
+		const nodeIssues = validateGraph({ nodes: manyNodes, edges: [] });
+		expect(nodeIssues).toHaveLength(1);
+		expect(nodeIssues[0]?.message).toContain("节点数超过上限");
+
+		// 边数超限（节点数合法）：同样整体拒绝。边数超限时整体拒绝发生在
+		// 逐边校验之前，所以重复边不影响这个分支的触发。
+		const pairs = Array.from({ length: 513 }, (_, i) => ({
+			id: `a->n${i % 63}`,
+			source: "a",
+			target: `n${i % 63}`,
+		}));
+		const edgeIssues = validateGraph({
+			nodes: [{ id: "a", task: "t" }, ...Array.from({ length: 63 }, (_, i) => ({ id: `n${i}`, task: "t" }))],
+			edges: pairs,
+		});
+		expect(edgeIssues).toHaveLength(1);
+		expect(edgeIssues[0]?.message).toContain("边数超过上限");
+
+		// 单条超长 task / label / 图 name：逐项 issue（不整体拒绝）
+		const long = "x".repeat(10_001);
+		const issues = validateGraph(graph({ name: "y".repeat(201), nodes: [{ id: "a", task: long, label: "z".repeat(201) }] }));
+		expect(issues.map((i) => i.message).join("\n")).toContain("任务 prompt 超长");
+		expect(issues.map((i) => i.message).join("\n")).toContain("节点 label 超长");
+		expect(issues.map((i) => i.message).join("\n")).toContain("图 name 超长");
+
+		// 上限之内（恰好等于上限）照常通过——边界值不误伤
+		expect(
+			validateGraph({ nodes: Array.from({ length: 64 }, (_, i) => ({ id: `n${i}`, task: "x".repeat(10_000) })), edges: [] }),
+		).toEqual([]);
+	});
+
 	it("is total on malformed input (never throws)", () => {
 		// The graph arrives as arbitrary JSON over the WS trust boundary.
 		expect(validateGraph(undefined as never).length).toBeGreaterThan(0);
