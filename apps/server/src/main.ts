@@ -68,6 +68,7 @@ import { PiNodeExecutor } from "./pi-node-executor.ts";
 import { PiPlanner } from "./planner.ts";
 import { isValidGateNote, MAX_GATE_NOTE_CHARS, RunManager } from "./run-manager.ts";
 import { RunStore } from "./run-store.ts";
+import { guardMiddleware, isAllowedHost, isAllowedOrigin, parseExtraList } from "./request-guard.ts";
 import { SessionStore, isValidTitle } from "./session-store.ts";
 import { SessionService } from "./session-service.ts";
 import { Leaderboard } from "./snake/leaderboard.ts";
@@ -114,6 +115,20 @@ const PI_NO_SESSION = process.env.PI_NO_SESSION === "1";
 /** Auto-orchestration planner (goal → graph); defaults to the node model. */
 const ORCH_PLANNER_MODEL = process.env.ORCH_PLANNER_MODEL ?? ORCH_MODEL;
 const ORCH_PLAN_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_PLAN_TIMEOUT_MS ?? 180_000) || 180_000);
+/**
+ * Request-guard extensions (#4): comma-separated extra Hosts / Origins for
+ * non-default setups (reverse proxy, remote dev box). The built-in policy is
+ * loopback + RFC1918 + *.local (Host) / loopback origins any port (Origin).
+ */
+const ALLOWED_HOSTS = parseExtraList(process.env.ALLOWED_HOSTS);
+const TRUSTED_ORIGINS = parseExtraList(process.env.TRUSTED_ORIGINS);
+/**
+ * Snake demo toggle (#7): the demo shares port + process with the bridge by
+ * design (single-binary dev toy), which also couples its attack surface to
+ * the highest-privilege process. SNAKE_DEMO=0 removes every snake route for
+ * deployments where the bridge faces anything but localhost dev.
+ */
+const SNAKE_DEMO = process.env.SNAKE_DEMO !== "0";
 
 // ============================================================================
 // Bridge + hub wiring
@@ -247,54 +262,42 @@ const modelsService = new ModelsConfigService({
 const app = new Hono();
 
 // ----------------------------------------------------------------------------
-// Security middleware: minimal hardening shared by all routes.
+// Security middleware: minimal hardening shared by all routes (Host guard +
+// Origin guard + baseline headers — see request-guard.ts).
 // ----------------------------------------------------------------------------
-app.use("*", async (c, next) => {
-	// Clickjacking + MIME sniffing hardening.
-	c.header("X-Content-Type-Options", "nosniff");
-	c.header("X-Frame-Options", "DENY");
-	c.header("Referrer-Policy", "no-referrer");
-	// Basic CSP for the snake demo page (served from this origin).
-	if (c.req.path === "/snake" || c.req.path === "/") {
-		c.header(
-			"Content-Security-Policy",
-			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'",
-		);
-	}
-	await next();
-});
+app.use("*", guardMiddleware({ allowedHosts: ALLOWED_HOSTS, trustedOrigins: TRUSTED_ORIGINS }));
 
 // ----------------------------------------------------------------------------
-// CORS for the archive + model-config APIs the web app fetches cross-origin
-// (Vite serves the app on :5173, this server on :8787; WebSockets are
-// CORS-exempt, fetch is not). Without ACAO the browser silently drops these
-// responses — the history drawer showed 「暂无存档」 even with archives on
-// disk. The snake sub-API keeps same-origin policy.
+// CORS for every API the web app fetches cross-origin (Vite serves the app
+// on :5173, this server on :8787; WebSockets are CORS-exempt, fetch is not).
+// Without ACAO the browser silently drops these responses — the history
+// drawer showed 「暂无存档」 even with archives on disk. One shared local
+// policy (#4): only loopback origins (any port — dev servers pick free
+// ones) plus TRUSTED_ORIGINS; `cors()`'s origin:* default would let ANY
+// website drive these APIs through the user's browser — and the model-config
+// routes are WRITES (PUT models.json/.env, POST restart + outbound probes).
+// Same-origin deployments send no cross-origin fetch and are unaffected.
 // ----------------------------------------------------------------------------
-app.use("/api/sessions", cors());
-app.use("/api/sessions/*", cors());
-app.use("/api/agents", cors());
-app.use("/api/runs", cors());
-app.use("/api/runs/*", cors());
-// 模型配置页是「写」接口（PUT 写 models.json/.env、POST 触发进程重启与外
-// 发探测请求）——CORS 不能像上面的只读 API 那样 origin:* 全放开，否则任何
-// 网页都能借受害者的浏览器改模型配置（改 baseUrl 即可静默劫持全部请求与
-// 密钥）。只允许本机开发前端（vite :5173 / 127.0.0.1 任意端口）；同源部署
-// （server 直接服务打包产物）不发跨域请求，不受影响。
-const modelsCors = cors({
-	origin: (origin) => (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin) ? origin : undefined),
+const apiCors = cors({
+	origin: (origin) => (origin !== undefined && isAllowedOrigin(origin, TRUSTED_ORIGINS) ? origin : undefined),
 });
-app.use("/api/models", modelsCors);
-app.use("/api/models/*", modelsCors);
+app.use("/api/sessions", apiCors);
+app.use("/api/sessions/*", apiCors);
+app.use("/api/agents", apiCors);
+app.use("/api/runs", apiCors);
+app.use("/api/runs/*", apiCors);
+app.use("/api/models", apiCors);
+app.use("/api/models/*", apiCors);
 
-// Snake game sub-API (leaderboard + token issuance).
-app.route("/api/snake", snakeRoutes({ leaderboard: new Leaderboard() }));
+// Snake game sub-API (leaderboard + token issuance) — demo-only surface,
+// removable via SNAKE_DEMO=0 (#7).
+if (SNAKE_DEMO) app.route("/api/snake", snakeRoutes({ leaderboard: new Leaderboard() }));
 
 // Model config sub-API (providers / active model / test / apply).
 app.route("/api/models", modelsRoutes({ service: modelsService }));
 
-app.get("/snake", (c) => c.html(snakeHtml()));
-app.get("/", (c) => c.html(snakeHtml()));
+app.get("/snake", (c) => (SNAKE_DEMO ? c.html(snakeHtml()) : c.json({ error: "snake demo disabled (SNAKE_DEMO=0)" }, 404)));
+app.get("/", (c) => (SNAKE_DEMO ? c.html(snakeHtml()) : c.text("pi-graph bridge is running. (snake demo disabled: SNAKE_DEMO=0)")));
 
 app.get("/health", (c) =>
 	c.json({
@@ -391,7 +394,16 @@ function wsClients(): WebSocket[] {
 	return [...clients.keys()];
 }
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+	// #4: browsers ALWAYS attach Origin to WS handshakes — a cross-site page
+	// driving this socket is the attack, a missing Origin is a non-browser
+	// client (e2e scripts). Host carries the DNS-rebinding signature. The
+	// close happens before hello/registration: rejected sockets never see
+	// session data and never reach the command handlers.
+	if (!isAllowedOrigin(req.headers.origin, TRUSTED_ORIGINS) || !isAllowedHost(req.headers.host, ALLOWED_HOSTS)) {
+		ws.close(1008, "origin/host not allowed");
+		return;
+	}
 	const info: ClientInfo = { id: `c${nextClientId++}` };
 	clients.set(ws, info);
 
