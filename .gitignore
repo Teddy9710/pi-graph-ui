@@ -25,3 +25,6 @@ docs/TRIAL-RUN-PLAN.md
 
 # Claude 本机配置/技能库/调研笔记——机器私有，绝不 push
 .claude/
+
+# pi 上游参考克隆（只读本机调研用，与本项目无关）——绝不入库
+pi/
