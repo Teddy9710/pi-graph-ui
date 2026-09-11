@@ -1,7 +1,7 @@
 import { mkdtempSync, appendFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionStore, isValidTitle } from "../src/session-store.ts";
 import type { JsonAgentSessionEvent } from "@pi-graph/shared";
 
@@ -90,7 +90,15 @@ describe("SessionStore", () => {
 		const store = freshStore();
 		store.append(userEnd);
 		rmSync(store.dir, { recursive: true, force: true });
-		expect(() => store.append(assistantEnd)).not.toThrow();
+		// The store logs the expected ENOENT via console.error before
+		// disabling archival — silence it here so a PASSING suite doesn't
+		// read like a failure (#3).
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			expect(() => store.append(assistantEnd)).not.toThrow();
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
 	it("exposes currentId transitions and validates resume()", async () => {
