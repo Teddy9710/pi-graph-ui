@@ -1,0 +1,36 @@
+# CI（#13）：与本地验证门禁同构——类型检查、全部单测、web 生产构建。
+# 服务端 TS 由 Node 直接运行（type stripping），无独立构建步骤，故只构建 web。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # lockfileVersion 9.0 → pnpm 10
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Test
+        run: pnpm -r test
+
+      - name: Build web
+        run: pnpm --filter @pi-graph/web build
