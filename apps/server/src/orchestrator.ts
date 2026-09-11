@@ -102,8 +102,12 @@ export class OrchestratorEngine {
 	private readonly awaiting = new Set<string>();
 	/** When each gate entered awaiting — node_decided.durationMs is measured from here. */
 	private readonly awaitingSince = new Map<string, number>();
-	/** Run-loop resolvers parked in Promise.race while gates are open. */
-	private gateWaiters: (() => void)[] = [];
+	/** Gate-wakeup signal: ONE resettable promise. A per-iteration resolver
+	 *  queue would accumulate dead closures whenever Promise.race was settled
+	 *  by an inflight node instead of a gate decision — long runs with an open
+	 *  gate grew one dead resolver per ordinary node completion. */
+	private gateWait: Promise<void> | null = null;
+	private gateResolve: (() => void) | null = null;
 
 	private readonly abortCtl = new AbortController();
 	private aborted = false;
@@ -344,15 +348,20 @@ export class OrchestratorEngine {
 		this.emit({ type: "node_awaiting", runId: this.runId, nodeId: id, startedAt, assembledPrompt });
 	}
 
+	/** The current gate signal, created lazily and reused by every run-loop
+	 *  iteration until wake() consumes it (parallel waiters share it fine —
+	 *  a promise resolves for ALL its awaiters). */
 	private gateSignal(): Promise<void> {
-		return new Promise<void>((resolve) => this.gateWaiters.push(resolve));
+		if (!this.gateWait) this.gateWait = new Promise<void>((resolve) => (this.gateResolve = resolve));
+		return this.gateWait;
 	}
 
-	/** A gate was decided (or aborted) — unpark the run loop. */
+	/** A gate was decided (or aborted) — unpark the run loop and re-arm. */
 	private wake(): void {
-		const waiters = this.gateWaiters;
-		this.gateWaiters = [];
-		for (const w of waiters) w();
+		const resolve = this.gateResolve;
+		this.gateWait = null;
+		this.gateResolve = null;
+		resolve?.();
 	}
 
 	/** Snapshot of one node's upstream contributions (prompt material). */
