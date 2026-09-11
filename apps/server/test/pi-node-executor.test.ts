@@ -163,6 +163,52 @@ describe("PiNodeExecutor quality gate / salvage", () => {
 		expect(FakeBridge.instances).toHaveLength(2);
 	});
 
+	it("salvage shares the node wall clock: budget spent → no second spawn (短答案原样放行)", async () => {
+		// timeoutMs 小到首次 spawn 后剩余不足 1s：起不了有意义的重跑，
+		// 短答案保留、不标 attempts——旧行为会给重跑再开一份完整计时器
+		const exec = freshExecutor([["5"], ["计算结果是 5，因为 2 加 3 等于 5。"]], { minOutputChars: 20, timeoutMs: 100 });
+		const r = await exec.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r.ok).toBe(true);
+		expect(r.text).toBe("5");
+		expect(r.attempts).toBeUndefined();
+		expect(FakeBridge.instances).toHaveLength(1);
+	});
+
+	it("salvage retry times out at the ORIGINAL deadline (timer = remaining budget, not a fresh one)", async () => {
+		// 首个 spawn 延迟 800ms 才给出短答案（剩余 ~1200ms）；重跑永不
+		// settle → 重跑计时器在剩余预算处收束，节点随即按首次的短答案
+		// 收尾（重跑失败不顶掉首次成功答案，salvage 语义不变）。关键回归
+		// 点：总墙钟 ≈ timeoutMs，而不是旧行为的 2 ×（800 + 2000 = 2800ms）。
+		FakeBridge.scripts = [["5"], []];
+		FakeBridge.instances = [];
+		let spawn = 0;
+		const exec = new PiNodeExecutor({
+			defaultModel: "test/node",
+			minOutputChars: 20,
+			timeoutMs: 2_000,
+			bridgeFactory: (opts) => {
+				const b = new FakeBridge(opts);
+				const index = spawn++;
+				const origRequest = b.request.bind(b);
+				if (index === 0) {
+					b.request = async (cmd) => {
+						await new Promise((res) => setTimeout(res, 800));
+						return origRequest(cmd);
+					};
+				}
+				return b;
+			},
+		});
+		const start = Date.now();
+		const r = await exec.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		const elapsed = Date.now() - start;
+		expect(r.ok).toBe(true);
+		expect(r.text).toBe("5"); // 重跑超时不顶掉首次的成功答案
+		expect(r.attempts).toBe(2);
+		expect(FakeBridge.instances).toHaveLength(2); // 重跑确实发生，只是没再拿整份预算
+		expect(elapsed).toBeLessThan(2_400); // ~800 + ~1200；旧代码这里是 ~2800
+	}, 10_000);
+
 	it("both answers empty: the node fails loudly (never a silent empty success)", async () => {
 		const exec = freshExecutor([[""], [""]], { minOutputChars: 20 });
 		const r = await exec.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());

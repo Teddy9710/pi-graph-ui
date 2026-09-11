@@ -100,7 +100,7 @@ pnpm install     # 通常在 monorepo 根目录
 pnpm dev         # 开发
 pnpm start       # 运行
 pnpm typecheck   # 类型检查
-pnpm test        # 单测（167 个用例）
+pnpm test        # 单测（311 个用例）
 ```
 
 ## 环境变量
@@ -119,6 +119,9 @@ pnpm test        # 单测（167 个用例）
 | `ORCH_NODE_RETRY` | 质量门违规时是否原题重跑一次（两答取长）；`0` 关闭 | 开启 |
 | `ORCH_PLANNER_MODEL` | 规划器模型 | = `ORCH_MODEL` |
 | `ORCH_PLAN_TIMEOUT_MS` | 规划超时 | `180000` |
+| `SNAKE_DEMO` | 置 `0`：摘除贪吃蛇 demo 的全部路由（`/snake`、`/api/snake/*`），根路径只留提示文本。demo 与桥接服务同端口同进程（单二进制开发玩具），暴露面也就挂在最高权限进程上——任何非本机开发的部署都建议置 `0` | 未设置（开启） |
+| `ALLOWED_HOSTS` | Host 信任名单扩展（逗号分隔）：反代 / 远程开发机等场景把公网 Host 加进本机信任范围。内置策略 = loopback + RFC1918 私网 + 链路本地 + `*.local`，公网域名 Host 一律 403（拦 DNS rebinding） | 空 |
+| `TRUSTED_ORIGINS` | Origin 信任名单扩展（逗号分隔，支持完整 origin 或裸主机名）：跨站浏览器 WS/HTTP 请求只放行本机 Origin，其余在 WS 握手 / HTTP 请求入口直接 403——CORS 头只能挡住「可读」，挡不住 `text/plain` POST 这类无预检 simple request 的「可执行」（浏览器对 WS 必带 Origin，无法伪造；不带 Origin 的非浏览器客户端如 curl / e2e 脚本照常放行） | 空 |
 
 ## 节点能力档案（node-level capability profile）
 
@@ -137,6 +140,7 @@ pnpm test        # 单测（167 个用例）
 
 - 输出（trim 后）低于阈值 = 违规；默认**原题不改写重跑一次**，两次成功回答**取长者**；
 - 两次均为空 → 节点判失败（空转不再静默算成功）；真实失败（进程退出/超时/拒绝）不重试；
+- **重跑与首次共享同一份墙钟预算**：重跑的计时器用剩余预算（剩余不足 1s 时不再重跑），单节点总占用 ≤ timeoutMs，不会出现 2 × 超时的槽位占用；
 - **中止后绝不重试**；重跑发生时预览流会插入「—— 输出仅 N 字符（< 质量门 M），用原题重跑一次 ——」标记，
   `node_completed` 事件带 `attempts: 2`。
 

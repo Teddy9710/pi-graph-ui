@@ -17,7 +17,10 @@
  *   successful answers wins (pi-graph-tool's salvage semantics — one bad
  *   generation should not drop a node); two empty answers fail the node.
  *   Abort is never retried past. Violations surface as a marker delta plus
- *   attempts:2 on node_completed, not as silent completions.
+ *   attempts:2 on node_completed, not as silent completions. The retry shares
+ *   the node's SINGLE wall-clock budget: timeoutMs covers the first attempt
+ *   and the salvage run together (the retry's timer gets the remaining
+ *   budget), so a node never occupies its parallel slot for 2 × timeoutMs.
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -72,6 +75,12 @@ export interface PiExecutorOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+/**
+ * Minimum remaining budget for a salvage retry to spawn at all — below this
+ * there is no room for a meaningful run (mirrors validateGraph's own per-node
+ * timeout floor of 1s).
+ */
+const MIN_RETRY_BUDGET_MS = 1_000;
 
 /** Strip YAML frontmatter; the persona is the markdown body. */
 function personaBody(raw: string): string {
@@ -122,9 +131,15 @@ export class PiNodeExecutor implements Executor {
 		ctx: { onDelta: (kind: "text" | "tool", delta: string) => void; signal: AbortSignal },
 	): Promise<NodeResult> {
 		const minChars = call.node.minOutputChars ?? this.minOutputChars;
-		if (minChars <= 0) return this.runOnce(call, ctx); // gate off — exactly the pre-profile behavior
+		const budgetMs = call.node.timeoutMs ?? this.timeoutMs;
+		// ONE wall clock for the whole node (first attempt + salvage retry):
+		// the retry times out at the ORIGINAL deadline instead of restarting a
+		// full timer, so a node can never run 2 × timeoutMs while still
+		// holding its parallel slot.
+		const deadline = Date.now() + budgetMs;
+		if (minChars <= 0) return this.runOnce(call, ctx, budgetMs); // gate off — exactly the pre-profile behavior
 
-		const first = await this.runOnce(call, ctx);
+		const first = await this.runOnce(call, ctx, budgetMs);
 		if (!first.ok) return first; // real failures are never salvaged — same env, same outcome
 		const len = first.text.trim().length;
 		if (len >= minChars) return first;
@@ -137,12 +152,22 @@ export class PiNodeExecutor implements Executor {
 		}
 		if (ctx.signal.aborted) return first; // 中止后不重试
 
+		// Salvage shares the node's wall clock: the retry gets whatever budget
+		// the first attempt left. Under MIN_RETRY_BUDGET_MS there is no room
+		// for a meaningful spawn — the empty answer fails the gate, a short
+		// one stands (same verdicts as the retry-off branch).
+		const remaining = deadline - Date.now();
+		if (remaining < MIN_RETRY_BUDGET_MS) {
+			if (len === 0) return { ok: false, text: "", error: `输出为空且节点预算已用尽（质量门 minOutputChars=${minChars}）` };
+			return first;
+		}
+
 		// Salvage: one re-run with the ORIGINAL prompt (no rewriting), longer
 		// successful answer wins. The marker rides the delta stream so the
 		// preview shows why the node twitched (same pattern as the planner's
 		// "第 N 次规划无效" notice).
 		ctx.onDelta("text", `\n\n—— 输出仅 ${len} 字符（< 质量门 ${minChars}），用原题重跑一次 ——\n\n`);
-		const second = await this.runOnce(call, ctx);
+		const second = await this.runOnce(call, ctx, remaining);
 		const pick = second.ok && second.text.trim().length > len ? second : first;
 		if (pick.text.trim().length === 0) {
 			return { ok: false, text: "", error: `两次输出均为空（质量门 minOutputChars=${minChars}）` };
@@ -150,10 +175,13 @@ export class PiNodeExecutor implements Executor {
 		return { ...pick, attempts: 2 };
 	}
 
-	/** One pi rpc attempt: spawn → prompt over stdin → race settle/exit/timeout/abort. */
+	/** One pi rpc attempt: spawn → prompt over stdin → race settle/exit/timeout/abort.
+	 *  budgetMs is THIS attempt's share of the node's wall clock — the full
+	 *  timeout for the first spawn, the remaining budget for a salvage retry. */
 	private async runOnce(
 		call: ExecutorCall,
 		ctx: { onDelta: (kind: "text" | "tool", delta: string) => void; signal: AbortSignal },
+		budgetMs: number,
 	): Promise<NodeResult> {
 		const { node, assembledPrompt } = call;
 
@@ -206,7 +234,6 @@ export class PiNodeExecutor implements Executor {
 		if (node.tools?.length) extraArgs.push("--tools", node.tools.join(","));
 		if (node.excludeTools?.length) extraArgs.push("--exclude-tools", node.excludeTools.join(","));
 
-		const timeoutMs = node.timeoutMs ?? this.timeoutMs;
 		const bridge = this.bridgeFactory({ extraArgs, cwd: bridgeCwd });
 		const state = initState();
 		let settled = false;
@@ -268,7 +295,7 @@ export class PiNodeExecutor implements Executor {
 			finish({ ok: false, text: "", error: `pi 进程退出 (code ${code ?? "null"})${tail ? `: ${tail}` : ""}` });
 		});
 
-		timer = setTimeout(() => finish({ ok: false, text: "", error: `节点超时（${timeoutMs}ms）` }), timeoutMs);
+		timer = setTimeout(() => finish({ ok: false, text: "", error: `节点超时（${budgetMs}ms）` }), budgetMs);
 		(timer as { unref?: () => void }).unref?.();
 		ctx.signal.addEventListener("abort", onAbort);
 
