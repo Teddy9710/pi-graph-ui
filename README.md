@@ -7,14 +7,12 @@
   把 Agent 工作流建模为可编辑、可执行、可观测、可复盘的图。
 </p>
 
-<p align="center">
-  <img alt="Node.js >= 20" src="https://img.shields.io/badge/Node-%E2%89%A5%2020-339933">
-  <img alt="pnpm workspace" src="https://img.shields.io/badge/pnpm-workspace-F69220">
-  <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white">
-  <img alt="React Flow 12" src="https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white">
-  <img alt="TypeScript 5" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
-  <img alt="407 test cases" src="https://img.shields.io/badge/tests-407%20cases-4DA3FF">
-</p>
+![Node.js ≥ 20](https://img.shields.io/badge/Node-%E2%89%A5%2020-339933)
+![pnpm workspace](https://img.shields.io/badge/pnpm-workspace-F69220)
+![React 19](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)
+![React Flow 12](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white)
+![TypeScript 5](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
+![407 test cases](https://img.shields.io/badge/tests-407%20cases-4DA3FF)
 
 PI-GRAPH 是 [pi coding agent](https://github.com/badlogic/pi-mono) 的图工程工作台。它不只是把 Agent 的调用过程“画出来”，还把任务依赖、上下文流向、人工决策和失败策略变成一张真正可以执行的 DAG。
 
