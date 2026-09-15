@@ -21,6 +21,7 @@
 ![React Flow 12](https://img.shields.io/badge/React_Flow-12-FF0072?logo=react&logoColor=white)
 ![TypeScript 5](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![407 test cases](https://img.shields.io/badge/tests-407%20cases-4DA3FF)
+![MIT License](https://img.shields.io/badge/license-MIT-E854D4)
 
 PI-GRAPH 是 [pi coding agent](https://github.com/badlogic/pi-mono) 的图工程工作台。它不只是把 Agent 的调用过程“画出来”，还把任务依赖、上下文流向、人工决策和失败策略变成一张真正可以执行的 DAG。
 
@@ -236,6 +237,10 @@ node scripts/verify-sessions-ui.mjs
 - [架构与设计决策](PLAN.md)
 - [完整测试用例](TESTCASES.md)
 - [桥接服务装配与协议调研](docs/bridge-server.md)
+
+### 开源协议
+
+本项目采用 [MIT License](LICENSE)。你可以自由使用、复制、修改、合并、发布和分发本项目，但需要保留原始版权与许可声明。
 
 ---
 
@@ -459,5 +464,9 @@ Use `PLAN=1` to test automatic graph planning, `CHAT=1` to test result injection
 - [Architecture and design decisions](PLAN.md)
 - [Complete test cases](TESTCASES.md)
 - [Bridge assembly and protocol research](docs/bridge-server.md)
+
+### License
+
+PI-GRAPH is released under the [MIT License](LICENSE). You may use, copy, modify, merge, publish, and distribute the software as long as the original copyright and license notice are retained.
 
 [Back to Chinese](#中文)
