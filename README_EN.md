@@ -4,7 +4,7 @@
   <a href="README.md">中文</a> · English
 </p>
 
-![PI-GRAPH — Graph Engineering for AI Agents](docs/images/pi-graph-poster.png)
+![PI-GRAPH — Make AI Agent Workflows Truly Executable / 让 AI Agent 工作流真正可执行](docs/images/pi-graph-promo-poster.png)
 
 <p align="center">
   <strong>Graph Engineering for AI Agents</strong><br/>
