@@ -41,6 +41,7 @@ import {
 	type UpstreamInput,
 } from "@pi-graph/shared";
 import { setTimeoutUnref } from "./infra/timer-unref.ts";
+import { nodeArtifactsDir } from "./artifacts.ts";
 
 // ============================================================================
 // Executor seam
@@ -68,6 +69,12 @@ export interface ExecutorCall {
 	/** Task + injected upstream outputs (what actually gets sent to pi). */
 	assembledPrompt: string;
 	upstream: UpstreamInput[];
+	/**
+	 * This node's per-run artifacts dir (absolute). Used as the subprocess
+	 * cwd when node.workdir is absent (the executor mkdir's it); ignored
+	 * otherwise. undefined = artifacts feature off.
+	 */
+	artifactDir?: string;
 }
 
 export interface Executor {
@@ -100,6 +107,14 @@ export interface EngineOptions {
 	 * event right after run_started.
 	 */
 	precompleted?: ReadonlyMap<string, { text: string; fromRunId: string }>;
+	/**
+	 * Artifacts root (e.g. ~/.pi-graph-ui/artifacts). When set, every
+	 * executed/reused node gets <root>/<runId>/<nodeId>/: the subprocess cwd
+	 * for workdir-less nodes (the executor mkdir's it) and the output.md
+	 * archive location. undefined = feature off — events and executor calls
+	 * stay byte-identical to the pre-feature behavior.
+	 */
+	artifactsRoot?: string;
 }
 
 // ============================================================================
@@ -116,6 +131,7 @@ export class OrchestratorEngine {
 	private readonly defaultMaxRetries: number;
 	private readonly retryDelayMs: number;
 	private readonly precompleted: ReadonlyMap<string, { text: string; fromRunId: string }> | undefined;
+	private readonly artifactsRoot: string | undefined;
 
 	private readonly nodeById = new Map<string, NodeDef>();
 	private readonly upstreams = new Map<string, string[]>();
@@ -167,7 +183,17 @@ export class OrchestratorEngine {
 		this.defaultMaxRetries = Math.max(0, options.defaultMaxRetries ?? 0);
 		this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 0);
 		this.precompleted = options.precompleted;
+		this.artifactsRoot = options.artifactsRoot;
 		this.build();
+	}
+
+	/**
+	 * This node's per-run artifacts dir. undefined when the feature is off OR
+	 * the id can't be a directory name (Windows reserved device name) — that
+	 * node silently keeps the pre-feature behavior; the run never fails.
+	 */
+	private artifactDirFor(nodeId: string): string | undefined {
+		return this.artifactsRoot ? (nodeArtifactsDir(this.artifactsRoot, this.runId, nodeId) ?? undefined) : undefined;
 	}
 
 	/** Structural + cycle validation (callers run shared validateGraph first). */
@@ -202,12 +228,14 @@ export class OrchestratorEngine {
 			for (const n of this.graph.nodes) {
 				const fromRunId = this.seededFrom.get(n.id);
 				if (fromRunId === undefined) continue;
+				const artifactDir = this.artifactDirFor(n.id);
 				this.emit({
 					type: "node_reused",
 					runId: this.runId,
 					nodeId: n.id,
 					fromRunId,
 					output: { text: this.outputs.get(n.id) ?? "" },
+					...(artifactDir ? { artifactDir } : {}),
 				});
 			}
 		}
@@ -422,6 +450,7 @@ export class OrchestratorEngine {
 			const node = this.nodeById.get(id)!;
 			const maxAttempts = (node.maxRetries ?? this.defaultMaxRetries) + 1;
 			const firstStartedAt = this.now();
+			const artifactDir = this.artifactDirFor(id);
 			this.status.set(id, "running");
 			this.emit({
 				type: "node_started",
@@ -429,13 +458,14 @@ export class OrchestratorEngine {
 				nodeId: id,
 				startedAt: firstStartedAt,
 				assembledPrompt: assemblePrompt(node, this.upstreamInputs(id)),
+				...(artifactDir ? { artifactDir } : {}),
 			});
 			for (let attempt = 1; ; attempt++) {
 				const upstream = this.upstreamInputs(id);
 				let result: NodeResult;
 				try {
 					result = await this.executor.run(
-						{ node, assembledPrompt: assemblePrompt(node, upstream), upstream },
+						{ node, assembledPrompt: assemblePrompt(node, upstream), upstream, ...(artifactDir ? { artifactDir } : {}) },
 						{
 							onDelta: (kind, delta) => {
 								this.emit({ type: "node_delta", runId: this.runId, nodeId: id, kind, delta });

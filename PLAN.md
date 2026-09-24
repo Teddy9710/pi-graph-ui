@@ -130,7 +130,13 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
     - shared：`RunEvent` 新增 node_retry/node_reused/repair_started/repair_delta/repair_completed/repair_failed；`RunNodeState.retry/reusedFrom`；`foldRunEvent` 补 `default: return state`；`NodeDef.maxRetries`（validateGraph 0-3 整数 + 门控排除清单）；run-store 认 repair_started 开头的 run（E10）。
     - web：运行视图「↻ 重跑失败部分」、错误节点「AI 修复并重跑」（orch-store 防重守卫 + WS rerun_failed/repair_node）、节点面板 retry/reusedFrom 行 + maxRetries 数字输入（E11）、画布方标徽章 ↻n/N 与 复用（无 shadow，仿门控标）。
     - 验证：shared 96 / server 342（新增 orchestrator 32 例、run-manager 10 例、planner 7 例、executor kind 8 例等）；对抗校验修正 12 项（E1-E12：播种两阶段、kind 标注、drive 单循环防双 inflight、retryDelays abort、材料先于 nextRunId、overrides 不播种、repair 通道复用、无代码默认值等）。
-
+16. **M-A 节点产物目录（2026-09-24）**：编排节点的磁盘产物从「无管理」升级为 per-run per-node 布局——
+    - **布局**：`<ORCH_ARTIFACTS_DIR>/<runId>/<nodeId>/`（默认 `~/.pi-graph-ui/artifacts`，env 覆盖、空白串回落默认；`/health` 与启动日志回显 root）。
+    - **默认 cwd**：无 `workdir` 节点的 pi 子进程 cwd = 本节点产物目录（executor 先 mkdir；失败按 config 大声报错而非静默退回共享 `PI_CWD`）；显式 `workdir` 优先级更高、语义逐字节不变。并行节点从此互不踩文件，agent 中间产物不再散落服务源码目录。
+    - **output.md 归档**：`node_completed`/`node_reused` 的最终输出全文写入产物目录（`writeNodeOutput`，UTF-8/LF 不截断；头部 runId/nodeId/label?/model?/endedAt(ISO)?/durationMs?/attempts?，reused 为 fromRunId）——每次运行的目录完整（rerun/repair 播种节点也写）；best-effort 按 run 熔断（写失败不弄挂运行，新 run 重试）。
+    - **接线**：`artifactsRoot` 选项（EngineOptions/RunManagerOptions，undefined = 功能关闭、行为零变化）经 RunManager 透传引擎；引擎用 `nodeArtifactsDir`（含 Windows 保留名守卫，CON/PRN/COM1 等返回 null → 该节点静默降级）算出每节点 `artifactDir`，经 ExecutorCall（executor 消费）与 node_started/node_reused 事件（web fold 进 `RunNodeState.artifactDir`）分两路下发；归档钩子在 RunManager `retain()` 的 publish 前（引擎保持无 fs，label 从 retained run_started.graph 查）。
+    - **web**：节点面板「产物目录」行（`title` 悬停全路径、`overflowWrap:anywhere` 防长路径撑爆）；旧归档缺字段 → null → 行隐藏，store 零改动（foldRunEvent 泛化折叠白拿）。
+    - 验证：shared 98 / artifacts 8 / orchestrator 35 / executor 27 / run-manager 41（含零行为守卫：功能关闭时事件载荷不含 `artifactDir` 字段；保留名节点 run 照常完成）。
 
 ## 风险与对策
 - pi 版本升级改动事件形状 → shared 包用快照测试锁定事件结构，升级时显式更新

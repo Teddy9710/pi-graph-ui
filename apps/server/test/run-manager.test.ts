@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_GATE_NOTE_CHARS, RunManager, type ChatRunResult, type Planner } from "../src/run-manager.ts";
@@ -1119,5 +1119,150 @@ describe("RunManager.startRepair", () => {
 		f.planner.settle({ ok: true, task: "迟到" });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(f.seen.filter((e) => e.type === "run_started").length).toBe(1); // only the source run
+	});
+});
+
+describe("RunManager artifacts (output.md 归档)", () => {
+	let dir: string;
+	let store: RunStore;
+	let artRoot: string;
+
+	const chainGraph: GraphDef = {
+		name: "chain",
+		nodes: [
+			{ id: "a", task: "跑a", label: "A 节点" },
+			{ id: "b", task: "跑b" },
+		],
+		edges: [{ id: "a->b", source: "a", target: "b" }],
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(tmpdir(), "runs-test-"));
+		artRoot = mkdtempSync(join(tmpdir(), "art-test-"));
+		store = new RunStore(dir);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(artRoot, { recursive: true, force: true });
+	});
+
+	it("writes per-node output.md for completed nodes; subscriber events unchanged", async () => {
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => ok(`结果:${call.node.id}`)),
+			store,
+			artifactsRoot: artRoot,
+		});
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const started = manager.start(chainGraph);
+		expect(started.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(seen.map((e) => e.type)).toEqual([
+			"run_started",
+			"node_started",
+			"node_completed",
+			"node_started",
+			"node_completed",
+			"run_finished",
+		]);
+		const runId = started.ok ? started.runId : "";
+		const fileA = readFileSync(join(artRoot, runId, "a", "output.md"), "utf8");
+		expect(fileA).toContain("runId: " + runId);
+		expect(fileA).toContain("nodeId: a");
+		expect(fileA).toContain("label: A 节点");
+		expect(fileA.endsWith("\n\n---\n\n结果:a\n")).toBe(true);
+		expect(existsSync(join(artRoot, runId, "b", "output.md"))).toBe(true);
+	});
+
+	it("executor calls carry artifactDir (the engine computed it from the same root)", async () => {
+		const calls: ExecutorCall[] = [];
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => {
+				calls.push(call);
+				return ok(`结果:${call.node.id}`);
+			}),
+			store,
+			artifactsRoot: artRoot,
+		});
+		const started = manager.start(chainGraph);
+		await vi.advanceTimersByTimeAsync(0);
+		const runId = started.ok ? started.runId : "";
+		expect(calls.map((c) => c.artifactDir)).toEqual([join(artRoot, runId, "a"), join(artRoot, runId, "b")]);
+	});
+
+	it("rerunFailed archives seed outputs into the NEW run's dir with fromRunId headers", async () => {
+		let bCalls = 0;
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => {
+				if (call.node.id === "b" && ++bCalls === 1) return { ok: false, text: "", error: "boom" };
+				return ok(`结果:${call.node.id}`);
+			}),
+			store,
+			artifactsRoot: artRoot,
+		});
+		const first = manager.start(chainGraph);
+		await vi.advanceTimersByTimeAsync(0);
+		const rerun = await manager.rerunFailed(first.ok ? first.runId : "");
+		expect(rerun.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		const newRunId = rerun.ok ? rerun.runId : "";
+		const fileA = readFileSync(join(artRoot, newRunId, "a", "output.md"), "utf8");
+		expect(fileA).toContain(`runId: ${newRunId}`);
+		expect(fileA).toContain(`fromRunId: ${first.ok ? first.runId : ""}`);
+		expect(fileA.endsWith("\n\n---\n\n结果:a\n")).toBe(true);
+		// b re-executed → its own output.md in the new dir too.
+		expect(existsSync(join(artRoot, newRunId, "b", "output.md"))).toBe(true);
+	});
+
+	it("feature off (no artifactsRoot): nothing is ever created under a scratch root", async () => {
+		const manager = new RunManager({ executor: fakeExecutor(async (call) => ok("x")), store });
+		manager.start(singleNodeGraph());
+		await vi.advanceTimersByTimeAsync(0);
+		expect(readdirSync(artRoot)).toEqual([]);
+	});
+
+	it("an unwritable artifacts root never fails the run (per-run latch)", async () => {
+		const blocker = join(dir, "blocker");
+		writeFileSync(blocker, "x");
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => ok("结果")),
+			store,
+			artifactsRoot: join(blocker, "under", "a", "file"),
+		});
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const started = manager.start(singleNodeGraph());
+		await vi.advanceTimersByTimeAsync(0);
+		const fin = seen.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("completed");
+		expect(manager.active).toBe(false);
+	});
+
+	it("per-run latch skips archiving for later nodes after the first write fails", async () => {
+		const blocker = join(dir, "blocker");
+		writeFileSync(blocker, "x");
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => ok(`结果:${call.node.id}`)),
+			store,
+			artifactsRoot: join(blocker, "under", "a", "file"),
+		});
+		const started = manager.start(chainGraph);
+		expect(started.ok).toBe(true);
+		const runId = started.ok ? started.runId : "";
+		manager.subscribe((e) => {
+			if (e.type === "node_completed" && e.nodeId === "a") {
+				// Remove the blocker before node b runs; a writable root would let
+				// b's archive write succeed unless the per-run latch is honored.
+				unlinkSync(blocker);
+			}
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(manager.active).toBe(false);
+		// Node a's archive write failed → no output.md.
+		expect(existsSync(join(blocker, "under", "a", "file", runId, "a", "output.md"))).toBe(false);
+		// Node b executed, but the latch should have suppressed archiving.
+		expect(existsSync(join(blocker, "under", "a", "file", runId, "b", "output.md"))).toBe(false);
 	});
 });

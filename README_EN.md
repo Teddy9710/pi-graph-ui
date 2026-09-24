@@ -143,6 +143,7 @@ flowchart LR
 - `ORCH_MIN_OUTPUT_CHARS` enables an output quality gate. A short result is retried once with the original prompt, and the longer answer is kept.
 - Transient node failures (timeout / process / model) auto-retry once by default; a failed run can be partially re-run reusing finished outputs, or a failed node can be rewritten by AI and re-run (see the next section).
 - Aborting a run terminates the planner and every node process tree.
+- Every node of every run gets its own artifacts directory `<root>/<runId>/<nodeId>/` (default `~/.pi-graph-ui/artifacts`): nodes without a `workdir` use it as the subprocess working directory (parallel nodes stop stomping each other's files), and the final output is archived there as `output.md` (reused nodes get a `fromRunId` header).
 
 ## Failure recovery
 
@@ -205,6 +206,7 @@ docs              Architecture research, design notes, and README images
 | `ORCH_NODE_RETRY` | Retry output that misses the quality gate | Enabled |
 | `ORCH_NODE_MAX_RETRIES` | Auto-retries for failed nodes (timeout/process/model only; per-node `maxRetries` overrides) | `1` (0–3) |
 | `ORCH_NODE_RETRY_DELAY_MS` | Delay between failure retries, in milliseconds | `2000` |
+| `ORCH_ARTIFACTS_DIR` | Root of the per-node artifacts directories (`<root>/<runId>/<nodeId>/`; subprocess cwd for nodes without a `workdir` and home of the archived `output.md`; never auto-cleaned) | `~/.pi-graph-ui/artifacts` |
 | `ALLOWED_HOSTS` / `TRUSTED_ORIGINS` | Additional allowed hosts and origins | Safe local and private-network defaults |
 | `SNAKE_DEMO` | Set to `0` to disable the bridge demo page | Enabled |
 

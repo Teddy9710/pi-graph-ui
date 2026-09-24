@@ -142,6 +142,7 @@ flowchart LR
 - `ORCH_MIN_OUTPUT_CHARS` 可开启输出质量门；不达标时原题重跑一次并保留更长答案。
 - 节点瞬态失败（超时/进程/模型类）默认自动重试 1 次；运行失败后可复用已完成输出重跑失败部分，或让 AI 重写失败节点后重跑（见下节）。
 - 中止会终止规划器与所有节点进程树，避免孤儿进程继续消耗资源。
+- 每次运行的每个节点都有专属产物目录 `<root>/<runId>/<nodeId>/`（默认 `~/.pi-graph-ui/artifacts`）：未设置 `workdir` 的节点以它为子进程工作目录（并行节点互不踩文件），最终输出归档为目录下的 `output.md`（复用节点写 `fromRunId` 头）。
 
 ## 失败恢复
 
@@ -204,6 +205,7 @@ docs              架构调研、设计说明与 README 图片
 | `ORCH_NODE_RETRY` | 质量门违规时是否补救重试 | 开启 |
 | `ORCH_NODE_MAX_RETRIES` | 失败自动重试次数（仅超时/进程/模型类；节点 `maxRetries` 覆盖） | `1`（0–3） |
 | `ORCH_NODE_RETRY_DELAY_MS` | 失败重试间隔毫秒数 | `2000` |
+| `ORCH_ARTIFACTS_DIR` | 节点产物根目录（`<root>/<runId>/<nodeId>/`；无 `workdir` 节点的子进程 cwd 与 `output.md` 归档处；无自动清理） | `~/.pi-graph-ui/artifacts` |
 | `ALLOWED_HOSTS` / `TRUSTED_ORIGINS` | 额外允许的 Host 与 Origin | 本机与私网安全默认值 |
 | `SNAKE_DEMO` | 设为 `0` 时关闭桥接服务上的演示页 | 开启 |
 

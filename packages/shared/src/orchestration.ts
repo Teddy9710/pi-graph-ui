@@ -148,7 +148,10 @@ export interface NodeDef {
 	/**
 	 * Relative working directory for this node's pi subprocess (created under
 	 * the server cwd if missing). Isolates parallel nodes that would
-	 * otherwise write over each other in one shared cwd.
+	 * otherwise write over each other in one shared cwd. When ABSENT, the
+	 * subprocess cwd defaults to this node's artifacts dir
+	 * `<ORCH_ARTIFACTS_DIR>/<runId>/<nodeId>/` (default
+	 * `~/.pi-graph-ui/artifacts/`) — same isolation, zero configuration.
 	 */
 	workdir?: string;
 	/**
@@ -587,7 +590,11 @@ export type RunEvent =
 	| { type: "plan_delta"; runId: string; delta: string }
 	| { type: "plan_completed"; runId: string; graph: GraphDef }
 	| { type: "plan_failed"; runId: string; error: string }
-	| { type: "node_started"; runId: string; nodeId: string; startedAt: number; assembledPrompt: string }
+	// artifactDir (node_started/node_reused): this node's per-run artifacts
+	// directory (absolute), also the default subprocess cwd when workdir is
+	// absent. Optional like attempts — omitted when the feature is off (or the
+	// node id can't be a directory name), so old payloads replay unchanged.
+	| { type: "node_started"; runId: string; nodeId: string; startedAt: number; assembledPrompt: string; artifactDir?: string }
 	| { type: "node_delta"; runId: string; nodeId: string; kind: "text" | "tool"; delta: string }
 	| {
 			type: "node_completed";
@@ -621,7 +628,7 @@ export type RunEvent =
 	| { type: "node_retry"; runId: string; nodeId: string; attempt: number; maxAttempts: number; error: string; retryInMs: number }
 	// Resume seeding: this node's output carries over from a previous run
 	// (rerun-failed-part); the node never executes in THIS run.
-	| { type: "node_reused"; runId: string; nodeId: string; fromRunId: string; output: { text: string } }
+	| { type: "node_reused"; runId: string; nodeId: string; fromRunId: string; output: { text: string }; artifactDir?: string }
 	// AI repair phase (mirror of plan_*): the planner rewrites a FAILED node's
 	// task (with the error + upstream outputs as context) before the run
 	// re-executes it — repair_started → repair_delta* → repair_completed →
@@ -666,6 +673,8 @@ export interface RunNodeState {
 	retry: { attempt: number; maxAttempts: number; lastError: string } | null;
 	/** Set when this node's output carried over from a previous run (node_reused). */
 	reusedFrom: string | null;
+	/** 本运行的节点产物目录（output.md 所在处）；null/undefined = 功能未开 / 未开始 / 旧归档。 */
+	artifactDir?: string | null;
 }
 
 export interface RunState {
@@ -741,6 +750,7 @@ function initNode(id: string): RunNodeState {
 		attempts: null,
 		retry: null,
 		reusedFrom: null,
+		artifactDir: null,
 	};
 }
 
@@ -819,6 +829,7 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			node.status = "running";
 			node.startedAt = event.startedAt;
 			node.assembledPrompt = event.assembledPrompt;
+			node.artifactDir = event.artifactDir ?? null;
 			return state;
 		}
 		case "node_delta": {
@@ -908,6 +919,7 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			node.status = "ok";
 			node.output = event.output.text;
 			node.reusedFrom = event.fromRunId;
+			node.artifactDir = event.artifactDir ?? null;
 			return state;
 		}
 		case "repair_started": {

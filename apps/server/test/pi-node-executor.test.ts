@@ -328,6 +328,46 @@ describe("PiNodeExecutor capability profile", () => {
 		expect(FakeBridge.instances).toHaveLength(0); // refused before spawning
 	});
 
+	it("no workdir + call.artifactDir: the bridge cwd becomes the artifacts dir (created)", async () => {
+		const base = mkdtempSync(join(tmpdir(), "pi-exec-test-"));
+		tempDirs.push(base);
+		const artifactDir = join(base, "runs", "r1", "n1");
+		const exec = freshExecutor([["回答内容足够长，没有任何问题。"]], { cwd: base });
+		const r = await exec.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [], artifactDir }, quietCtx());
+		expect(r.ok).toBe(true);
+		const bridge = FakeBridge.instances[0]!;
+		expect(bridge.opts.cwd).toBe(artifactDir);
+		expect(existsSync(artifactDir)).toBe(true);
+	});
+
+	it("explicit workdir WINS over artifactDir (documented precedence)", async () => {
+		const base = mkdtempSync(join(tmpdir(), "pi-exec-test-"));
+		tempDirs.push(base);
+		const exec = freshExecutor([["回答内容足够长，没有任何问题。"]], { cwd: base });
+		const r = await exec.run(
+			{ node: { ...baseNode, workdir: "nodes/dev" }, assembledPrompt: "t", upstream: [], artifactDir: join(base, "art", "r1", "n1") },
+			quietCtx(),
+		);
+		expect(r.ok).toBe(true);
+		const bridge = FakeBridge.instances[0]!;
+		expect(bridge.opts.cwd).toBe(join(base, "nodes", "dev"));
+	});
+
+	it("artifactDir mkdir failure reports config and refuses to spawn", async () => {
+		const base = mkdtempSync(join(tmpdir(), "pi-exec-test-"));
+		tempDirs.push(base);
+		writeFileSync(join(base, "blocker"), "x"); // a regular file blocks the path
+		const exec = freshExecutor([["ok"]], { cwd: base });
+		const r = await exec.run(
+			{ node: { ...baseNode }, assembledPrompt: "t", upstream: [], artifactDir: join(base, "blocker", "n1") },
+			quietCtx(),
+		);
+		expect(r.ok).toBe(false);
+		expect(r.error).toContain("产物目录");
+		expect(r.kind).toBe("config");
+		expect(FakeBridge.instances).toHaveLength(0); // refused before spawning
+	});
+
 	it("tools/excludeTools ride the argv as comma-joined flags", async () => {
 		const exec = freshExecutor([["回答内容足够长，没有任何问题。"]]);
 		await exec.run(

@@ -718,6 +718,44 @@ describe("foldRunEvent attempts (salvage visibility)", () => {
 	});
 });
 
+describe("foldRunEvent artifactDir (产物目录)", () => {
+	it("node_started/node_reused artifactDir lands on the node state; absent stays null", () => {
+		const state = initRunState();
+		const g3 = graph({ nodes: [...graph().nodes, { id: "c", task: "任务 C" }] });
+		foldRunEvent(state, { type: "run_started", runId: "r", startedAt: 1, graph: g3 });
+		foldRunEvent(state, {
+			type: "node_started",
+			runId: "r",
+			nodeId: "a",
+			startedAt: 2,
+			assembledPrompt: "t",
+			artifactDir: "/artifacts/r/a",
+		});
+		expect(state.nodes.a!.artifactDir).toBe("/artifacts/r/a");
+		// node_reused carries the same optional field (seeds get their own copy
+		// of output.md in the NEW run's dir).
+		foldRunEvent(state, {
+			type: "node_reused",
+			runId: "r",
+			nodeId: "b",
+			fromRunId: "r0",
+			output: { text: "ok" },
+			artifactDir: "/artifacts/r/b",
+		});
+		expect(state.nodes.b!.artifactDir).toBe("/artifacts/r/b");
+		// Old archives / feature-off payloads lack the field → null (the UI
+		// hides the 产物目录 row for them).
+		foldRunEvent(state, { type: "node_started", runId: "r", nodeId: "c", startedAt: 3, assembledPrompt: "t" });
+		expect(state.nodes.c!.artifactDir).toBeNull();
+	});
+
+	it("initNode seeds artifactDir null (fresh run state has no leaked paths)", () => {
+		const state = initRunState();
+		foldRunEvent(state, { type: "run_started", runId: "r", startedAt: 1, graph: graph() });
+		for (const n of Object.values(state.nodes)) expect(n.artifactDir).toBeNull();
+	});
+});
+
 // ============================================================================
 // Gate nodes (人工门控 — HITL)
 // ============================================================================

@@ -119,6 +119,7 @@ pnpm test        # 单测（311 个用例）
 | `ORCH_NODE_RETRY` | 质量门违规时是否原题重跑一次（两答取长）；`0` 关闭 | 开启 |
 | `ORCH_NODE_MAX_RETRIES` | 失败自动重试次数（仅超时/进程/模型类失败；节点 `maxRetries` 覆盖） | `1`（范围 0–3） |
 | `ORCH_NODE_RETRY_DELAY_MS` | 失败重试前的等待毫秒数（等待期间仍占并行槽位） | `2000` |
+| `ORCH_ARTIFACTS_DIR` | 节点产物根目录（布局 `<root>/<runId>/<nodeId>/`；无 `workdir` 节点的子进程 cwd 与 `output.md` 归档处；相对路径按服务 cwd 解析；无自动清理） | `~/.pi-graph-ui/artifacts` |
 | `ORCH_PLANNER_MODEL` | 规划器模型 | = `ORCH_MODEL` |
 | `ORCH_PLAN_TIMEOUT_MS` | 规划超时 | `180000` |
 | `SNAKE_DEMO` | 置 `0`：摘除贪吃蛇 demo 的全部路由（`/snake`、`/api/snake/*`），根路径只留提示文本。demo 与桥接服务同端口同进程（单二进制开发玩具），暴露面也就挂在最高权限进程上——任何非本机开发的部署都建议置 `0` | 未设置（开启） |
@@ -134,7 +135,7 @@ pnpm test        # 单测（311 个用例）
 | `minOutputChars` | 节点级质量门，优先于 `ORCH_MIN_OUTPUT_CHARS` | `0–1000000` |
 | `timeoutMs` | 节点级墙钟超时，优先于 `ORCH_NODE_TIMEOUT_MS` | `≥1000ms` |
 | `outputCapBytes` | 该节点输出注入下游/汇总时的字节预算（归档保留完整原文） | `1–1000000` |
-| `workdir` | 节点子进程独立工作目录（相对 `PI_CWD` 的安全相对路径；并行节点互不踩文件） | 受 `isSafeWorkdir` 约束 |
+| `workdir` | 节点子进程独立工作目录（相对 `PI_CWD` 的安全相对路径；并行节点互不踩文件）；缺省时 cwd = 该节点的产物目录 `<root>/<runId>/<nodeId>/` | 受 `isSafeWorkdir` 约束 |
 | `tools` | 工具白名单（`--tools`，逗号拼接） | ≤32 个合法工具名 |
 | `excludeTools` | 工具黑名单（`--exclude-tools`） | 同上 |
 | `maxRetries` | 节点级失败自动重试次数，优先于 `ORCH_NODE_MAX_RETRIES`（门控节点不可用） | `0–3` 整数 |
@@ -146,6 +147,16 @@ pnpm test        # 单测（311 个用例）
 - **重跑与首次共享同一份墙钟预算**：重跑的计时器用剩余预算（剩余不足 1s 时不再重跑），单节点总占用 ≤ timeoutMs，不会出现 2 × 超时的槽位占用；
 - **中止后绝不重试**；重跑发生时预览流会插入「—— 输出仅 N 字符（< 质量门 M），用原题重跑一次 ——」标记，
   `node_completed` 事件带 `attempts: 2`。
+
+## 节点产物目录（artifacts）
+
+每次运行的每个节点都有一个专属产物目录，布局 `<ORCH_ARTIFACTS_DIR>/<runId>/<nodeId>/`（默认 `~/.pi-graph-ui/artifacts`，与 `~/.pi-graph-ui/runs/` 归档并列）：
+
+- **默认工作目录**：未设置 `workdir` 的节点，其 pi 子进程 cwd = 本节点产物目录（executor 先 `mkdir -p`）——并行节点不再共用 `PI_CWD` 互相覆盖文件。显式 `workdir` 语义不变（`PI_CWD` 相对、`isSafeWorkdir` 约束），优先级更高。
+- **output.md 归档**：完成（`node_completed`）与复用/播种（`node_reused`）节点的最终输出全文写入产物目录下的 `output.md`（UTF-8/LF、正文不截断）。头部 `runId / nodeId / label? / model? / endedAt(ISO)? / durationMs? / attempts?`（reused 节点为 `fromRunId`），空行 + `---` + 空行后接正文。每次运行的目录因此是完整的——重跑失败部分时，复用节点在新 runId 目录也有自己的 `output.md`。
+- **best-effort**：磁盘写失败绝不弄挂运行——按 run 熔断（该 run 后续节点不再归档，新 run 重试）。产物目录 **mkdir 失败**则例外：按 config 类错误让节点大声失败（静默退回共享 cwd 会复活文件散落问题）。
+- **门控节点除外**：运行中的门控不执行 → 无目录；已批准门控经重跑播种为 `node_reused` 时才获得目录。
+- **无自动清理**（与 runs/ JSONL 归档一致）；重试共享同一目录（失败尝试留下的中间文件利于排查）；中止/失败节点：目录存在、无 `output.md`。节点面板显示「产物目录」路径（运行中即可见；旧归档回放无此字段）。
 
 ## 失败恢复（failure recovery）
 

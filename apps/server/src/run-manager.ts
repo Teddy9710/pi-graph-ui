@@ -34,6 +34,7 @@ import {
 	type RunEvent,
 } from "@pi-graph/shared";
 import { setTimeoutUnref, type UnrefableTimeout } from "./infra/timer-unref.ts";
+import { nodeArtifactsDir, writeNodeOutput, type NodeOutputMeta } from "./artifacts.ts";
 import { OrchestratorEngine, type Executor } from "./orchestrator.ts";
 import { MAX_GOAL_CHARS, type PlanOutcome, type RepairOutcome, type RepairRequest } from "./planner.ts";
 import { RunStore } from "./run-store.ts";
@@ -98,6 +99,13 @@ export interface RunManagerOptions {
 	maxRetries?: number;
 	/** Delay between engine retry attempts (ms), forwarded like maxRetries. */
 	retryDelayMs?: number;
+	/**
+	 * Artifacts root forwarded to every engine: <root>/<runId>/<nodeId>/ per
+	 * node (default subprocess cwd for workdir-less nodes) + the output.md
+	 * archive for completed/reused nodes (written here, best-effort).
+	 * undefined = feature off.
+	 */
+	artifactsRoot?: string;
 }
 
 export class RunManager {
@@ -110,6 +118,7 @@ export class RunManager {
 	private readonly onChatRunComplete: ((result: ChatRunResult) => void) | undefined;
 	private readonly maxRetries: number | undefined;
 	private readonly retryDelayMs: number | undefined;
+	private readonly artifactsRoot: string | undefined;
 
 	private engine: OrchestratorEngine | null = null;
 	private planning = false;
@@ -123,6 +132,9 @@ export class RunManager {
 	private readonly deltaTimers = new Map<string, UnrefableTimeout>();
 	private planBuffer: { runId: string; text: string; kind: "plan_delta" | "repair_delta" } | null = null;
 	private planTimer: UnrefableTimeout | null = null;
+	/** Once an output.md write fails for a run, archiving stops for THAT run
+	 * (mirrors RunStore's per-run append latch; a new run retries). */
+	private artifactsFailedRun: string | null = null;
 	private runSeq = 0;
 
 	constructor(options: RunManagerOptions) {
@@ -135,6 +147,7 @@ export class RunManager {
 		this.onChatRunComplete = options.onChatRunComplete;
 		this.maxRetries = options.maxRetries;
 		this.retryDelayMs = options.retryDelayMs;
+		this.artifactsRoot = options.artifactsRoot;
 	}
 
 	get active(): boolean {
@@ -428,6 +441,7 @@ export class RunManager {
 			defaultMaxRetries: this.maxRetries,
 			retryDelayMs: this.retryDelayMs,
 			precompleted: opts?.precompleted,
+			artifactsRoot: this.artifactsRoot,
 		});
 		this.engine = engine;
 		void engine
@@ -506,6 +520,36 @@ export class RunManager {
 		} catch (err) {
 			console.error("[run-manager] chat-complete hook threw:", err);
 		}
+	}
+
+	/**
+	 * Best-effort output.md archive for completed/reused nodes — never throws
+	 * on the engine's emit path (a disk failure latches off THIS run's
+	 * archiving instead; the next run retries, mirroring RunStore.append).
+	 */
+	private archiveOutput(event: Extract<RunEvent, { type: "node_completed" | "node_reused" }>): void {
+		const dir = nodeArtifactsDir(this.artifactsRoot!, event.runId, event.nodeId);
+		if (!dir) return; // unsafe dir name → this node skips archiving
+		const meta: NodeOutputMeta = { label: this.labelOf(event.runId, event.nodeId) };
+		if (event.type === "node_completed") {
+			if (event.output.model !== undefined) meta.model = event.output.model;
+			meta.endedAt = event.endedAt;
+			meta.durationMs = event.durationMs;
+			if (event.output.attempts !== undefined) meta.attempts = event.output.attempts;
+		} else {
+			meta.fromRunId = event.fromRunId;
+		}
+		if (!writeNodeOutput(dir, event.output.text, event.runId, event.nodeId, meta)) {
+			this.artifactsFailedRun = event.runId;
+		}
+	}
+
+	/** Node label from the retained run_started graph (fireChatComplete's lookup). */
+	private labelOf(runId: string, nodeId: string): string | undefined {
+		const runStarted = this.retained.find(
+			(e): e is Extract<RunEvent, { type: "run_started" }> => e.type === "run_started" && e.runId === runId,
+		);
+		return runStarted?.graph.nodes.find((n) => n.id === nodeId)?.label;
 	}
 
 	/** plan_failed + a terminal run_finished (planning counts as a run). */
@@ -656,6 +700,16 @@ export class RunManager {
 			this.flushNode(event.nodeId);
 		} else if (event.type === "run_finished") {
 			this.flushAllDeltas();
+		}
+		// output.md archiving: every completed/reused node's final text lands
+		// in its per-run dir, BEFORE publish so the archive write and the
+		// JSONL append share one ordering. Best-effort — see archiveOutput.
+		if (
+			this.artifactsRoot &&
+			(event.type === "node_completed" || event.type === "node_reused") &&
+			this.artifactsFailedRun !== event.runId
+		) {
+			this.archiveOutput(event);
 		}
 		this.publish(event);
 	}

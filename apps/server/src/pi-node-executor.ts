@@ -11,6 +11,8 @@
  * Node capability profile (节点档案, from the shared NodeDef — validateGraph
  * guarantees the shapes before they get here):
  * - timeoutMs / workdir / tools / excludeTools are applied per spawn;
+ * - workdir ABSENT → cwd = the per-node artifacts dir from the executor
+ *   call (the engine computes <root>/<runId>/<nodeId>; we mkdir it here);
  * - minOutputChars is a QUALITY GATE: a trimmed output shorter than the
  *   threshold is a violation. With salvageRetry on (default), the node is
  *   re-run ONCE with the original prompt unchanged and the LONGER of the two
@@ -225,6 +227,18 @@ export class PiNodeExecutor implements Executor {
 				return { ok: false, text: "", error: `workdir「${node.workdir}」创建失败: ${(err as Error).message}`, kind: "config" };
 			}
 			bridgeCwd = resolved;
+		} else if (call.artifactDir) {
+			// Default cwd = this node's per-run artifacts dir — same isolation
+			// for workdir-less nodes (they used to all share PI_CWD and stomp
+			// each other). Failure reports as config (mirroring workdir above):
+			// silently falling back to the shared cwd would resurrect the very
+			// problem this solves.
+			try {
+				mkdirSync(call.artifactDir, { recursive: true });
+			} catch (err) {
+				return { ok: false, text: "", error: `产物目录「${call.artifactDir}」创建失败: ${(err as Error).message}`, kind: "config" };
+			}
+			bridgeCwd = call.artifactDir;
 		}
 
 		const extraArgs = ["--model", node.model ?? this.defaultModel];

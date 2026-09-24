@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
 import { OrchestratorEngine, type Executor, type ExecutorCall, type NodeResult } from "../src/orchestrator.ts";
 import type { EdgeType, GraphDef, RunEvent } from "@pi-graph/shared";
 
@@ -46,11 +47,12 @@ const hangOnGate = <T>(gate: Promise<T>) => () => gate.then(() => ok("late"));
 const hangOnAbort = (ctx: Ctx) =>
 	new Promise<NodeResult>((_, reject) => ctx.signal.addEventListener("abort", () => reject(new Error("aborted"))));
 
-/** Engine options the retry/seed tests exercise beyond maxParallel. */
+/** Engine options the retry/seed/artifacts tests exercise beyond maxParallel. */
 interface EngineExtras {
 	defaultMaxRetries?: number;
 	retryDelayMs?: number;
 	precompleted?: ReadonlyMap<string, { text: string; fromRunId: string }>;
+	artifactsRoot?: string;
 }
 
 interface Harness {
@@ -78,6 +80,7 @@ function harness(): Harness {
 			defaultMaxRetries: extra?.defaultMaxRetries,
 			retryDelayMs: extra?.retryDelayMs,
 			precompleted: extra?.precompleted,
+			artifactsRoot: extra?.artifactsRoot,
 		});
 	return { executor, events, run: (g, mp, extra) => build(g, mp, extra).run(), engine: build };
 }
@@ -684,5 +687,57 @@ describe("precompleted seeds", () => {
 		expect(h.events.some((e) => e.type === "node_awaiting")).toBe(false);
 		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
 		expect(callB.assembledPrompt).toContain("审校通过");
+	});
+});
+
+describe("artifacts dir wiring", () => {
+	// The engine only COMPUTES paths (never touches fs) — a fake root string
+	// is enough to lock the contract.
+	const root = join("C:", "art");
+
+	it("feature on: every executor call and node_started/node_reused carry <root>/<runId>/<nodeId>", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("a"), node("b")], edges: [edge("a", "b")] };
+		const summary = await h.run(graph, 4, {
+			artifactsRoot: root,
+			precompleted: new Map([["a", { text: "old-a", fromRunId: "r-old" }]]),
+		});
+		expect(summary.status).toBe("completed");
+		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
+		expect(callB.artifactDir).toBe(join(root, "r-test", "b"));
+		const started = h.events.filter((e) => e.type === "node_started");
+		for (const ev of started) {
+			if (ev.type !== "node_started") continue;
+			expect(ev.artifactDir).toBe(join(root, "r-test", ev.nodeId));
+		}
+		const reused = h.events.find((e) => e.type === "node_reused");
+		if (!reused || reused.type !== "node_reused") throw new Error("node_reused missing");
+		expect(reused.artifactDir).toBe(join(root, "r-test", "a"));
+	});
+
+	it("feature off (default): the field is ABSENT from events and calls — byte-identical payloads", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("a"), node("b")], edges: [edge("a", "b")] };
+		const summary = await h.run(graph, 4, { precompleted: new Map([["a", { text: "old-a", fromRunId: "r-old" }]]) });
+		expect(summary.status).toBe("completed");
+		for (const ev of h.events) {
+			if (ev.type === "node_started" || ev.type === "node_reused") {
+				expect("artifactDir" in ev).toBe(false);
+			}
+		}
+		for (const call of h.executor.calls) expect(call.artifactDir).toBeUndefined();
+	});
+
+	it("a Windows-reserved node id gets no artifactDir yet still runs to completion", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("con"), node("b")], edges: [edge("con", "b")] };
+		const summary = await h.run(graph, 4, { artifactsRoot: root });
+		expect(summary).toEqual({ status: "completed", ok: 2, failed: 0, skipped: 0 });
+		for (const ev of h.events) {
+			if (ev.type === "node_started" && ev.nodeId === "con") expect(ev.artifactDir).toBeUndefined();
+			if (ev.type === "node_started" && ev.nodeId === "b") expect(ev.artifactDir).toBe(join(root, "r-test", "b"));
+		}
+		const callCon = h.executor.calls.find((c) => c.node.id === "con")!;
+		expect(callCon.artifactDir).toBeUndefined();
 	});
 });

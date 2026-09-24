@@ -64,7 +64,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -130,6 +130,20 @@ const parsedRetryDelay = rawRetryDelay === "" ? 2000 : Number(rawRetryDelay);
 const ORCH_NODE_RETRY_DELAY_MS = Math.max(0, Math.floor(Number.isFinite(parsedRetryDelay) ? parsedRetryDelay : 2000));
 const ORCH_AGENTS_DIR = join(homedir(), ".pi", "agent", "agents");
 /**
+ * 节点产物目录 root (artifacts): every run gets <root>/<runId>/<nodeId>/ —
+ * the default subprocess cwd for workdir-less nodes (parallel nodes stop
+ * stomping each other in PI_CWD) and the home of the archived output.md
+ * (final text + header) for completed/reused nodes. Blank value = the
+ * default ~/.pi-graph-ui/artifacts (same blank-string convention as
+ * ORCH_NODE_MAX_RETRIES); relative paths resolve against the server cwd.
+ * No automatic cleanup (mirrors the runs/ JSONL archive). A root that cannot
+ * be created fails nodes LOUDLY as config errors — a silent fallback to the
+ * shared cwd would resurrect the scattering this feature removes.
+ */
+const rawArtifactsDir = process.env.ORCH_ARTIFACTS_DIR?.trim() ?? "";
+const ORCH_ARTIFACTS_ROOT =
+	rawArtifactsDir === "" ? join(homedir(), ".pi-graph-ui", "artifacts") : resolvePath(rawArtifactsDir);
+/**
  * Main-session pi persistence. Default ON: the main bridge spawns pi WITHOUT
  * --no-session so pi writes its own session file (~/.pi/agent/sessions/...),
  * which is what makes a past conversation RESUMABLE (RPC switch_session).
@@ -182,6 +196,8 @@ const runManager = new RunManager({
 	// every run (a node's own maxRetries still overrides).
 	maxRetries: ORCH_NODE_MAX_RETRIES,
 	retryDelayMs: ORCH_NODE_RETRY_DELAY_MS,
+	// Per-run/per-node artifacts dirs (cwd default + output.md archive).
+	artifactsRoot: ORCH_ARTIFACTS_ROOT,
 	store: runStore,
 	// Chat-first runs: when the graph completes, compile the node outputs and
 	// inject them into the MAIN session agent (bridge declared above), which
@@ -333,6 +349,7 @@ app.get("/health", (c) =>
 	c.json({
 		ok: true,
 		pi: { running: bridge.running, cwd: PI_CWD },
+		artifactsRoot: ORCH_ARTIFACTS_ROOT,
 		clients: wsClients().length,
 	}),
 );
@@ -402,6 +419,7 @@ function snakeHtml(): string {
 const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
 	console.log(`pi-graph server listening on http://localhost:${info.port}`);
 	console.log(`  pi cwd: ${PI_CWD}`);
+	console.log(`  artifacts root: ${ORCH_ARTIFACTS_ROOT}`);
 	bridge.start();
 	console.log(bridge.running ? "  pi rpc subprocess started" : "  pi rpc subprocess FAILED to start");
 	// Record which pi session file backs the fresh session (stdin buffers
