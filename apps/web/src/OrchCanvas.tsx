@@ -217,7 +217,7 @@ function Canvas() {
 				<MiniMap pannable zoomable nodeStrokeWidth={2} />
 			</ReactFlow>
 			{nodes.length === 0 && (
-				<div className="pg-orch-empty">画布是空的——从上方选一个模板，或点「＋节点」开始</div>
+				<div className="pg-orch-empty">画布是空的——从上方选一个模板，或点「节点」按钮开始</div>
 			)}
 		</>
 	);

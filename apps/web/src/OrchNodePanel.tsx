@@ -16,6 +16,7 @@ import {
 	type EdgeType,
 } from "@pi-graph/shared";
 import { API_BASE } from "./store.ts";
+import { Icon } from "./icons.tsx";
 import { RUN_NODE_STATUS_LABEL } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
 
@@ -338,11 +339,19 @@ export function OrchNodePanel() {
 					 * node re-executes (a retry that succeeds never failed). */}
 					{runNode.retry && (
 						<div className="pg-meta" title={runNode.retry.lastError}>
-							↻ 自动重试 {runNode.retry.attempt}/{runNode.retry.maxAttempts}
+							<Icon name="rerun" size={11} /> 自动重试 {runNode.retry.attempt}/{runNode.retry.maxAttempts}
 							{runNode.retry.lastError ? ` · 上次错误：${runNode.retry.lastError.slice(0, 200)}` : ""}
 						</div>
 					)}
 					{runNode.reusedFrom && <div className="pg-dim">复用自 {runNode.reusedFrom}（本次未重新执行）</div>}
+					{/* 产物目录：本运行该节点的专属文件夹（工作目录 + output.md 归档）。
+					    overflowWrap 防 Windows 长路径撑爆面板；title 悬停看全路径；
+					    旧归档/功能未开时为 null 不渲染。 */}
+					{runNode.artifactDir && (
+						<div className="pg-dim" title={runNode.artifactDir}>
+							产物目录：<code style={{ overflowWrap: "anywhere" }}>{runNode.artifactDir}</code>
+						</div>
+					)}
 					{runNode.assembledPrompt != null && (
 						<details>
 							<summary>assembledPrompt（{runNode.assembledPrompt.length} 字符）</summary>

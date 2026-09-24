@@ -27,6 +27,7 @@ import type {
 	ModelsConfigTestRequest,
 } from "@pi-graph/shared";
 import { useModelsStore, type Draft } from "./models-store.ts";
+import { Icon } from "./icons.tsx";
 
 const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 /** model id 允许 "/"：openrouter 式 id（meta/llama-3…）是 pi 的正规用法。 */
@@ -109,7 +110,7 @@ function ApplyResultNote({ result }: { result: ModelsConfigApplyResponse | null 
 	const warn = result.restartError ?? result.chatSwitchError;
 	return (
 		<span className={warn ? "pg-error-text" : "pg-dim"} title={warn ?? parts.join("；")}>
-			{warn ? `⚠ ${warn}` : `✓ ${parts.join("；") || "已应用"}`}
+			{warn ? (<><Icon name="alert" size={12} /> {warn}</>) : (<><Icon name="check" size={12} /> {parts.join("；") || "已应用"}</>)}
 		</span>
 	);
 }
@@ -242,10 +243,10 @@ function ProviderList({
 					onClick={onOpenBuiltin}
 					title="从 pi 内置 provider 目录选一个，填密钥即可（URL 与模型由 pi 提供）"
 				>
-					＋ 内置
+					<Icon name="plus" size={13} /> 内置
 				</button>
 				<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={onAdd} title="新增一个模型 provider（保存后写入 models.json）">
-					＋ 新增
+					<Icon name="plus" size={13} /> 新增
 				</button>
 			</header>
 			<ul className="pg-sessions-list">
@@ -284,22 +285,22 @@ function ProviderList({
 										? // 密钥状态看条目自己的 $VAR（手写挂载可能用非目录默认
 											// 变量名）；未保存的新草稿才看目录变量（它写的就是默认名）
 											d.keyInput || (d.isNew ? attach.envSet : (info?.apiKeyEnvSet ?? false))
-											? "密钥 ✓"
-											: "密钥 ✗"
+											? <>密钥 <Icon name="check" size={10} /></>
+											: <>密钥 <Icon name="x" size={10} /></>
 										: info
 											? kref.startsWith("!")
 												? "密钥 !cmd"
 												: info.apiKeyInline
 													? "密钥内联"
 													: info.apiKeyEnvSet
-														? "密钥 ✓"
-														: "密钥 ✗"
+														? <>密钥 <Icon name="check" size={10} /></>
+														: <>密钥 <Icon name="x" size={10} /></>
 											: d.keyInput
-												? "密钥 ✓"
+												? <>密钥 <Icon name="check" size={10} /></>
 												: "密钥？"}
 									{info?.builtinConflict && (
 										<span className="pg-session-badge" title={info.builtinConflict}>
-											⚠ 撞名
+											<Icon name="alert" size={10} /> 撞名
 										</span>
 									)}
 									{info && info.advancedFields.length > 0 && <span className="pg-session-badge">+{info.advancedFields.length} 高级字段</span>}
@@ -310,7 +311,7 @@ function ProviderList({
 				})}
 				{drafts.length === 0 && (
 					<li className="pg-dim pg-sessions-note">
-						暂无 provider——「＋ 内置」挂载一个 pi 内置 provider（选一个、填密钥即可），或「＋ 新增」自建（例如 DeepSeek：Base URL + 密钥）
+						暂无 provider——「内置」挂载一个 pi 内置 provider（选一个、填密钥即可），或「新增」自建（例如 DeepSeek：Base URL + 密钥）
 					</li>
 				)}
 			</ul>
@@ -347,7 +348,7 @@ function BuiltinPicker({
 			<header className="pg-sessions-head">
 				<b>内置 Provider</b>
 				<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={onClose} title="返回自建 provider 列表">
-					← 返回
+					<Icon name="arrowLeft" size={13} /> 返回
 				</button>
 			</header>
 			<div className="pg-models-picker-head">
@@ -558,7 +559,7 @@ function BuiltinAttachEditor({
 			</div>
 			{testResult && (
 				<p className={testResult.ok ? "pg-dim" : "pg-error-text"} title={testResult.probedUrl ?? undefined}>
-					{testResult.ok ? "✓" : "✗"} {testResult.message}
+					{testResult.ok ? <Icon name="check" size={12} /> : <Icon name="x" size={12} />} {testResult.message}
 					{testResult.status ? `（HTTP ${testResult.status}）` : ""}
 				</p>
 			)}
@@ -662,12 +663,12 @@ function ProviderEditor({
 			</header>
 			{info?.builtinConflict && (
 				<p className="pg-warn-text" title={info.builtinConflict}>
-					⚠ {info.builtinConflict}（可继续保存，但建议换个 id）
+					<Icon name="alert" size={12} /> {info.builtinConflict}（可继续保存，但建议换个 id）
 				</p>
 			)}
 			{liveOverrides.length > 0 && builtinMatch && (
 				<p className="pg-warn-text">
-					⚠ id「{draft.id}」与 pi 内置 provider「{builtinMatch.name}」同名且覆盖了 {liveOverrides.join(" / ")}——保存会被服务端拦下。只挂密钥请改用「＋ 内置」；自定义 URL/模型请换一个 id（如 {customIdHint}）。
+					<Icon name="alert" size={12} /> id「{draft.id}」与 pi 内置 provider「{builtinMatch.name}」同名且覆盖了 {liveOverrides.join(" / ")}——保存会被服务端拦下。只挂密钥请改用「内置」；自定义 URL/模型请换一个 id（如 {customIdHint}）。
 				</p>
 			)}
 			{draft.isNew && (
@@ -761,12 +762,12 @@ function ProviderEditor({
 							aria-label={`移除 model ${str(m.id) || i + 1}`}
 							onClick={() => setField("models", models.filter((_, j) => j !== i))}
 						>
-							✕
+							<Icon name="x" size={12} />
 						</button>
 					</div>
 				))}
 				<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={() => setField("models", [...models, { id: "" }])}>
-					＋ 添加模型
+					<Icon name="plus" size={13} /> 添加模型
 				</button>
 			</div>
 			{info && info.advancedFields.length > 0 && (
@@ -792,7 +793,7 @@ function ProviderEditor({
 			</div>
 			{testResult && (
 				<p className={testResult.ok ? "pg-dim" : "pg-error-text"} title={testResult.probedUrl ?? undefined}>
-					{testResult.ok ? "✓" : "✗"} {testResult.message}
+					{testResult.ok ? <Icon name="check" size={12} /> : <Icon name="x" size={12} />} {testResult.message}
 					{testResult.status ? `（HTTP ${testResult.status}）` : ""}
 				</p>
 			)}
@@ -864,7 +865,7 @@ export function ModelsPage() {
 		setDrafts([...useModelsStore.getState().drafts, { key, id: "", isNew: true, raw: { api: "openai-completions" }, keyInput: "" }]);
 		setSelectedKey(key);
 	};
-	// 「＋ 内置」挂载：models.json 里只写 apiKey 引用（pi 官方支持的挂载形态，
+	// 「内置」挂载：models.json 里只写 apiKey 引用（pi 官方支持的挂载形态，
 	// 内置 Base URL/模型原样生效）；密钥输入经 buildSecrets 折进 secrets[ENV]
 	const [picking, setPicking] = useState(false);
 	const addBuiltinDraft = (p: BuiltinProviderInfo) => {
@@ -986,7 +987,7 @@ export function ModelsPage() {
 								<p className="pg-dim">
 									{loading
 										? "加载中…"
-										: "左侧选择一个 provider 编辑，或「＋ 新增」创建。这里管理 ~/.pi/agent/models.json、密钥（.env）与默认模型——不再需要手工编辑文件。"}
+										: "左侧选择一个 provider 编辑，或「新增」创建。这里管理 ~/.pi/agent/models.json、密钥（.env）与默认模型——不再需要手工编辑文件。"}
 								</p>
 							</aside>
 						)}
@@ -1001,7 +1002,7 @@ export function ModelsPage() {
 			{issues.length > 0 && dirty && (
 				<div className="pg-orch-bar">
 					<span className="pg-error-text" title={issues.join("\n")}>
-						⚠ {issues.length} 个待修复问题（{issues[0]}）
+						<Icon name="alert" size={12} /> {issues.length} 个待修复问题（{issues[0]}）
 					</span>
 					<button className="pg-btn pg-btn-ghost pg-btn-sm" disabled={saving || issues.length > 0} onClick={() => void doSave()}>
 						{saving ? "保存中…" : "保存全部改动"}

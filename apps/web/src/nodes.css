@@ -50,13 +50,15 @@
 	font-weight: 600;
 }
 
-/* kind icons: emoji and single-glyph marks (·, ✳) mixed in one 11px row read
- * ragged — pin a consistent slot so every head starts on the same edge. */
+/* kind icons: every kind now draws the same way (icons.tsx stroke glyphs) —
+ * the slot pins one consistent left edge for the head row across kinds. */
 .pg-icon {
 	font-size: 12px;
 	line-height: 1;
 	min-width: 14px;
 	text-align: center;
+	display: inline-flex;
+	justify-content: center;
 }
 
 /* gate badge: the kind slot as a printed 方标 — mono 「门」 in chart ink on the
@@ -77,6 +79,9 @@
  * shadow (React Flow mirror nodes must stay visually flat). Trails the status
  * dot; flex:none keeps 「↻2/3」 from being squeezed by a long title. */
 .pg-orch-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
 	font-family: var(--pg-mono);
 	font-size: 9.5px;
 	padding: 2px 3px;

@@ -13,6 +13,7 @@ import type {
 	ToolExecutionState,
 	UserMessage,
 } from "@pi-graph/shared";
+import { Icon } from "./icons.tsx";
 import { NODE_KIND_LABEL, NODE_STATUS_LABEL } from "./status.ts";
 import { useStore } from "./store.ts";
 
@@ -125,21 +126,22 @@ export function DetailPanel({ onClose }: { onClose?: () => void }) {
 	}
 	const data: GraphNodeData = node.data;
 
-	const kindMeta = NODE_KIND_LABEL[data.kind] ?? { icon: "", text: data.kind };
+	const kindMeta = NODE_KIND_LABEL[data.kind];
 	return (
 		<aside className="pg-panel">
 			<header>
 				<span className={`pg-dot pg-dot-${data.status}`} />
 				{/* icon + Chinese kind + status text — the dot alone is color-only,
-				    invisible to screen readers and red-green color blindness */}
+				    invisible to screen readers and red-green color blindness.
+				    Unknown kinds have no glyph entry: text-only. */}
 				<b>
-					{kindMeta.icon} {kindMeta.text}
+					{kindMeta && <Icon name={kindMeta.icon} size={13} />} {kindMeta?.text ?? data.kind}
 				</b>
 				<span className="pg-dim">{NODE_STATUS_LABEL[data.status] ?? data.status}</span>
 				<code className="pg-dim">{node.id}</code>
 				{onClose && (
 					<button className="pg-drawer-close pg-panel-close" title="关闭详情" aria-label="关闭详情" onClick={onClose}>
-						×
+						<Icon name="x" size={14} />
 					</button>
 				)}
 			</header>

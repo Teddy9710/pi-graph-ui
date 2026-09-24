@@ -7,6 +7,8 @@
  * stop is not a warning.
  */
 
+import type { IconName } from "./icons.tsx";
+
 /** RunState.status — the whole-run lifecycle (chat card, orch bar chip). */
 export const RUN_STATUS_LABEL: Record<string, string> = {
 	idle: "未运行",
@@ -53,13 +55,14 @@ export function runStatusChatClass(status: string): string {
 	}
 }
 
-/** Graph-node kinds (live canvas) — icon + Chinese label for the detail panel. */
-export const NODE_KIND_LABEL: Record<string, { icon: string; text: string }> = {
-	session: { icon: "◆", text: "会话" },
-	user: { icon: "👤", text: "用户消息" },
-	assistant: { icon: "🤖", text: "助手回复" },
-	tool: { icon: "🔧", text: "工具调用" },
-	"subagent-call": { icon: "✳", text: "子代理调用" },
-	agent: { icon: "🛰", text: "子代理" },
-	"agent-tool": { icon: "·", text: "子代理工具" },
+/** Graph-node kinds (live canvas) — icon + Chinese label for the detail panel.
+ *  `icon` names a glyph from icons.tsx; unknown kinds render text-only. */
+export const NODE_KIND_LABEL: Record<string, { icon: IconName; text: string }> = {
+	session: { icon: "diamond", text: "会话" },
+	user: { icon: "user", text: "用户消息" },
+	assistant: { icon: "bot", text: "助手回复" },
+	tool: { icon: "wrench", text: "工具调用" },
+	"subagent-call": { icon: "asterisk", text: "子代理调用" },
+	agent: { icon: "orbit", text: "子代理" },
+	"agent-tool": { icon: "dot", text: "子代理工具" },
 };

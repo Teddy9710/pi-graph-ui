@@ -17,6 +17,7 @@
 import { useEffect, useState } from "react";
 import { useOrchStore } from "./orch-store.ts";
 import { useStore, type SessionMeta } from "./store.ts";
+import { Icon } from "./icons.tsx";
 
 function formatTime(ms: number): string {
 	if (!ms) return "";
@@ -29,10 +30,10 @@ export function SessionRail({ onExpand, onNewSession }: { onExpand: () => void; 
 	return (
 		<aside className="pg-sessions-rail" aria-label="会话栏（已折叠）">
 			<button className="pg-session-act" title="展开会话栏" aria-label="展开会话栏" onClick={onExpand}>
-				»
+				<Icon name="chevronsRight" size={14} />
 			</button>
 			<button className="pg-session-act" title="新对话" aria-label="新对话" onClick={onNewSession}>
-				＋
+				<Icon name="plus" size={14} />
 			</button>
 		</aside>
 	);
@@ -127,16 +128,16 @@ export function SessionSidebar({ onNewSession, onCollapse }: { onNewSession: () 
 						onNewSession();
 					}}
 				>
-					＋ 新对话
+					<Icon name="plus" size={13} /> 新对话
 				</button>
-				{/* 就地收起——不用跑去窗口右上角的 ☰（展开由 40px 细栏上的 » 负责，箭头成对） */}
+				{/* 就地收起——不用跑去窗口右上角的 ☰（展开由 40px 细栏上的箭头按钮负责，箭头成对） */}
 				<button
 					className="pg-btn pg-btn-ghost pg-btn-sm"
-					title="折叠会话栏（细栏上的 » 再展开）"
+					title="折叠会话栏（细栏上的箭头再展开）"
 					aria-label="折叠会话栏"
 					onClick={onCollapse}
 				>
-					«
+					<Icon name="chevronsLeft" size={13} />
 				</button>
 			</header>
 			{sessionActionError && (
@@ -196,7 +197,7 @@ export function SessionSidebar({ onNewSession, onCollapse }: { onNewSession: () 
 									className={`pg-session-item${isCurrent ? " active" : ""}`}
 									// Not the native `disabled`: disabled buttons don't
 									// propagate :hover in Chromium, which would keep the
-									// row's action cluster (✎/✕) permanently invisible
+									// row's action cluster (rename/delete) permanently invisible
 									// on the current row. mainClick guards anyway.
 									aria-disabled={mainDisabled || undefined}
 									aria-current={isCurrent ? "true" : undefined}
@@ -228,7 +229,7 @@ export function SessionSidebar({ onNewSession, onCollapse }: { onNewSession: () 
 											aria-label={`只读回放会话 ${s.id}`}
 											onClick={() => void loadHistory(s.id)}
 										>
-											▶
+											<Icon name="play" size={10} />
 										</button>
 									)}
 									<button
@@ -237,7 +238,7 @@ export function SessionSidebar({ onNewSession, onCollapse }: { onNewSession: () 
 										aria-label={`重命名会话 ${s.id}`}
 										onClick={() => startRename(s)}
 									>
-										✎
+										<Icon name="pencil" size={12} />
 									</button>
 									<button
 										className="pg-session-act"
@@ -246,7 +247,7 @@ export function SessionSidebar({ onNewSession, onCollapse }: { onNewSession: () 
 										disabled={isCurrent}
 										onClick={() => removeClick(s)}
 									>
-										✕
+										<Icon name="x" size={12} />
 									</button>
 								</span>
 							)}

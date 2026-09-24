@@ -7,7 +7,7 @@
  *    node, run/abort, run summary chips, issue badge, error lines).
  * The canvas below switches between the editable graphDef (editor view) and
  * the read-only generated run graph (run view). A failed/aborted run grows
- * recovery affordances: ↻ 重跑失败部分 (ok outputs seed as 复用, the failed
+ * recovery affordances: 重跑失败部分 (ok outputs seed as 复用, the failed
  * remainder re-executes) and, per error node, AI 修复并重跑 (the planner
  * rewrites the task — previewed in the plan channel while the ⚡ button reads
  * AI 修复中).
@@ -20,6 +20,7 @@ import { OrchCanvas } from "./OrchCanvas.tsx";
 import { OrchNodePanel } from "./OrchNodePanel.tsx";
 import { RUN_STATUS_LABEL } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
+import { Icon } from "./icons.tsx";
 
 /** Ticking `now` while `active` — the elapsed chip freezes otherwise (its
  *  value only recomputed when a run event arrived). */
@@ -70,11 +71,11 @@ function PlanBar() {
 				title="规划器把目标拆成任务 DAG 并立即执行"
 				onClick={() => planRun(trimmed)}
 			>
-				{planning ? (run.repairTarget ? "AI 修复中…" : "规划中…") : "⚡ 自动编排"}
+				{planning ? (run.repairTarget ? "AI 修复中…" : "规划中…") : (<><Icon name="bolt" size={14} /> 自动编排</>)}
 			</button>
 			{planning && (
 				<button className="pg-btn pg-btn-danger pg-btn-sm" onClick={abortRun}>
-					⏹ 中止
+					<Icon name="stop" size={13} /> 中止
 				</button>
 			)}
 			{view === "editor" ? (
@@ -111,7 +112,7 @@ function PlanBar() {
 							title="复用已完成节点的输出，只重跑失败/跳过的部分（产生一次新运行）"
 							onClick={rerunFailed}
 						>
-							↻ 重跑失败部分
+							<Icon name="rerun" size={14} /> 重跑失败部分
 						</button>
 					)}
 				</>
@@ -177,7 +178,7 @@ function OrchRunBar() {
 			{/* onClick must drop the click event — addNode's first param is the
 			    gate flag, and a truthy MouseEvent would spawn gates forever */}
 			<button className="pg-btn pg-btn-ghost pg-btn-sm" disabled={editLocked} onClick={() => addNode()}>
-				＋节点
+				<Icon name="plus" size={13} /> 节点
 			</button>
 			<button
 				className="pg-btn pg-btn-ghost pg-btn-sm"
@@ -185,7 +186,7 @@ function OrchRunBar() {
 				title="放置人工门控节点：不执行，运行到此挂起，等批准/驳回后下游才继续"
 				onClick={() => addNode(true)}
 			>
-				＋门控
+				<Icon name="plus" size={13} /> 门控
 			</button>
 			<button
 				className="pg-btn pg-btn-ghost pg-btn-sm"
@@ -208,11 +209,11 @@ function OrchRunBar() {
 					disabled={(issues.length > 0 && !running) || busy}
 					onClick={runGraph}
 				>
-					▶ 运行
+					<Icon name="play" size={13} /> 运行
 				</button>
 			</span>
 			<button className="pg-btn pg-btn-danger pg-btn-sm" disabled={!busy} onClick={abortRun}>
-				⏹ 中止
+				<Icon name="stop" size={13} /> 中止
 			</button>
 			{issues.length > 0 && view === "editor" && (
 				<span

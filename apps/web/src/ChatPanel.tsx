@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildChatTimeline, initRunState, type ChatItem } from "@pi-graph/shared";
+import { Icon } from "./icons.tsx";
 import { RUN_STATUS_LABEL, runStatusChatClass } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
 import { useStore } from "./store.ts";
@@ -28,7 +29,11 @@ function Bubble({ item }: { item: Extract<ChatItem, { kind: "user" | "assistant"
 				{item.text || (item.streaming ? "" : <span className="pg-dim">（无文本回复）</span>)}
 				{item.streaming && <span className="pg-chat-cursor" aria-hidden />}
 			</div>
-			{item.toolCalls > 0 && <div className="pg-chat-tools">🔧 {item.toolCalls} 个工具调用</div>}
+			{item.toolCalls > 0 && (
+				<div className="pg-chat-tools">
+					<Icon name="wrench" size={11} /> {item.toolCalls} 个工具调用
+				</div>
+			)}
 		</div>
 	);
 }
@@ -44,12 +49,13 @@ function InjectedCard({ item, onOpenOrch }: { item: Extract<ChatItem, { kind: "i
 		<div className="pg-chat-injected">
 			<details onToggle={(e) => setOpen(e.currentTarget.open)}>
 				<summary>
-					⚙ 编排结果已注入会话（{count} 节点）{goal ? ` — ${goal.slice(0, 30)}${goal.length > 30 ? "…" : ""}` : ""}
+					<Icon name="gear" size={11} /> 编排结果已注入会话（{count} 节点）
+					{goal ? ` — ${goal.slice(0, 30)}${goal.length > 30 ? "…" : ""}` : ""}
 				</summary>
 				{open && <pre className="pg-pre">{item.raw}</pre>}
 			</details>
 			<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={onOpenOrch}>
-				查看编排 →
+				查看编排 <Icon name="arrowRight" size={13} />
 			</button>
 		</div>
 	);
@@ -66,17 +72,29 @@ function OrchCard({ onOpenOrch }: { onOpenOrch: () => void }) {
 		<div className="pg-chat-row pg-chat-row-assistant">
 			<div className="pg-chat-bubble pg-chat-bubble-user">{run.goal ?? ""}</div>
 			<div className="pg-chat-orch-card">
-				<div className={statusClass} aria-live="polite">⚡ {statusText}</div>
+				<div className={statusClass} aria-live="polite">
+					<Icon name="bolt" size={12} /> {statusText}
+				</div>
 				{run.status !== "planning" && total > 0 && (
 					<div className="pg-chat-chips">
-						<span className="pg-orch-chip">✓ {run.ok} / {total}</span>
-						{run.failed > 0 && <span className="pg-orch-chip">✗ {run.failed}</span>}
-						{run.skipped > 0 && <span className="pg-orch-chip">⏭ {run.skipped}</span>}
+						<span className="pg-orch-chip">
+							<Icon name="check" size={11} /> {run.ok} / {total}
+						</span>
+						{run.failed > 0 && (
+							<span className="pg-orch-chip">
+								<Icon name="x" size={11} /> {run.failed}
+							</span>
+						)}
+						{run.skipped > 0 && (
+							<span className="pg-orch-chip">
+								<Icon name="skip" size={11} /> {run.skipped}
+							</span>
+						)}
 					</div>
 				)}
 				{planTail && <pre className="pg-pre">{planTail}</pre>}
 				<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={onOpenOrch}>
-					查看编排 →
+					查看编排 <Icon name="arrowRight" size={13} />
 				</button>
 			</div>
 		</div>
@@ -260,7 +278,7 @@ export function ChatPanel({ onOpenOrch }: { onOpenOrch: () => void }) {
 					<div className="pg-chat-empty pg-dim">该存档只有工具轨迹，没有对话消息（图在右侧「历史图」）。</div>
 				)}
 				{!browsing && items.length === 0 && !gateLive && (
-					<div className="pg-chat-empty pg-dim">对话还没有开始——在下方输入框发第一条消息，或打开 ⚡ 直接用自动编排。</div>
+					<div className="pg-chat-empty pg-dim">对话还没有开始——在下方输入框发第一条消息，或开启自动编排模式。</div>
 				)}
 				{items.map((item) =>
 					item.kind === "orch" ? (
@@ -275,7 +293,7 @@ export function ChatPanel({ onOpenOrch }: { onOpenOrch: () => void }) {
 			</div>
 			{!atBottom && (
 				<button className="pg-btn pg-btn-ghost pg-btn-sm pg-scroll-bottom" onClick={scrollToEnd}>
-					↓ 回到最新
+					<Icon name="toBottom" size={13} /> 回到最新
 				</button>
 			)}
 		</aside>

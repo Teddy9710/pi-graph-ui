@@ -13,6 +13,7 @@ import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panel
 import { ChatPanel } from "./ChatPanel.tsx";
 import { DetailPanel } from "./DetailPanel.tsx";
 import { GraphCanvas } from "./GraphCanvas.tsx";
+import { Icon } from "./icons.tsx";
 import { ModelsPage } from "./ModelsPage.tsx";
 import { OrchestratePage } from "./OrchestratePage.tsx";
 import { SessionRail, SessionSidebar } from "./SessionSidebar.tsx";
@@ -46,12 +47,12 @@ function Header({
 	const exitHistory = useStore((s) => s.exitHistory);
 	const statusText =
 		wsStatus === "open"
-			? "● 已连接"
+			? "已连接"
 			: wsStatus === "reconnecting"
-				? "● 重连中…"
+				? "重连中…"
 				: wsStatus === "connecting"
-					? "● 连接中…"
-					: "● 已断开";
+					? "连接中…"
+					: "已断开";
 	return (
 		<header className="pg-header">
 			<b className="pg-logo">pi-graph</b>
@@ -79,14 +80,17 @@ function Header({
 			</button>
 			{history ? (
 				<span className="pg-history-banner">
-					📜 历史回放
+					<Icon name="history" size={13} /> 历史回放
 					{history.loading ? "（加载中…）" : ""}
 					<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={exitHistory}>
 						返回实时
 					</button>
 				</span>
 			) : (
-				<span className={`pg-ws pg-ws-${wsStatus}`}>{statusText}</span>
+				<span className={`pg-ws pg-ws-${wsStatus}`}>
+					<span className="pg-ws-dot" />
+					{statusText}
+				</span>
 			)}
 			{!history && (
 				<>
@@ -114,24 +118,24 @@ function Header({
 				title={sessionsCollapsed ? "展开左侧会话栏" : "折叠左侧会话栏"}
 				onClick={toggleSessions}
 			>
-				☰ 会话
+				<Icon name="menu" size={14} /> 会话
 			</button>
 		</header>
 	);
 }
 
 /**
- * Prompt input with the ⚡ auto-orchestration toggle.
+ * Prompt input with the bolt auto-orchestration toggle (闪电钮).
  *
  * Decision matrix (deliberate, see PLAN.md M-C):
- *  - ⚡ OFF → exactly the historical behavior (send / steer / abort).
- *  - ⚡ ON  → Enter/「⚡ 编排」 sends the text as a plan_run goal (chat: true);
+ *  - OFF → exactly the historical behavior (send / steer / abort).
+ *  - ON  → Enter/「编排」 sends the text as a plan_run goal (chat: true);
  *    the orchestration card + the integrated answer land in the chat column.
- *  - ⚡ ON while a SESSION run is active is allowed: the post-run injection
+ *  - ON while a SESSION run is active is allowed: the post-run injection
  *    prompt queues behind the current turn (pi's own queue_update), so the
  *    user can fire a goal without waiting for the session agent to settle.
- *  - ⚡ ON while an ORCHESTRATION is busy → input disabled (single-run
- *    server contract);「⏹ 中止编排」 aborts it.
+ *  - ON while an ORCHESTRATION is busy → input disabled (single-run
+ *    server contract);「中止编排」 aborts it.
  */
 function PromptBar() {
 	const [text, setText] = useState("");
@@ -160,7 +164,7 @@ function PromptBar() {
 	const placeholder = bolt
 		? orchBusy
 			? "编排进行中… 可中止后重新发起"
-			: "描述一个目标，⚡ 自动拆图编排并执行…"
+			: "描述一个目标，自动拆图编排并执行…"
 		: running
 			? "运行中… 输入内容可插入转向指令 (steer)"
 			: "给 pi agent 发一个任务…";
@@ -191,10 +195,10 @@ function PromptBar() {
 				className={`pg-btn pg-btn-ghost pg-bolt${bolt ? " pg-bolt-on" : ""}`}
 				aria-pressed={bolt}
 				aria-label="自动编排模式"
-				title={bolt ? "⚡ 开启中：发送的内容将作为编排目标" : "开启 ⚡ 自动编排：发送目标 → 自动拆图执行 → 结果整理回对话"}
+				title={bolt ? "自动编排开启中：发送的内容将作为编排目标" : "开启自动编排：发送目标 → 自动拆图执行 → 结果整理回对话"}
 				onClick={() => setBolt((v) => !v)}
 			>
-				⚡
+				<Icon name="bolt" size={16} />
 			</button>
 			<input
 				value={text}
@@ -209,21 +213,21 @@ function PromptBar() {
 			/>
 			{orchBusy && bolt ? (
 				<button className="pg-btn pg-btn-danger" onClick={abortRun}>
-					⏹ 中止编排
+					<Icon name="stop" size={13} /> 中止编排
 				</button>
 			) : bolt ? (
 				<button className="pg-btn" disabled={!text.trim() || orchBusy || offline} onClick={submit}>
-					⚡ 编排
+					<Icon name="bolt" size={14} /> 编排
 				</button>
 			) : running ? (
 				<>
 					{text.trim() && (
 						<button className="pg-btn" title="把输入作为转向指令插入当前运行" onClick={submit}>
-							↪ 转向
+							<Icon name="steer" size={14} /> 转向
 						</button>
 					)}
 					<button className="pg-btn pg-btn-danger" onClick={abort}>
-						⏹ 中止
+						<Icon name="stop" size={13} /> 中止
 					</button>
 				</>
 			) : (

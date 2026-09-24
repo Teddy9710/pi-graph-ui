@@ -6,6 +6,7 @@
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { GraphNodeData } from "@pi-graph/shared";
+import { Icon, type IconName } from "./icons.tsx";
 import "./nodes.css";
 
 type DataNodeProps = NodeProps & { data: GraphNodeData };
@@ -21,7 +22,7 @@ function NodeShell({
 	className = "",
 }: {
 	data: GraphNodeData;
-	icon: string;
+	icon: IconName;
 	children: React.ReactNode;
 	className?: string;
 }) {
@@ -30,7 +31,9 @@ function NodeShell({
 			<Handle type="target" position={Position.Left} className="pg-handle" />
 			<Handle type="source" position={Position.Right} className="pg-handle" />
 			<div className="pg-node-head">
-				<span className="pg-icon">{icon}</span>
+				<span className="pg-icon">
+					<Icon name={icon} size={13} />
+				</span>
 				{data.status === "running" && <span className="pg-spinner" />}
 				<StatusDot status={data.status} />
 			</div>
@@ -41,7 +44,7 @@ function NodeShell({
 
 export function SessionNode({ data }: DataNodeProps) {
 	return (
-		<NodeShell data={data} icon="◆">
+		<NodeShell data={data} icon="diamond">
 			<div className="pg-title">pi session</div>
 		</NodeShell>
 	);
@@ -49,7 +52,7 @@ export function SessionNode({ data }: DataNodeProps) {
 
 export function UserNode({ data }: DataNodeProps) {
 	return (
-		<NodeShell data={data} icon="👤">
+		<NodeShell data={data} icon="user">
 			<div className="pg-label">{data.label}</div>
 		</NodeShell>
 	);
@@ -57,7 +60,7 @@ export function UserNode({ data }: DataNodeProps) {
 
 export function AssistantNode({ data }: DataNodeProps) {
 	return (
-		<NodeShell data={data} icon="🤖">
+		<NodeShell data={data} icon="bot">
 			<div className="pg-label">{data.label}</div>
 		</NodeShell>
 	);
@@ -65,7 +68,7 @@ export function AssistantNode({ data }: DataNodeProps) {
 
 export function ToolNode({ data }: DataNodeProps) {
 	return (
-		<NodeShell data={data} icon="🔧" className="pg-mono">
+		<NodeShell data={data} icon="wrench" className="pg-mono">
 			<div className="pg-label">{data.label}</div>
 		</NodeShell>
 	);
@@ -73,7 +76,7 @@ export function ToolNode({ data }: DataNodeProps) {
 
 export function SubagentCallNode({ data }: DataNodeProps) {
 	return (
-		<NodeShell data={data} icon="✳">
+		<NodeShell data={data} icon="asterisk">
 			<div className="pg-label">{data.label}</div>
 		</NodeShell>
 	);
@@ -82,7 +85,7 @@ export function SubagentCallNode({ data }: DataNodeProps) {
 export function AgentNode({ data }: DataNodeProps) {
 	const detail = data.detail as { usage?: { turns: number; output: number }; model?: string } | undefined;
 	return (
-		<NodeShell data={data} icon="🛰">
+		<NodeShell data={data} icon="orbit">
 			<div className="pg-title">{data.label}</div>
 			{detail?.usage && (
 				<div className="pg-sub">
@@ -96,7 +99,7 @@ export function AgentNode({ data }: DataNodeProps) {
 
 export function AgentToolNode({ data }: DataNodeProps) {
 	return (
-		<NodeShell data={data} icon="·" className="pg-mono pg-dim">
+		<NodeShell data={data} icon="dot" className="pg-mono pg-dim">
 			<div className="pg-label">{data.label}</div>
 		</NodeShell>
 	);

@@ -254,8 +254,21 @@ select:focus-visible {
 }
 
 .pg-ws {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
 	font-size: 11.5px;
 	letter-spacing: 0.02em;
+}
+
+/* the connection lamp — a real circle, not the ● text glyph (whose shape
+ * follows the system font); paints with the status class's currentColor */
+.pg-ws-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: currentcolor;
+	flex: none;
 }
 .pg-ws-open {
 	color: var(--pg-green);
@@ -527,10 +540,19 @@ select:focus-visible {
 	line-height: 1;
 }
 
+/* every inline svg icon (icons.tsx) — flex: none keeps it from being
+ * squeezed in flex rows; the negative baseline puts it on the optical
+ * centerline of inline text (ignored inside flex containers) */
+.pg-ico {
+	flex: none;
+	vertical-align: -0.18em;
+}
+
 .pg-btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+	gap: 6px;
 	/* pressed correction ink: the GO key is the surveyor's stamp — foam text
 	 * on pressed magenta (5.85:1 at 13px CJK) */
 	background: var(--pg-ink-deep);
@@ -1059,6 +1081,9 @@ select:focus-visible {
 /* run summary / issue chips — printed plates: small ruled rectangles in the
  * mono face; numerals are data, data is mono and tabular */
 .pg-orch-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
 	font-family: var(--pg-mono);
 	font-size: 11px;
 	border: 1px solid var(--pg-border);
@@ -1108,8 +1133,7 @@ select:focus-visible {
 	height: 6px;
 	border-radius: 1px;
 	background: var(--pg-red);
-	margin-right: 5px;
-	vertical-align: 1px;
+	flex: none;
 }
 /* status plates: currentcolor drives border + wash — one rule, four statuses,
  * stamped in the legend's colors instead of gray pills. Wins over the four
@@ -1568,6 +1592,9 @@ textarea.pg-form-input {
 
 /* tool-call count: a quiet printed plate from the same family as the chips */
 .pg-chat-tools {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
 	font-family: var(--pg-mono);
 	font-size: 11px;
 	color: var(--pg-fg-dim);

@@ -12,6 +12,7 @@
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { NodeDef, RunNodeState } from "@pi-graph/shared";
+import { Icon } from "./icons.tsx";
 import "./nodes.css";
 
 /** React Flow v12 node data must be Record<string, unknown>. */
@@ -64,7 +65,8 @@ export function OrchNode({ data }: OrchNodeProps) {
 						className="pg-orch-badge"
 						title={`自动重试 ${runNode.retry.attempt}/${runNode.retry.maxAttempts}：${runNode.retry.lastError}`}
 					>
-						↻{runNode.retry.attempt}/{runNode.retry.maxAttempts}
+						<Icon name="rerun" size={9} />
+						{runNode.retry.attempt}/{runNode.retry.maxAttempts}
 					</span>
 				)}
 				{runNode?.reusedFrom && status === "ok" && (
