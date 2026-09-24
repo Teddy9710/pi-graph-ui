@@ -140,7 +140,16 @@ flowchart LR
 - 驳回、失败或超时会沿图传播，跳过已经不可执行的后继节点。
 - `ORCH_MAX_PARALLEL` 控制并发，`ORCH_NODE_TIMEOUT_MS` 控制节点超时。
 - `ORCH_MIN_OUTPUT_CHARS` 可开启输出质量门；不达标时原题重跑一次并保留更长答案。
+- 节点瞬态失败（超时/进程/模型类）默认自动重试 1 次；运行失败后可复用已完成输出重跑失败部分，或让 AI 重写失败节点后重跑（见下节）。
 - 中止会终止规划器与所有节点进程树，避免孤儿进程继续消耗资源。
+
+## 失败恢复
+
+节点出错时三层手段由轻到重：
+
+1. **自动重试**：超时 / 进程退出 / 模型报错按 `ORCH_NODE_MAX_RETRIES`（默认 1，节点 `maxRetries` 覆盖，0–3）自动重跑。中间尝试只发 `node_retry`（画布 ↻n/N 徽标），不产生 `node_failed`；重试成功照常翻绿。配置错误与人工中止永不重试；每次重试拿全新的超时预算。
+2. **一键重跑失败部分**：失败/中止的运行一键起新运行——已完成节点的输出复用（「复用」徽标，不重新执行），仅失败/被跳过的部分及其下游重跑。材料来自运行归档，服务重启后依然可用。
+3. **AI 修复并重跑**：失败节点面板一键让规划器结合失败原因与上游输出重写任务（可调整模型/工具），流式预览重写过程后仅重跑该节点，其余输出照旧复用。
 
 ## 架构
 
@@ -193,10 +202,12 @@ docs              架构调研、设计说明与 README 图片
 | `ORCH_PLAN_TIMEOUT_MS` | 规划超时 | `180000` |
 | `ORCH_MIN_OUTPUT_CHARS` | 输出质量门阈值，`0` 表示关闭 | `0` |
 | `ORCH_NODE_RETRY` | 质量门违规时是否补救重试 | 开启 |
+| `ORCH_NODE_MAX_RETRIES` | 失败自动重试次数（仅超时/进程/模型类；节点 `maxRetries` 覆盖） | `1`（0–3） |
+| `ORCH_NODE_RETRY_DELAY_MS` | 失败重试间隔毫秒数 | `2000` |
 | `ALLOWED_HOSTS` / `TRUSTED_ORIGINS` | 额外允许的 Host 与 Origin | 本机与私网安全默认值 |
 | `SNAKE_DEMO` | 设为 `0` 时关闭桥接服务上的演示页 | 开启 |
 
-节点还支持 `minOutputChars`、`timeoutMs`、`outputCapBytes`、`workdir`、`tools` 和 `excludeTools` 等覆盖项，详见 [Server 文档](apps/server/README.md)。
+节点还支持 `minOutputChars`、`timeoutMs`、`outputCapBytes`、`workdir`、`tools`、`excludeTools` 和 `maxRetries` 等覆盖项，详见 [Server 文档](apps/server/README.md)。
 
 ## 验证
 

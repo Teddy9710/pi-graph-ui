@@ -40,30 +40,46 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
 
 const ok = (text: string, usage?: NodeResult["usage"]): NodeResult => ({ ok: true, text, usage });
 const fail = (error: string): NodeResult => ({ ok: false, text: "", error });
+/** A failure WITH a retryable/unretryable kind — drives the engine's retry policy. */
+const failKind = (error: string, kind: NonNullable<NodeResult["kind"]>): NodeResult => ({ ok: false, text: "", error, kind });
 const hangOnGate = <T>(gate: Promise<T>) => () => gate.then(() => ok("late"));
 const hangOnAbort = (ctx: Ctx) =>
 	new Promise<NodeResult>((_, reject) => ctx.signal.addEventListener("abort", () => reject(new Error("aborted"))));
 
+/** Engine options the retry/seed tests exercise beyond maxParallel. */
+interface EngineExtras {
+	defaultMaxRetries?: number;
+	retryDelayMs?: number;
+	precompleted?: ReadonlyMap<string, { text: string; fromRunId: string }>;
+}
+
 interface Harness {
 	executor: FakeExecutor;
 	events: RunEvent[];
-	run: (graph: GraphDef, maxParallel?: number) => Promise<{ status: string; ok: number; failed: number; skipped: number }>;
+	run: (
+		graph: GraphDef,
+		maxParallel?: number,
+		extra?: EngineExtras,
+	) => Promise<{ status: string; ok: number; failed: number; skipped: number }>;
+	/** An engine the test can abort/decide on (run hides it). */
+	engine: (graph: GraphDef, maxParallel?: number, extra?: EngineExtras) => OrchestratorEngine;
 }
 
 function harness(): Harness {
 	const executor = new FakeExecutor();
 	const events: RunEvent[] = [];
 	let t = 0;
-	const run = (graph: GraphDef, maxParallel?: number) => {
-		const engine = new OrchestratorEngine(graph, executor, {
+	const build = (graph: GraphDef, maxParallel?: number, extra?: EngineExtras) =>
+		new OrchestratorEngine(graph, executor, {
 			runId: "r-test",
 			maxParallel,
 			now: () => ++t,
 			onEvent: (e) => events.push(e),
+			defaultMaxRetries: extra?.defaultMaxRetries,
+			retryDelayMs: extra?.retryDelayMs,
+			precompleted: extra?.precompleted,
 		});
-		return engine.run();
-	};
-	return { executor, events, run };
+	return { executor, events, run: (g, mp, extra) => build(g, mp, extra).run(), engine: build };
 }
 
 const node = (id: string, task = `task ${id}`) => ({ id, task });
@@ -472,5 +488,201 @@ describe("gate nodes", () => {
 		if (skipB && skipB.type === "node_skipped") expect(skipB.reason).toBe("run aborted");
 		// Aborted-settled gates no longer accept a decision.
 		expect(engine.decideNode("g", true, "")).toBe(false);
+	});
+});
+
+// ============================================================================
+// Engine-level auto-retry (timeout / process / model kinds, node_retry events)
+// ============================================================================
+
+describe("engine auto-retry", () => {
+	it("a retryable failure re-executes under node_retry — never an intermediate node_failed", async () => {
+		const h = harness();
+		let n = 0;
+		h.executor.script.a = async () => (++n === 1 ? failKind("节点超时（1000ms）", "timeout") : ok("recovered"));
+		const summary = await h.run({ nodes: [node("a")], edges: [] }, 4, { defaultMaxRetries: 1 });
+		expect(summary.status).toBe("completed");
+		expect(summary.ok).toBe(1);
+		expect(h.executor.calls.filter((c) => c.node.id === "a")).toHaveLength(2);
+		const retry = h.events.find((e) => e.type === "node_retry");
+		if (!retry || retry.type !== "node_retry") throw new Error("node_retry missing");
+		expect(retry.nodeId).toBe("a");
+		expect(retry.attempt).toBe(2); // the execution about to start
+		expect(retry.maxAttempts).toBe(2); // maxRetries + 1
+		expect(retry.error).toContain("节点超时");
+		expect(retry.retryInMs).toBe(0);
+		// Event ORDER: node_started → node_retry → node_completed; no node_failed.
+		const types = h.events.map((e) => e.type);
+		expect(types.indexOf("node_retry")).toBeGreaterThan(types.indexOf("node_started"));
+		expect(types.indexOf("node_completed")).toBeGreaterThan(types.indexOf("node_retry"));
+		expect(types).not.toContain("node_failed");
+	});
+
+	it("config/aborted/internal failures (and an ABSENT kind) never retry", async () => {
+		for (const r of [
+			failKind("model「a|b」含非法字符", "config"),
+			failKind("已中止", "aborted"),
+			failKind("internal bug", "internal"),
+			fail("no kind at all"), // old executors / adversarial results
+		]) {
+			const h = harness();
+			h.executor.script.a = async () => r;
+			const summary = await h.run({ nodes: [node("a")], edges: [] }, 4, { defaultMaxRetries: 3 });
+			expect(summary.status).toBe("failed");
+			expect(h.executor.calls.filter((c) => c.node.id === "a")).toHaveLength(1);
+			expect(h.events.some((e) => e.type === "node_retry")).toBe(false);
+		}
+	});
+
+	it("per-node maxRetries overrides the engine default in BOTH directions", async () => {
+		// Node override 0 beats engine default 1 → no retry at all.
+		const h0 = harness();
+		h0.executor.script.a = async () => failKind("节点超时（1000ms）", "timeout");
+		const s0 = await h0.run({ nodes: [{ id: "a", task: "task a", maxRetries: 0 }], edges: [] }, 4, { defaultMaxRetries: 1 });
+		expect(s0.failed).toBe(1);
+		expect(h0.executor.calls.filter((c) => c.node.id === "a")).toHaveLength(1);
+
+		// Node override 2 beats engine default 0 → the third attempt succeeds.
+		const h2 = harness();
+		let n = 0;
+		h2.executor.script.a = async () => (++n < 3 ? failKind("pi 进程退出 (code 1)", "process") : ok("third time lucky"));
+		const s2 = await h2.run({ nodes: [{ id: "a", task: "task a", maxRetries: 2 }], edges: [] });
+		expect(s2.status).toBe("completed");
+		expect(h2.executor.calls.filter((c) => c.node.id === "a")).toHaveLength(3);
+		const retries = h2.events.filter((e) => e.type === "node_retry");
+		expect(retries.map((r) => (r.type === "node_retry" ? r.attempt : 0))).toEqual([2, 3]);
+	});
+
+	it("abort during the retry delay settles the node (failed 已中止) without another attempt", async () => {
+		const h = harness();
+		h.executor.script.a = async () => failKind("节点超时（1000ms）", "timeout");
+		const graph: GraphDef = { nodes: [node("a"), node("b")], edges: [edge("a", "b")] };
+		const engine = h.engine(graph, 4, { defaultMaxRetries: 2, retryDelayMs: 200 });
+		const runP = engine.run();
+		await new Promise((r) => setTimeout(r, 20)); // inside the first inter-attempt delay
+		expect(h.events.some((e) => e.type === "node_retry" && e.nodeId === "a")).toBe(true);
+		expect(h.executor.calls.filter((c) => c.node.id === "a")).toHaveLength(1);
+		engine.abort();
+		const summary = await runP;
+		expect(summary.status).toBe("aborted");
+		const failedA = h.events.find((e) => e.type === "node_failed" && e.nodeId === "a");
+		if (!failedA || failedA.type !== "node_failed") throw new Error("node_failed for a missing");
+		expect(failedA.error).toBe("已中止");
+		// Duration is measured from the FIRST attempt's start — delay included.
+		expect(failedA.durationMs).toBeGreaterThan(0);
+		// No post-abort execution of a, and b never started.
+		expect(h.executor.calls.filter((c) => c.node.id === "a")).toHaveLength(1);
+		expect(h.executor.started).toEqual(["a"]);
+	});
+
+	it("the retry delay occupies the node's parallel slot", async () => {
+		const h = harness();
+		h.executor.script.a = async () => failKind("节点超时（1000ms）", "timeout");
+		const graph: GraphDef = { nodes: [node("a"), node("b")], edges: [] };
+		const runP = h.run(graph, 1, { defaultMaxRetries: 1, retryDelayMs: 150 });
+		await new Promise((r) => setTimeout(r, 20));
+		// a sits out its delay holding the only slot — b must stay parked.
+		expect(h.executor.started).toEqual(["a"]);
+		expect(h.executor.peak).toBe(1);
+		const summary = await runP;
+		// a exhausted its retry (terminal failure) freed the slot → b completed.
+		expect(summary.status).toBe("failed");
+		expect(summary.failed).toBe(1);
+		expect(summary.ok).toBe(1);
+		expect(h.executor.calls.filter((c) => c.node.id === "a")).toHaveLength(2);
+	});
+
+	it("a SYNCHRONOUSLY throwing executor fails the node without wedging the run loop", async () => {
+		const events: RunEvent[] = [];
+		let t = 0;
+		const boom: Executor = {
+			run() {
+				throw new Error("sync blow up");
+			},
+		};
+		const engine = new OrchestratorEngine({ nodes: [node("a"), node("b")], edges: [] }, boom, {
+			runId: "r-sync",
+			now: () => ++t,
+			onEvent: (e) => events.push(e),
+			defaultMaxRetries: 3, // internal is never retried regardless of budget
+		});
+		const summary = await engine.run();
+		expect(summary.status).toBe("failed");
+		expect(summary.failed).toBe(2);
+		const failedEv = events.find((e) => e.type === "node_failed");
+		expect(failedEv && failedEv.type === "node_failed" ? failedEv.error : "").toContain("sync blow up");
+		expect(events.filter((e) => e.type === "node_retry")).toHaveLength(0);
+	});
+});
+
+// ============================================================================
+// Precompleted seeds (rerun-failed-part: ok nodes carry over, never re-execute)
+// ============================================================================
+
+describe("precompleted seeds", () => {
+	it("seeds surface as node_reused right after run_started, never touch the executor, inject downstream", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("a"), node("b"), node("c")], edges: [edge("a", "b"), edge("b", "c")] };
+		const summary = await h.run(graph, 4, { precompleted: new Map([["a", { text: "old-a", fromRunId: "r-old" }]]) });
+		expect(summary.status).toBe("completed");
+		expect(summary.ok).toBe(3);
+		expect(h.executor.started).toEqual(["b", "c"]); // a never executed
+		const reused = h.events.find((e) => e.type === "node_reused");
+		if (!reused || reused.type !== "node_reused") throw new Error("node_reused missing");
+		expect(reused.nodeId).toBe("a");
+		expect(reused.fromRunId).toBe("r-old");
+		expect(reused.output.text).toBe("old-a");
+		// ORDER: immediately after run_started, before any node_started.
+		const types = h.events.map((e) => e.type);
+		expect(types.indexOf("node_reused")).toBe(types.indexOf("run_started") + 1);
+		expect(types.indexOf("node_started")).toBeGreaterThan(types.indexOf("node_reused"));
+		// The seed injects into b's prompt like an ordinary completion.
+		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
+		expect(callB.assembledPrompt).toContain("old-a");
+	});
+
+	it("a fully seeded graph completes without a single executor call", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [node("a"), node("b")], edges: [edge("a", "b")] };
+		const summary = await h.run(graph, 4, {
+			precompleted: new Map([
+				["a", { text: "x", fromRunId: "r1" }],
+				["b", { text: "y", fromRunId: "r1" }],
+			]),
+		});
+		expect(summary).toEqual({ status: "completed", ok: 2, failed: 0, skipped: 0 });
+		expect(h.executor.calls).toHaveLength(0);
+		// Both seeds announced in graph order.
+		const reused = h.events.filter((e) => e.type === "node_reused");
+		expect(reused.map((r) => (r.type === "node_reused" ? r.nodeId : ""))).toEqual(["a", "b"]);
+	});
+
+	it("a seeded branch does not falsely satisfy an AND-join still waiting on a live upstream", async () => {
+		const h = harness();
+		const graph: GraphDef = {
+			nodes: [node("s"), node("x"), node("d")],
+			edges: [edge("s", "d"), edge("x", "d")],
+		};
+		const gate = deferred<void>();
+		h.executor.script.x = hangOnGate(gate.promise);
+		const runP = h.run(graph, 4, { precompleted: new Map([["s", { text: "seed-s", fromRunId: "r1" }]]) });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(h.executor.started).toEqual(["x"]); // d NOT launched: x still open
+		gate.resolve();
+		await runP;
+		const callD = h.executor.calls.find((c) => c.node.id === "d")!;
+		expect(callD.upstream.map((u) => u.nodeId)).toEqual(["s", "x"]); // graph order
+		expect(callD.assembledPrompt).toContain("seed-s");
+		expect(callD.assembledPrompt).toContain("late");
+	});
+
+	it("a seeded gate never suspends — its note injects downstream like any output", async () => {
+		const h = harness();
+		const graph: GraphDef = { nodes: [{ id: "g", task: "task g", gate: true }, node("b")], edges: [edge("g", "b")] };
+		const summary = await h.run(graph, 4, { precompleted: new Map([["g", { text: "审校通过", fromRunId: "r1" }]]) });
+		expect(summary.status).toBe("completed");
+		expect(h.events.some((e) => e.type === "node_awaiting")).toBe(false);
+		const callB = h.executor.calls.find((c) => c.node.id === "b")!;
+		expect(callB.assembledPrompt).toContain("审校通过");
 	});
 });

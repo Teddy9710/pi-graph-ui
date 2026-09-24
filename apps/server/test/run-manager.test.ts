@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { MAX_GATE_NOTE_CHARS, RunManager, type ChatRunResult, type Planner } from "../src/run-manager.ts";
 import { RunStore } from "../src/run-store.ts";
 import type { Executor, ExecutorCall, NodeResult } from "../src/orchestrator.ts";
-import type { PlanOutcome } from "../src/planner.ts";
+import type { PlanOutcome, RepairOutcome, RepairRequest } from "../src/planner.ts";
 import { MAX_GOAL_CHARS } from "../src/planner.ts";
 import { foldRunEvent, initRunState, type GraphDef, type RunEvent } from "@pi-graph/shared";
 
@@ -706,5 +706,418 @@ describe("RunStore", () => {
 		expect(await store.read("a/b")).toEqual([]);
 		expect(await store.read("missing-id")).toEqual([]);
 		rmSync(store.dir, { recursive: true, force: true });
+	});
+});
+
+// ============================================================================
+// 一键重跑失败部分 (rerunFailed)
+// ============================================================================
+
+describe("RunManager.rerunFailed", () => {
+	let dir: string;
+	let store: RunStore;
+
+	/** a → b → c; b fails on its FIRST execution only. */
+	const chainGraph: GraphDef = {
+		name: "chain",
+		nodes: [
+			{ id: "a", task: "跑a" },
+			{ id: "b", task: "跑b" },
+			{ id: "c", task: "跑c" },
+		],
+		edges: [
+			{ id: "a->b", source: "a", target: "b" },
+			{ id: "b->c", source: "b", target: "c" },
+		],
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(tmpdir(), "runs-test-"));
+		store = new RunStore(dir);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("seeds ok nodes as node_reused and re-executes the failed part under a NEW runId", async () => {
+		const calls: ExecutorCall[] = [];
+		let bCalls = 0;
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => {
+				calls.push(call);
+				if (call.node.id === "b" && ++bCalls === 1) return { ok: false, text: "", error: "boom" };
+				return ok(`结果:${call.node.id}`);
+			}),
+			store,
+		});
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const first = manager.start(chainGraph);
+		expect(first.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		// Run 1: a ok, b failed, c skipped.
+		expect(seen.some((e) => e.type === "node_failed" && e.nodeId === "b")).toBe(true);
+
+		const rerun = await manager.rerunFailed(first.ok ? first.runId : "");
+		expect(rerun.ok).toBe(true);
+		if (rerun.ok) expect(rerun.runId).not.toBe(first.runId);
+		await vi.advanceTimersByTimeAsync(0);
+
+		const rerunEvents = seen.filter((e) => rerun.ok && e.runId === rerun.runId);
+		expect(rerunEvents.map((e) => e.type)).toEqual([
+			"run_started",
+			"node_reused", // a — right after run_started
+			"node_started", // b — re-executed
+			"node_completed",
+			"node_started", // c — unblocked by the fixed b
+			"node_completed",
+			"run_finished",
+		]);
+		const reused = rerunEvents[1]!;
+		if (reused.type !== "node_reused") throw new Error("node_reused missing");
+		expect(reused.nodeId).toBe("a");
+		expect(reused.fromRunId).toBe(first.runId);
+		expect(reused.output.text).toBe("结果:a");
+		// a ran exactly ONCE across both runs (never re-executed in run 2).
+		expect(calls.filter((c) => c.node.id === "a")).toHaveLength(1);
+		// b's re-execution injects a's OLD output (the seed).
+		const callB2 = calls.filter((c) => c.node.id === "b")[1]!;
+		expect(callB2.assembledPrompt).toContain("结果:a");
+		const fin = rerunEvents.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("completed");
+		expect(manager.active).toBe(false);
+		// The full replay folds to the rerun (fresh state from repair-free events).
+		const folded = initRunState();
+		for (const e of manager.retainedEvents()) foldRunEvent(folded, e);
+		expect(folded.status).toBe("completed");
+		expect(folded.nodes.a?.reusedFrom).toBe(first.runId);
+	});
+
+	it("falls back to the RunStore archive once retention has moved on", async () => {
+		const calls: ExecutorCall[] = [];
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => {
+				calls.push(call);
+				return call.node.id === "b" ? { ok: false, text: "", error: "boom" } : ok(`结果:${call.node.id}`);
+			}),
+			store,
+		});
+		const first = manager.start(chainGraph);
+		await vi.advanceTimersByTimeAsync(0);
+		// An unrelated run claims retention (a node the chain never mentions).
+		const other = manager.start({ name: "other", nodes: [{ id: "z", task: "无关" }], edges: [] });
+		expect(other.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		const rerun = await manager.rerunFailed(first.ok ? first.runId : "");
+		expect(rerun.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		// a was seeded from the ARCHIVE, not from memory.
+		const reused = (rerun.ok ? manager.retainedEvents() : []).find(
+			(e) => e.type === "node_reused" && e.runId === (rerun.ok ? rerun.runId : ""),
+		);
+		if (!reused || reused.type !== "node_reused") throw new Error("node_reused missing");
+		expect(reused.nodeId).toBe("a");
+		expect(reused.fromRunId).toBe(first.runId);
+		expect(calls.filter((c) => c.node.id === "a")).toHaveLength(1); // still never re-executed
+	});
+
+	it("an approved gate's note seeds verbatim (the gate never re-awaits)", async () => {
+		const gated: GraphDef = {
+			name: "gated",
+			nodes: [
+				{ id: "a", task: "跑" },
+				{ id: "g", task: "审", gate: true },
+			],
+			edges: [{ id: "a->g", source: "a", target: "g" }],
+		};
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("结果:a")), store });
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const first = manager.start(gated);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(manager.decideNode(first.ok ? first.runId : "", "g", true, "  审校通过  ")).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		const rerun = await manager.rerunFailed(first.ok ? first.runId : "");
+		expect(rerun.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		const rerunEvents = seen.filter((e) => rerun.ok && e.runId === rerun.runId);
+		// All nodes were ok — the rerun is a pure replay.
+		expect(rerunEvents.map((e) => e.type)).toEqual(["run_started", "node_reused", "node_reused", "run_finished"]);
+		const reusedG = rerunEvents.find((e) => e.type === "node_reused" && e.nodeId === "g");
+		if (!reusedG || reusedG.type !== "node_reused") throw new Error("node_reused for g missing");
+		expect(reusedG.output.text).toBe("审校通过"); // trimmed note
+		expect(rerunEvents.some((e) => e.type === "node_awaiting")).toBe(false);
+	});
+
+	it("rejects an unknown id, a busy manager, and a run without run_finished", async () => {
+		const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), store });
+		const missing = await manager.rerunFailed("orch-missing");
+		expect(missing.ok).toBe(false);
+		if (!missing.ok) expect(missing.error).toContain("找不到");
+
+		const busyManager = new RunManager({ executor: fakeExecutor(hangOnAbort), store });
+		busyManager.start(singleNodeGraph());
+		const busy = await busyManager.rerunFailed("whatever");
+		expect(busy.ok).toBe(false);
+		if (!busy.ok) expect(busy.error).toContain("运行");
+		busyManager.abort();
+		await vi.advanceTimersByTimeAsync(0);
+
+		// Hand-write an archive with run_started but no run_finished.
+		const store2 = store;
+		store2.append({ type: "run_started", runId: "orch-torn1", startedAt: 1, graph: singleNodeGraph() });
+		const torn = await manager.rerunFailed("orch-torn1");
+		expect(torn.ok).toBe(false);
+		if (!torn.ok) expect(torn.error).toContain("尚未结束");
+	});
+});
+
+// ============================================================================
+// AI 修复失败节点 (startRepair)
+// ============================================================================
+
+/** Fake planner exposing the optional rewriteTask seam: scripted deltas + manual settle. */
+class FakeRepairPlanner implements Planner {
+	readonly requests: RepairRequest[] = [];
+	readonly signals: AbortSignal[] = [];
+	private resolve: ((o: RepairOutcome) => void) | null = null;
+
+	constructor(private readonly deltas: string[] = []) {}
+
+	plan(): Promise<PlanOutcome> {
+		return Promise.resolve({ ok: false, error: "plan not used" });
+	}
+
+	rewriteTask(req: RepairRequest, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<RepairOutcome> {
+		this.requests.push(req);
+		this.signals.push(ctx.signal);
+		for (const d of this.deltas) ctx.onDelta(d);
+		return new Promise<RepairOutcome>((res) => {
+			this.resolve = res;
+		});
+	}
+
+	settle(outcome: RepairOutcome): void {
+		this.resolve?.(outcome);
+	}
+}
+
+describe("RunManager.startRepair", () => {
+	let dir: string;
+	let store: RunStore;
+
+	const pairGraph: GraphDef = {
+		name: "pair",
+		nodes: [
+			{ id: "a", task: "跑a" },
+			{ id: "b", task: "跑b", model: "old/model", tools: ["read"] },
+		],
+		edges: [{ id: "a->b", source: "a", target: "b" }],
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(tmpdir(), "runs-test-"));
+		store = new RunStore(dir);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	/** Run the pair once: a ok, b failed (only on its FIRST execution). */
+	async function failedPair(overrides: { planner?: Planner } = {}) {
+		const planner = new FakeRepairPlanner(['{"task"']);
+		const calls: ExecutorCall[] = [];
+		let bCalls = 0;
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => {
+				calls.push(call);
+				if (call.node.id === "b" && ++bCalls === 1) return { ok: false, text: "", error: "模型太弱" };
+				return ok(`结果:${call.node.id}`);
+			}),
+			planner: overrides.planner ?? planner,
+			store,
+		});
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const first = manager.start(structuredClone(pairGraph));
+		await vi.advanceTimersByTimeAsync(0);
+		return { manager, planner, calls, seen, fromRunId: first.ok ? first.runId : "" };
+	}
+
+	it("rewrites the failed node and re-runs it with the other outputs seeded (same runId)", async () => {
+		const f = await failedPair();
+		const repair = await f.manager.startRepair(f.fromRunId, "b");
+		expect(repair.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		// The rewriter saw the failure context: error + upstream output + config.
+		expect(f.planner.requests).toHaveLength(1);
+		const req = f.planner.requests[0]!;
+		expect(req.nodeId).toBe("b");
+		expect(req.task).toBe("跑b");
+		expect(req.error).toBe("模型太弱");
+		expect(req.upstream).toEqual([{ nodeId: "a", text: "结果:a" }]);
+		expect(req.model).toBe("old/model");
+		expect(req.tools).toEqual(["read"]);
+
+		f.planner.settle({ ok: true, task: "新任务：分两步跑", model: "new/model" });
+		await vi.advanceTimersByTimeAsync(0);
+		const repairEvents = f.seen.filter((e) => repair.ok && e.runId === repair.runId);
+		expect(repairEvents.map((e) => e.type)).toEqual([
+			"repair_started",
+			"repair_delta",
+			"repair_completed",
+			"run_started",
+			"node_reused", // a
+			"node_started", // b with the REWRITTEN task
+			"node_completed",
+			"run_finished",
+		]);
+		// Same runId across the repair and execution phases (startPlanned mirror).
+		expect(repairEvents[0]!.runId).toBe(repairEvents.find((e) => e.type === "run_started")!.runId);
+		const completed = repairEvents.find((e) => e.type === "repair_completed");
+		if (!completed || completed.type !== "repair_completed") throw new Error("repair_completed missing");
+		expect(completed.task).toBe("新任务：分两步跑");
+		expect(completed.model).toBe("new/model");
+		// The executed graph carries the override; a's seed injected into b.
+		const callB2 = f.calls.filter((c) => c.node.id === "b")[1]!;
+		expect(callB2.node.task).toBe("新任务：分两步跑");
+		expect(callB2.node.model).toBe("new/model");
+		expect(callB2.assembledPrompt).toContain("结果:a");
+		const fin = repairEvents.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("completed");
+		expect(f.manager.active).toBe(false);
+		// Replay folds the repair preview + the run.
+		const folded = initRunState();
+		for (const e of f.manager.retainedEvents()) foldRunEvent(folded, e);
+		expect(folded.status).toBe("completed");
+		expect(folded.nodes.b?.output).toBe("结果:b");
+	});
+
+	it("an override WITHOUT model/tools DELETES them from the node (the rewrite is authoritative)", async () => {
+		const f = await failedPair();
+		const repair = await f.manager.startRepair(f.fromRunId, "b");
+		await vi.advanceTimersByTimeAsync(0);
+		f.planner.settle({ ok: true, task: "裸任务" });
+		await vi.advanceTimersByTimeAsync(0);
+		const callB2 = f.calls.filter((c) => c.node.id === "b")[1]!;
+		expect(callB2.node.task).toBe("裸任务");
+		expect(callB2.node.model).toBeUndefined(); // deleted, not carried over
+		expect(callB2.node.tools).toBeUndefined();
+	});
+
+	it("repair failure → repair_failed + terminal run_finished, manager reusable", async () => {
+		const f = await failedPair();
+		const repair = await f.manager.startRepair(f.fromRunId, "b");
+		await vi.advanceTimersByTimeAsync(0);
+		f.planner.settle({ ok: false, error: "修不好" });
+		await vi.advanceTimersByTimeAsync(0);
+		const repairEvents = f.seen.filter((e) => repair.ok && e.runId === repair.runId);
+		expect(repairEvents.map((e) => e.type)).toEqual(["repair_started", "repair_delta", "repair_failed", "run_finished"]);
+		const fin = repairEvents.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("failed");
+		expect(f.manager.active).toBe(false);
+		// A repair-only failure is still archived as a run.
+		const list = await store.list();
+		expect(list.some((m) => m.id === (repair.ok ? repair.runId : "") && m.status === "failed")).toBe(true);
+		// Immediately reusable.
+		const again = f.manager.start(singleNodeGraph());
+		expect(again.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+	});
+
+	it("a synchronously throwing rewriter gets a terminal event (no permanent busy)", async () => {
+		const planner: Planner = {
+			plan: () => Promise.resolve({ ok: false, error: "unused" }),
+			rewriteTask: () => {
+				throw new Error("sync boom");
+			},
+		};
+		const f = await failedPair({ planner });
+		const repair = await f.manager.startRepair(f.fromRunId, "b");
+		expect(repair.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		const repairEvents = f.seen.filter((e) => repair.ok && e.runId === repair.runId);
+		expect(repairEvents.map((e) => e.type)).toEqual(["repair_started", "repair_failed", "run_finished"]);
+		if (repairEvents[1]!.type === "repair_failed") expect(repairEvents[1].error).toContain("sync boom");
+		expect(f.manager.active).toBe(false);
+	});
+
+	it("guards: no rewriter seam, gate target, unknown node, no failure record, busy", async () => {
+		// No rewriteTask on the planner.
+		{
+			const planner = new FakePlanner();
+			const f = await failedPair({ planner });
+			const r = await f.manager.startRepair(f.fromRunId, "b");
+			expect(r.ok).toBe(false);
+			if (!r.ok) expect(r.error).toContain("未配置修复器");
+		}
+		// Gate target.
+		{
+			const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner: new FakeRepairPlanner(), store });
+			const gated: GraphDef = {
+				name: "g",
+				nodes: [
+					{ id: "a", task: "跑" },
+					{ id: "g", task: "审", gate: true },
+				],
+				edges: [{ id: "a->g", source: "a", target: "g" }],
+			};
+			const first = manager.start(gated);
+			await vi.advanceTimersByTimeAsync(0);
+			// The run parks on the awaiting gate — settle it (abort) so the
+			// manager is idle and the repair path reaches the gate check.
+			manager.abort();
+			await vi.advanceTimersByTimeAsync(0);
+			const r = await manager.startRepair(first.ok ? first.runId : "", "g");
+			expect(r.ok).toBe(false);
+			if (!r.ok) expect(r.error).toContain("门控");
+		}
+		// Unknown node / non-failed node.
+		{
+			const f = await failedPair();
+			const unknown = await f.manager.startRepair(f.fromRunId, "zzz");
+			expect(unknown.ok).toBe(false);
+			const notFailed = await f.manager.startRepair(f.fromRunId, "a");
+			expect(notFailed.ok).toBe(false);
+			if (!notFailed.ok) expect(notFailed.error).toContain("失败记录");
+		}
+		// Busy.
+		{
+			const f = await failedPair();
+			const hanging = f.manager.start(singleNodeGraph());
+			// singleNodeGraph's node "a" is still the fake executor's ok path —
+			// it completes instantly, so use a hanging executor manager instead.
+			expect(hanging.ok).toBe(true);
+			await vi.advanceTimersByTimeAsync(0);
+			const busyManager = new RunManager({ executor: fakeExecutor(hangOnAbort), planner: new FakeRepairPlanner(), store });
+			busyManager.start(singleNodeGraph());
+			const busy = await busyManager.startRepair("whatever", "a");
+			expect(busy.ok).toBe(false);
+			if (!busy.ok) expect(busy.error).toContain("运行");
+			busyManager.abort();
+			await vi.advanceTimersByTimeAsync(0);
+		}
+	});
+
+	it("abort during the repair: aborted run_finished, rewriter signal fired, late settle ignored", async () => {
+		const f = await failedPair();
+		const repair = await f.manager.startRepair(f.fromRunId, "b");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(f.manager.abort()).toBe(true);
+		expect(f.planner.signals[0]!.aborted).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		const repairEvents = f.seen.filter((e) => repair.ok && e.runId === repair.runId);
+		expect(repairEvents.map((e) => e.type)).toEqual(["repair_started", "repair_delta", "run_finished"]);
+		const fin = repairEvents.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("aborted");
+		expect(f.manager.active).toBe(false);
+		// A late rewriter resolution must not start an engine for the dead run.
+		f.planner.settle({ ok: true, task: "迟到" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(f.seen.filter((e) => e.type === "run_started").length).toBe(1); // only the source run
 	});
 });

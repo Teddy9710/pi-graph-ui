@@ -28,6 +28,7 @@ import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { JsonAgentSessionEvent } from "@pi-graph/shared";
+import { isSessionId } from "./infra/id-regex.ts";
 
 export interface SessionMeta {
 	id: string;
@@ -59,8 +60,6 @@ interface IndexFile {
 	entries: Record<string, IndexEntry>;
 }
 
-/** Mirror of the archive-id allowlist used by read(). */
-const ID_RE = /^[0-9TZ-]+$/;
 /** Titles share the 120-char budget of the auto-derived firstUserText. */
 export const MAX_TITLE_CHARS = 120;
 
@@ -185,7 +184,7 @@ export class SessionStore {
 	/** Continue writing an EXISTING archive id (switch_session resume path).
 	 *  The id must pass the same allowlist as read() and exist on disk. */
 	resume(id: string): boolean {
-		if (!ID_RE.test(id) || !existsSync(this.fileFor(id))) return false;
+		if (!isSessionId(id) || !existsSync(this.fileFor(id))) return false;
 		this.current = id;
 		this.disabled = false;
 		return true;
@@ -193,7 +192,7 @@ export class SessionStore {
 
 	/** Record which pi session file backs an archive (makes it resumable). */
 	bindPiSession(id: string, piSessionPath: string | null | undefined): void {
-		if (!ID_RE.test(id)) return;
+		if (!isSessionId(id)) return;
 		const entry = (this.index.entries[id] ??= { createdAt: Date.now() });
 		if (piSessionPath) entry.piSessionPath = piSessionPath;
 		this.saveIndex();
@@ -201,7 +200,7 @@ export class SessionStore {
 
 	/** Set a user-chosen title. Returns false (unchanged) on invalid input. */
 	rename(id: string, title: string): boolean {
-		if (!ID_RE.test(id) || !isValidTitle(title)) return false;
+		if (!isSessionId(id) || !isValidTitle(title)) return false;
 		const entry = (this.index.entries[id] ??= { createdAt: Date.now() });
 		entry.title = title;
 		this.saveIndex();
@@ -213,7 +212,7 @@ export class SessionStore {
 	remove(id: string): { removedArchive: boolean; piSessionPath?: string } {
 		const entry = this.index.entries[id];
 		const file = this.fileFor(id);
-		const removedArchive = ID_RE.test(id) && existsSync(file);
+		const removedArchive = isSessionId(id) && existsSync(file);
 		if (removedArchive) {
 			try {
 				rmSync(file, { force: true });
@@ -235,7 +234,7 @@ export class SessionStore {
 		// Strict id allowlist (no '.', '/', '\', ':') keeps read() inside dir.
 		// append() ids look like 2026-08-21T01-38-58-392Z — the trailing 'Z'
 		// MUST be allowed or every archive reads back empty.
-		if (!ID_RE.test(id) || !existsSync(file)) return [];
+		if (!isSessionId(id) || !existsSync(file)) return [];
 		const events: JsonAgentSessionEvent[] = [];
 		const rl = createInterface({ input: createReadStream(file, "utf8") });
 		for await (const line of rl) {

@@ -7,6 +7,12 @@
  * retries ONCE with the validation error fed back. The streamed text is
  * surfaced through onDelta so the canvas can preview the plan as it drafts.
  *
+ * rewriteTask is the AI-repair path (AI 修复失败节点): the same pi-instance
+ * lifecycle, but the prompt carries a FAILED node's task + error + upstream
+ * outputs and asks for a strict-JSON task override
+ * (extractTaskOverride: substring JSON → whitelist → drop-not-fail), retried
+ * once with feedback on a bad override.
+ *
  * Same lifecycle discipline as PiNodeExecutor: agent_settled vs exit vs
  * timeout vs abort race, and the bridge is killed on every path.
  */
@@ -29,6 +35,7 @@ import {
 	type GraphDef,
 	type JsonAgentSessionEvent,
 } from "@pi-graph/shared";
+import { setTimeoutUnref, type UnrefableTimeout } from "./infra/timer-unref.ts";
 import { PiBridge } from "./pi-bridge.ts";
 
 // ============================================================================
@@ -50,6 +57,105 @@ export const MAX_GOAL_CHARS = 4000;
 export const MAX_PLANNER_GATES = 3;
 
 export type PlanOutcome = { ok: true; graph: GraphDef } | { ok: false; error: string };
+
+// ============================================================================
+// AI repair (rewriteTask): pure pieces + request/outcome shapes
+// ============================================================================
+
+/** Upstream-output material budget for the repair prompt: per section / total (chars). */
+export const REPAIR_SECTION_CHARS = 2000;
+export const REPAIR_TOTAL_CHARS = 16000;
+
+/** Everything the repair prompt needs about one failed node (RunManager collects it from the source run). */
+export interface RepairRequest {
+	nodeId: string;
+	/** The failed node's current task — the thing being rewritten. */
+	task: string;
+	/** The node_failed error text. */
+	error: string;
+	/** Upstream outputs (in graph edge order; injected verbatim on re-execution). */
+	upstream: { nodeId: string; text: string }[];
+	/** Current per-node model/tools, when set (so the model can keep or adjust). */
+	model?: string;
+	tools?: string[];
+}
+
+/** The whitelisted override a repair may apply: task always, model/tools optional. */
+export interface TaskOverride {
+	task: string;
+	model?: string;
+	tools?: string[];
+}
+
+export type RepairOutcome = { ok: true } & TaskOverride | { ok: false; error: string };
+
+export function buildRepairPrompt(req: RepairRequest, feedback?: string): string {
+	const sections: string[] = [];
+	let remaining = REPAIR_TOTAL_CHARS;
+	for (const u of req.upstream) {
+		if (remaining <= 0) {
+			sections.push(`### from ${u.nodeId}\n（材料预算用尽，已省略）`);
+			continue;
+		}
+		const capped =
+			u.text.length > REPAIR_SECTION_CHARS ? `${u.text.slice(0, REPAIR_SECTION_CHARS)}\n（该段过长，已截断）` : u.text;
+		const piece = capped.slice(0, remaining);
+		remaining -= piece.length;
+		sections.push(`### from ${u.nodeId}\n${piece}${piece.length < capped.length ? "\n（材料预算用尽，已截断）" : ""}`);
+	}
+	const configBits: string[] = [];
+	if (req.model) configBits.push(`model=${req.model}`);
+	if (req.tools?.length) configBits.push(`tools=${req.tools.join(",")}`);
+	const base = `你是一个任务修复器。图编排中的一个节点执行失败了，请重写它的任务指令（必要时调整模型/工具），让它在相同的上游输入下重新执行时能成功。
+
+要求：
+- 输出**只有一个 JSON 对象**，不要 markdown 代码块围栏、不要任何解释文字。
+- 结构：{"task": "修正后的完整任务指令", "model": "可选：provider/model", "tools": ["可选：工具白名单"]}
+- task 必须自包含：执行该节点的 agent 只看到 task 与上游节点的输出，看不到本次对话。
+- 针对失败原因做最小修正：任务描述有歧义/缺材料/单次做不完 → 改写 task；模型能力不足 → 换 model；工具缺失或多余 → 调整 tools。
+- model/tools 的取舍：省略 = 该节点不再单独指定（回到服务器默认）；想保留当前配置就把它原样写进输出。不要编造不确定的 model 名。
+
+节点 id：${req.nodeId}
+当前任务指令：
+${req.task}
+
+失败原因：
+${req.error}${sections.length > 0 ? `\n\n上游节点输出（重新执行时会原样注入该节点）：\n\n${sections.join("\n\n")}` : ""}${configBits.length > 0 ? `\n\n当前执行配置：${configBits.join("、")}` : ""}`;
+	if (!feedback) return base;
+	return `${base}
+
+你上一次输出的 JSON 无法使用：${feedback}
+请修正问题后重新输出——仍然只输出一个 JSON 对象，不要任何其他文字。`;
+}
+
+/**
+ * Extract a TaskOverride from a repair reply: substring JSON (same tolerance
+ * as extractGraph), then whitelist-keep with drop-not-fail semantics — task
+ * is the only hard requirement (missing/empty = error); a model that fails
+ * MODEL_RE and tool names that fail TOOL_NAME_RE are DROPPED (the single
+ * retry stays reserved for structural errors). Pure and total.
+ */
+export function extractTaskOverride(text: string): { ok: true; override: TaskOverride } | { ok: false; error: string } {
+	const first = text.indexOf("{");
+	const last = text.lastIndexOf("}");
+	if (first === -1 || last <= first) return { ok: false, error: "输出中没有找到 JSON 对象" };
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text.slice(first, last + 1));
+	} catch (err) {
+		return { ok: false, error: `JSON 解析失败: ${(err as Error).message}` };
+	}
+	if (typeof parsed !== "object" || parsed === null) return { ok: false, error: "JSON 不是有效的对象" };
+	const r = parsed as { task?: unknown; model?: unknown; tools?: unknown };
+	if (typeof r.task !== "string" || !r.task.trim()) return { ok: false, error: "task 缺失或为空" };
+	const override: TaskOverride = { task: r.task.slice(0, MAX_TASK_CHARS) };
+	if (typeof r.model === "string" && r.model.trim() && MODEL_RE.test(r.model)) override.model = r.model.slice(0, 128);
+	if (Array.isArray(r.tools)) {
+		const names = r.tools.filter((t): t is string => typeof t === "string" && TOOL_NAME_RE.test(t)).slice(0, MAX_NODE_TOOLS);
+		if (names.length > 0) override.tools = names;
+	}
+	return { ok: true, override };
+}
 
 /** One planner turn's raw result (text not yet parsed). */
 type AskOutcome = { ok: true; text: string } | { ok: false; error: string };
@@ -299,12 +405,36 @@ export class PiPlanner {
 		return { ok: false, error: feedback ?? "规划失败" };
 	}
 
+	/**
+	 * Rewrite a failed node's task (AI 修复): same askOnce lifecycle and the
+	 * same retry-once-with-feedback loop as plan(), but the prompt carries the
+	 * failure context and the reply is parsed by extractTaskOverride.
+	 */
+	async rewriteTask(
+		req: RepairRequest,
+		ctx: { onDelta: (delta: string) => void; signal: AbortSignal },
+	): Promise<RepairOutcome> {
+		if (!MODEL_RE.test(this.model)) return { ok: false, error: `修复模型「${this.model}」含非法字符` };
+		let feedback: string | undefined;
+		for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+			if (attempt > 1) {
+				ctx.onDelta(`\n\n—— 第 ${attempt - 1} 次修复无效：${feedback ?? ""}，正在重试 ——\n\n`);
+			}
+			const asked = await this.askOnce(buildRepairPrompt(req, feedback), ctx);
+			if (!asked.ok) return asked; // process-level failure — retrying the same env won't help
+			const extracted = extractTaskOverride(asked.text);
+			if (extracted.ok) return { ok: true, ...extracted.override };
+			feedback = extracted.error;
+		}
+		return { ok: false, error: feedback ?? "修复失败" };
+	}
+
 	/** One planner turn: spawn → prompt over stdin → race settle/exit/timeout/abort. */
 	private askOnce(prompt: string, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<AskOutcome> {
 		const bridge = this.bridgeFactory(["--model", this.model]);
 		const state = initState();
 		let settled = false;
-		let timer: ReturnType<typeof setTimeout> | null = null;
+		let timer: UnrefableTimeout | null = null;
 		const onAbort = () => finish({ ok: false, error: "已中止" });
 
 		const cleanup = (): void => {
@@ -343,8 +473,7 @@ export class PiPlanner {
 			finish({ ok: false, error: `规划进程退出 (code ${code ?? "null"})${tail ? `: ${tail}` : ""}` });
 		});
 
-		timer = setTimeout(() => finish({ ok: false, error: `规划超时（${this.timeoutMs}ms）` }), this.timeoutMs);
-		(timer as { unref?: () => void }).unref?.();
+		timer = setTimeoutUnref(() => finish({ ok: false, error: `规划超时（${this.timeoutMs}ms）` }), this.timeoutMs);
 		ctx.signal.addEventListener("abort", onAbort);
 
 		bridge.start();

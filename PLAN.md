@@ -123,6 +123,13 @@ packages/shared # 事件类型（对齐 pi）、delta 折叠、图派生纯函�
     - pi 文件删除三重安全校验（resolve 在 `~/.pi/agent/sessions` 下 + lstat 真文件 + ≠ currentPiFile），不满足则只删归档；浏览器透传里封堵裸 `switch_session` 命令（否则可绕过守卫直塞任意 sessionPath 给 pi）。
     - 前端：`session_bound` 轻量信封告知惰性建档的 id（不重建视图）；行主按钮用 `aria-disabled` 而非原生 disabled（Chromium 下 disabled 按钮不传播 :hover，当前行的 ✎/✕ 悬停簇会永久不可见——真 UX bug）；无 pi 文件的旧档降级「仅回放」走 loadHistory，不改当前对话。
     - 验证：session-service 单测 14 例（fake bridge 脚本化队列）+ `e2e-sessions.mjs`（上下文恢复黄金断言：切回后问「我叫什么名字」必须答「小明」）+ `verify-sessions-ui.mjs`（playwright-core 驱动真浏览器实操 + 截图）。
+15. **M-F 失败恢复（2026-09-23）**：节点出错从「整图重跑」升级为三层恢复——
+    - **自动重试（引擎级）**：`NodeResult.kind` 分类失败（timeout/process/model 可重试；config/aborted/internal 永不），`OrchestratorEngine` 的 `drive()` 单循环按 `ORCH_NODE_MAX_RETRIES`（默认 1，节点 `maxRetries` 0-3 覆盖）重跑——中间尝试只发 `node_retry`（fold 计数器不动、画布 ↻n/N 徽标），终态才发 node_failed/node_completed；每次重试拿全新完整超时预算（区别于质量门 salvage 的共享墙钟）；重试延迟（`ORCH_NODE_RETRY_DELAY_MS` 默认 2s）期间占并行槽位，abort 经 `retryDelays` cancel 结算「已中止」；durationMs 从首次启动诚实累计。
+    - **一键重跑失败部分（rerun_failed）**：`RunManager.rerunFailed(fromRunId)` 对已结束 run 起新 runId——ok 节点输出经引擎 `precompleted` 播种为 `node_reused`（executor 不碰、批准门控批注原样复用、复用徽标保真原始来源 run），error/skipped 及下游重跑；材料先于 `nextRunId()` 从 retained/RunStore 归档采集（归档可用 → 服务重启后仍可恢复）。
+    - **AI 修复失败节点（repair_node）**：`RunManager.startRepair` 铸新 runId 前一次性采集图/错误/上游输出/种子 → `PiPlanner.rewriteTask`（`buildRepairPrompt`：task 全文 + 失败原因 + 上游输出分段 2KB/总 16KB 截断 + 当前 model/tools；`extractTaskOverride`：task 非空硬要求、model/tools 白名单 drop-not-fail；坏输出带反馈重试一次）→ override 应用语义 = task 必换、model/tools **有则换无则删** → `validateGraph` 复验 → `repair_completed` → 同 runId `launchEngine({precompleted})`；门控节点拒绝（人工决策不可改写）；`repair_*` 事件复用 planText/planError + status "planning" 通道（PlanBar 流式预览/中止/hello 导航零改动），`RunState.repairTarget` 标记修复流（⚡ 按钮显示「AI 修复中…」）。
+    - shared：`RunEvent` 新增 node_retry/node_reused/repair_started/repair_delta/repair_completed/repair_failed；`RunNodeState.retry/reusedFrom`；`foldRunEvent` 补 `default: return state`；`NodeDef.maxRetries`（validateGraph 0-3 整数 + 门控排除清单）；run-store 认 repair_started 开头的 run（E10）。
+    - web：运行视图「↻ 重跑失败部分」、错误节点「AI 修复并重跑」（orch-store 防重守卫 + WS rerun_failed/repair_node）、节点面板 retry/reusedFrom 行 + maxRetries 数字输入（E11）、画布方标徽章 ↻n/N 与 复用（无 shadow，仿门控标）。
+    - 验证：shared 96 / server 342（新增 orchestrator 32 例、run-manager 10 例、planner 7 例、executor kind 8 例等）；对抗校验修正 12 项（E1-E12：播种两阶段、kind 标注、drive 单循环防双 inflight、retryDelays abort、材料先于 nextRunId、overrides 不播种、repair 通道复用、无代码默认值等）。
 
 
 ## 风险与对策

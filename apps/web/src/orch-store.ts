@@ -9,6 +9,7 @@
 import { create } from "zustand";
 import {
 	EDGE_TYPES,
+	MAX_NODE_RETRIES,
 	TEMPLATES,
 	edgeId,
 	emptyNodeMap,
@@ -41,6 +42,13 @@ let lastPlanSentAt = 0;
  * server (节点不在等待人工决策的状态). Guard per run+node. */
 const APPROVE_SEND_GUARD_MS = 1000;
 const lastApproveSentAt = new Map<string, number>();
+/** rerunFailed/repairNode share approveNode's echo gap, only longer — the new
+ *  run materializes when run_started/repair_started streams back (the server
+ *  may await an archive read first), so run.status still reads failed and a
+ *  double-click's second send earns a spurious busy run_error. Guard per
+ *  action key (rerun:<runId> / repair:<runId>:<nodeId>). */
+const RECOVER_SEND_GUARD_MS = 1000;
+const lastRecoverSentAt = new Map<string, number>();
 
 interface OrchState {
 	graphDef: GraphDef;
@@ -90,6 +98,14 @@ interface OrchState {
 	 *  awaiting only — any other state the server would answer with a
 	 *  run_error anyway, and a local no-op saves the round trip. */
 	approveNode: (nodeId: string, approved: boolean, note: string) => void;
+	/** 一键重跑失败部分 (rerun_failed): re-run a TERMINAL run's error/skipped
+	 *  nodes in a fresh run — ok nodes' outputs seed as node_reused and never
+	 *  re-execute. Guarded to failed|aborted runs with a runId. */
+	rerunFailed: () => void;
+	/** AI 修复失败节点 (repair_node): the server's planner rewrites the FAILED
+	 *  node's task (repair_* stream previews it), then re-runs it with every
+	 *  other ok node seeded. Guarded to error nodes of failed|aborted runs. */
+	repairNode: (nodeId: string) => void;
 	/** Auto-orchestrate: send the goal, the server plans then runs (plan_run).
 	 *  opts.chat = on completion the server injects the compiled node outputs
 	 *  into the main session agent (chat-first orchestration). */
@@ -207,6 +223,13 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 			if ("task" in rest) clean.task = rest.task ?? "";
 			if ("model" in rest) clean.model = rest.model?.trim() || undefined;
 			if ("agent" in rest) clean.agent = rest.agent?.trim() || undefined;
+			// Numeric knob: blank/invalid clears (undefined → dropped from JSON,
+			// = server default); 0 stays 0 (explicitly disable retries for this
+			// node), everything clamps into 0…MAX_NODE_RETRIES.
+			if ("maxRetries" in rest) {
+				const n = typeof rest.maxRetries === "number" && Number.isFinite(rest.maxRetries) ? Math.floor(rest.maxRetries) : null;
+				clean.maxRetries = n !== null ? Math.min(MAX_NODE_RETRIES, Math.max(0, n)) : undefined;
+			}
 			if ("position" in rest && rest.position) clean.position = rest.position;
 			const nodes = s.graphDef.nodes.map((n) => (n.id === id ? { ...n, ...clean } : n));
 			return graphState({ ...s.graphDef, nodes });
@@ -340,6 +363,44 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		useOrchStore.setState({ orchError: { message: "决策未发送（连接已断开）——请重试", issues: [] } });
 	},
 
+	rerunFailed: () => {
+		const s = get();
+		const runId = s.run.runId;
+		if (runId == null) return;
+		if (s.run.status !== "failed" && s.run.status !== "aborted") return;
+		// No materialized graph (plan_failed / repair_failed / aborted during
+		// planning) → the server has no run_started to source seeds from; the
+		// button doesn't render in those states, this is defense in depth.
+		if (!s.run.graph) return;
+		const guardKey = `rerun:${runId}`;
+		if (Date.now() - (lastRecoverSentAt.get(guardKey) ?? 0) < RECOVER_SEND_GUARD_MS) return;
+		if (sendWs({ type: "rerun_failed", runId })) {
+			// Guard only after the message actually left the browser (same
+			// disconnect-window rule as approveNode).
+			lastRecoverSentAt.set(guardKey, Date.now());
+			return;
+		}
+		useOrchStore.setState({ orchError: { message: "发送失败（连接已断开）——请重试", issues: [] } });
+	},
+
+	repairNode: (nodeId) => {
+		const s = get();
+		const runId = s.run.runId;
+		if (runId == null) return;
+		if (s.run.status !== "failed" && s.run.status !== "aborted") return;
+		// Gate nodes can't be repaired (human decisions are not rewritable) —
+		// their "error" state is a rejection; the local no-op saves the round
+		// trip the server would answer with a run_error.
+		if (s.run.nodes[nodeId]?.status !== "error") return;
+		const guardKey = `repair:${runId}:${nodeId}`;
+		if (Date.now() - (lastRecoverSentAt.get(guardKey) ?? 0) < RECOVER_SEND_GUARD_MS) return;
+		if (sendWs({ type: "repair_node", runId, nodeId })) {
+			lastRecoverSentAt.set(guardKey, Date.now());
+			return;
+		}
+		useOrchStore.setState({ orchError: { message: "发送失败（连接已断开）——请重试", issues: [] } });
+	},
+
 	planRun: (goal, opts) => {
 		const s = get();
 		if (s.run.status === "running" || s.run.status === "planning") return;
@@ -411,8 +472,10 @@ export function applyRunEvent(event: RunEvent): void {
 		// An auto-orchestrated run takes over the canvas: the generated graph
 		// only exists in the run state, not in the editor — and the editor's
 		// selections reference that graph, so they must not leak into the run
-		// view's panel (ids can coincide).
-		if (event.type === "plan_started") {
+		// view's panel (ids can coincide). repair_started too: the rewrite
+		// previews in the plan channel and the re-execution that follows
+		// belongs to the run view.
+		if (event.type === "plan_started" || event.type === "repair_started") {
 			return { run: next, view: "run" as const, selectedNodeId: null, selectedEdgeId: null };
 		}
 		return { run: next, view: s.view };

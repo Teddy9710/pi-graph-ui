@@ -72,6 +72,22 @@
 	background: var(--pg-bg-well);
 }
 
+/* recovery badges (↻n/N auto-retry in flight, 复用 carried-over output): the
+ * gate mark's printed 方标 conventions — mono, chart ink on the ink well, NO
+ * shadow (React Flow mirror nodes must stay visually flat). Trails the status
+ * dot; flex:none keeps 「↻2/3」 from being squeezed by a long title. */
+.pg-orch-badge {
+	font-family: var(--pg-mono);
+	font-size: 9.5px;
+	padding: 2px 3px;
+	color: var(--pg-fg-dim);
+	border: 1px solid rgb(146 167 161 / 0.35);
+	border-radius: 3px;
+	background: var(--pg-bg-well);
+	white-space: nowrap;
+	flex: none;
+}
+
 /* failed stations carry the ✗ glyph IN the head row — hue is never the sole
  * carrier of state (color-blind eyes read the mark, not the red) */
 .pg-node.pg-status-error .pg-node-head::after {

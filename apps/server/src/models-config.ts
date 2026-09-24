@@ -37,6 +37,8 @@ import {
 	type RpcResponse,
 } from "@pi-graph/shared";
 import { builtinModelExists, loadBuiltinCatalog, toBuiltinProviderInfos } from "./builtin-providers.ts";
+import { atomicWriteFile } from "./infra/atomic-write.ts";
+import { isPlainObject } from "./infra/predicates.ts";
 
 // ============================================================================
 // 路径与 env 文件工具
@@ -109,15 +111,9 @@ export function mergeEnvSecrets(envPath: string, secrets: Record<string, string>
 	for (const [name, value] of Object.entries(secrets)) {
 		if (!seen.has(name)) rewritten.push(`${name}=${value}`);
 	}
-	atomicWrite(envPath, rewritten.length ? rewritten.join("\n") + "\n" : "");
+	atomicWriteFile(envPath, rewritten.length ? rewritten.join("\n") + "\n" : "");
 	for (const [name, value] of Object.entries(secrets)) process.env[name] = value;
 	return managed;
-}
-
-function atomicWrite(path: string, content: string): void {
-	const tmp = `${path}.tmp`;
-	writeFileSync(tmp, content, "utf8");
-	renameSync(tmp, path);
 }
 
 // ============================================================================
@@ -177,10 +173,6 @@ function builtinConflictMessage(builtin: BuiltinCatalogProvider, fields: string[
 /** provider id → 密钥环境变量名（deepseek → DEEPSEEK_API_KEY）。 */
 export function toEnvVarName(providerId: string): string {
 	return `${providerId.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}_API_KEY`;
-}
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-	return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 interface ValidatedProvider {
@@ -438,7 +430,7 @@ export function writePersistedDefault(
 	merged.defaultProvider = provider;
 	merged.defaultModel = modelId;
 	try {
-		atomicWrite(path, `${JSON.stringify(merged, null, "\t")}\n`);
+		atomicWriteFile(path, `${JSON.stringify(merged, null, "\t")}\n`);
 		return { ok: true };
 	} catch (err) {
 		return { ok: false, error: `settings.json 写入失败: ${(err as Error).message}` };
@@ -712,7 +704,7 @@ export class ModelsConfigService {
 		}
 		const next = { ...(file.parsed ?? {}), providers: validated };
 		try {
-			atomicWrite(this.modelsPath, `${JSON.stringify(next, null, "\t")}\n`);
+			atomicWriteFile(this.modelsPath, `${JSON.stringify(next, null, "\t")}\n`);
 		} catch (err) {
 			return { status: 500, body: { error: `models.json 写入失败（密钥已写入 .env，可直接重试保存）: ${(err as Error).message}` } };
 		}
@@ -744,7 +736,7 @@ export class ModelsConfigService {
 			if (!isPlainObject(parsed)) return;
 			delete parsed.defaultProvider;
 			delete parsed.defaultModel;
-			atomicWrite(path, `${JSON.stringify(parsed, null, "\t")}\n`);
+			atomicWriteFile(path, `${JSON.stringify(parsed, null, "\t")}\n`);
 		} catch {
 			// 清不掉就留给下次（apply 写入新默认时会重写这两个键）
 		}

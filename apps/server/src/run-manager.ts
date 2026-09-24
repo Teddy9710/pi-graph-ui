@@ -6,6 +6,13 @@
  *  - startPlanned(goal): a planner instance first decomposes the goal into a
  *    graph (plan_* events, same runId), then the engine takes over seamlessly.
  *
+ * Two RECOVERY paths reuse a finished run's outputs in a fresh run:
+ *  - rerunFailed(fromRunId): ok nodes are seeded as precompleted (node_reused,
+ *    never re-executed); error/skipped nodes re-run;
+ *  - startRepair(fromRunId, nodeId): the planner rewrites a FAILED node's task
+ *    with the error + upstream outputs as context (repair_* events, same
+ *    mirror as plan_*), then the engine takes over with the other seeds.
+ *
  * Bridges events out to WebSocket subscribers and the RunStore archive.
  * node_delta and plan_delta events are coalesced on a 150ms window — buffers
  * CONCATENATE (never latest-wins) so client previews stay faithful tails.
@@ -13,7 +20,9 @@
  * delta-before-completion ordering.
  *
  * Retention: events of the last run stay in memory until the next run starts,
- * so a browser refresh reconnects and replays them from hello.
+ * so a browser refresh reconnects and replays them from hello. This is also
+ * why recovery collects ALL its source materials BEFORE minting a new runId —
+ * nextRunId() clears retention.
  */
 
 import {
@@ -24,8 +33,9 @@ import {
 	type OrchResultNode,
 	type RunEvent,
 } from "@pi-graph/shared";
+import { setTimeoutUnref, type UnrefableTimeout } from "./infra/timer-unref.ts";
 import { OrchestratorEngine, type Executor } from "./orchestrator.ts";
-import { MAX_GOAL_CHARS, type PlanOutcome } from "./planner.ts";
+import { MAX_GOAL_CHARS, type PlanOutcome, type RepairOutcome, type RepairRequest } from "./planner.ts";
 import { RunStore } from "./run-store.ts";
 
 export type StartResult = { ok: true; runId: string } | { ok: false; error: string; issues?: GraphValidationIssue[] };
@@ -62,6 +72,8 @@ export interface ChatRunResult {
 /** The planner seam RunManager drives (PiPlanner in production, fakes in tests). */
 export interface Planner {
 	plan(goal: string, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<PlanOutcome>;
+	/** AI-repair seam — optional so existing fakes / old planners still satisfy the interface. */
+	rewriteTask?(req: RepairRequest, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<RepairOutcome>;
 }
 
 export interface RunManagerOptions {
@@ -77,6 +89,15 @@ export interface RunManagerOptions {
 	 *  (main.ts injects the compiled results into the session agent).
 	 *  Failed/aborted runs and planner failures never fire it. */
 	onChatRunComplete?: (result: ChatRunResult) => void;
+	/**
+	 * Engine-level auto-retry budget forwarded to every engine (a node's own
+	 * maxRetries still overrides). Deliberately NO code default — the product
+	 * default (ORCH_NODE_MAX_RETRIES) is applied by main.ts; undefined = 0
+	 * retries, keeping bare-manager callers (tests) at the pre-retry behavior.
+	 */
+	maxRetries?: number;
+	/** Delay between engine retry attempts (ms), forwarded like maxRetries. */
+	retryDelayMs?: number;
 }
 
 export class RunManager {
@@ -87,6 +108,8 @@ export class RunManager {
 	private readonly deltaIntervalMs: number;
 	private readonly now: () => number;
 	private readonly onChatRunComplete: ((result: ChatRunResult) => void) | undefined;
+	private readonly maxRetries: number | undefined;
+	private readonly retryDelayMs: number | undefined;
 
 	private engine: OrchestratorEngine | null = null;
 	private planning = false;
@@ -97,9 +120,9 @@ export class RunManager {
 	/** nodeId → buffered delta text, WITH the runId it arrived under (a
 	 *  post-settle tail must never be re-stamped with the next run's id). */
 	private readonly deltaBuffers = new Map<string, { runId: string; text: string }>();
-	private readonly deltaTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	private planBuffer: { runId: string; text: string } | null = null;
-	private planTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly deltaTimers = new Map<string, UnrefableTimeout>();
+	private planBuffer: { runId: string; text: string; kind: "plan_delta" | "repair_delta" } | null = null;
+	private planTimer: UnrefableTimeout | null = null;
 	private runSeq = 0;
 
 	constructor(options: RunManagerOptions) {
@@ -110,6 +133,8 @@ export class RunManager {
 		this.deltaIntervalMs = options.deltaIntervalMs ?? 150;
 		this.now = options.now ?? Date.now;
 		this.onChatRunComplete = options.onChatRunComplete;
+		this.maxRetries = options.maxRetries;
+		this.retryDelayMs = options.retryDelayMs;
 	}
 
 	get active(): boolean {
@@ -157,7 +182,7 @@ export class RunManager {
 		let planned: Promise<PlanOutcome>;
 		try {
 			planned = planner.plan(trimmed, {
-				onDelta: (delta) => this.retainPlanDelta(runId, delta),
+				onDelta: (delta) => this.retainPlanDelta(runId, delta, "plan_delta"),
 				signal: abort.signal,
 			});
 		} catch (err) {
@@ -174,7 +199,7 @@ export class RunManager {
 				if (outcome.ok && validateGraph(outcome.graph).length === 0) {
 					this.publish({ type: "plan_completed", runId, graph: outcome.graph });
 					this.clearPlanning();
-					this.launchEngine(outcome.graph, runId, opts?.chat ? { goal: trimmed } : undefined); // run_started continues the same run
+					this.launchEngine(outcome.graph, runId, opts?.chat ? { chat: { goal: trimmed } } : undefined); // run_started continues the same run
 					return;
 				}
 				const error = outcome.ok ? "规划器返回了无效的图" : outcome.error;
@@ -231,6 +256,143 @@ export class RunManager {
 		return this.engine.decideNode(nodeId, approved, note);
 	}
 
+	/**
+	 * 一键重跑失败部分: rerun a TERMINAL run's error/skipped nodes in a fresh
+	 * run, seeding every ok node's output as precompleted (node_reused — the
+	 * executor never sees them). Source materials come from retention (the
+	 * last run) or the RunStore archive (older runs / after a restart).
+	 */
+	async rerunFailed(fromRunId: string): Promise<StartResult> {
+		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
+		const sourced = await this.sourceEvents(fromRunId);
+		if (!sourced) return { ok: false, error: `找不到运行 ${fromRunId} 的记录` };
+		const { events } = sourced;
+		const runStarted = this.findRunStarted(events, fromRunId);
+		if (!runStarted) return { ok: false, error: "该运行没有图记录，无法重跑" };
+		if (!events.some((e) => e.type === "run_finished" && e.runId === fromRunId)) {
+			return { ok: false, error: "该运行尚未结束，不能重跑" };
+		}
+		// Deep-copy: the archived graph must never be mutated (retention replays
+		// it to refreshers; the archive file keeps the original).
+		const graph = structuredClone(runStarted.graph);
+		const seeds = this.collectSeeds(fromRunId, events, graph);
+		const issues = validateGraph(graph);
+		if (issues.length > 0) return { ok: false, error: "图校验未通过", issues };
+		// The disk read awaited above is a gap — re-check before committing.
+		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
+		const runId = this.nextRunId();
+		this.launchEngine(graph, runId, { precompleted: seeds });
+		return { ok: true, runId };
+	}
+
+	/**
+	 * AI 修复失败节点: the planner rewrites the FAILED node's task (error +
+	 * upstream outputs as context), then the engine re-runs it under the SAME
+	 * runId with every other ok node seeded — repair_started → repair_delta* →
+	 * repair_completed → run_started, mirroring startPlanned. ALL source
+	 * materials are collected BEFORE nextRunId() (which clears retention).
+	 */
+	async startRepair(fromRunId: string, nodeId: string): Promise<StartResult> {
+		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
+		const rewrite = this.planner?.rewriteTask?.bind(this.planner);
+		if (!rewrite) return { ok: false, error: "服务器未配置修复器" };
+		// --- collect everything the repair needs from the SOURCE run ---
+		const sourced = await this.sourceEvents(fromRunId);
+		if (!sourced) return { ok: false, error: `找不到运行 ${fromRunId} 的记录` };
+		const { events } = sourced;
+		const runStarted = this.findRunStarted(events, fromRunId);
+		if (!runStarted) return { ok: false, error: "该运行没有图记录，无法修复" };
+		const target = runStarted.graph.nodes.find((n) => n.id === nodeId);
+		if (!target) return { ok: false, error: `节点 ${nodeId} 不在该运行中` };
+		// A gate node's output is a HUMAN decision — no rewrite may stand in
+		// for one; the gate is re-decided by rerunFailed instead.
+		if (target.gate === true) return { ok: false, error: "门控节点不支持 AI 修复（人工决策不可改写）" };
+		const failedEv = events.find(
+			(e): e is Extract<RunEvent, { type: "node_failed" }> => e.type === "node_failed" && e.runId === fromRunId && e.nodeId === nodeId,
+		);
+		if (!failedEv) return { ok: false, error: `节点 ${nodeId} 在该运行中没有失败记录` };
+		const graph = structuredClone(runStarted.graph);
+		// Upstream material in graph edge order (same order assemblePrompt
+		// injects on re-execution).
+		const outputs = this.outputById(fromRunId, events);
+		const upstream = graph.edges
+			.filter((e) => e.target === nodeId)
+			.map((e) => ({ nodeId: e.source, text: outputs.get(e.source) ?? "" }));
+		const req: RepairRequest = {
+			nodeId,
+			task: target.task,
+			error: failedEv.error,
+			upstream,
+			...(target.model !== undefined ? { model: target.model } : {}),
+			...(target.tools !== undefined ? { tools: target.tools } : {}),
+		};
+		// Seeds exclude the target itself (E7: its old output is invalidated by
+		// the rewrite) — collected now, before retention is cleared.
+		const seeds = this.collectSeeds(fromRunId, events, graph, new Set([nodeId]));
+		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
+
+		// --- materials secured; mint the run id and drive the rewriter ---
+		const runId = this.nextRunId();
+		this.planning = true;
+		const abort = new AbortController();
+		this.plannerAbort = abort;
+		this.publish({ type: "repair_started", runId, fromRunId, nodeId, startedAt: this.now() });
+
+		let rewritten: Promise<RepairOutcome>;
+		try {
+			rewritten = rewrite(req, {
+				onDelta: (delta) => this.retainPlanDelta(runId, delta, "repair_delta"),
+				signal: abort.signal,
+			});
+		} catch (err) {
+			// rewriteTask runs synchronously up to its first await; a seam that
+			// throws synchronously must not wedge planning=true.
+			console.error("[run-manager] rewriter threw synchronously:", err);
+			this.finishRepair(runId, `修复器异常: ${(err as Error).message}`);
+			return { ok: true, runId };
+		}
+		rewritten
+			.then((outcome) => {
+				// Aborted (or superseded): the terminal event already told the
+				// story; late rewriter output must not touch the next run.
+				if (!this.planning) return;
+				this.flushPlanDelta();
+				if (!outcome.ok) {
+					this.finishRepair(runId, outcome.error);
+					return;
+				}
+				// Apply the override: task ALWAYS replaced; model/tools replaced
+				// when proposed, DELETED when omitted (the rewrite is
+				// authoritative for this node — carrying the old config into a
+				// fixed task re-introduces what was being repaired).
+				const t = graph.nodes.find((n) => n.id === nodeId)!;
+				t.task = outcome.task;
+				if (outcome.model !== undefined) t.model = outcome.model;
+				else delete t.model;
+				if (outcome.tools !== undefined) t.tools = [...outcome.tools];
+				else delete t.tools;
+				const issues = validateGraph(graph);
+				if (issues.length > 0) {
+					this.finishRepair(runId, `修复后的图未通过校验：${issues[0]!.message}`);
+					return;
+				}
+				this.publish({
+					type: "repair_completed",
+					runId,
+					task: outcome.task,
+					...(outcome.model !== undefined ? { model: outcome.model } : {}),
+					...(outcome.tools !== undefined ? { tools: [...outcome.tools] } : {}),
+				});
+				this.clearPlanning();
+				this.launchEngine(graph, runId, { precompleted: seeds }); // run_started continues the same run
+			})
+			.catch((err: Error) => {
+				console.error("[run-manager] rewriter crashed:", err);
+				if (this.planning) this.finishRepair(runId, `修复器异常: ${err.message}`);
+			});
+		return { ok: true, runId };
+	}
+
 	retainedEvents(): RunEvent[] {
 		return [...this.retained];
 	}
@@ -250,14 +412,22 @@ export class RunManager {
 		return runId;
 	}
 
-	/** Build + run the engine for a validated graph (shared by both paths).
-	 *  `chat` requests the chat-complete hook for planned chat-first runs. */
-	private launchEngine(graph: GraphDef, runId: string, chat?: { goal: string }): void {
+	/** Build + run the engine for a validated graph (shared by all paths).
+	 *  `chat` requests the chat-complete hook for planned chat-first runs;
+	 *  `precompleted` seeds ok-node outputs from a previous run. */
+	private launchEngine(
+		graph: GraphDef,
+		runId: string,
+		opts?: { chat?: { goal: string }; precompleted?: ReadonlyMap<string, { text: string; fromRunId: string }> },
+	): void {
 		const engine = new OrchestratorEngine(graph, this.executor, {
 			runId,
 			maxParallel: this.maxParallel,
 			now: this.now,
 			onEvent: (event) => this.retain(event),
+			defaultMaxRetries: this.maxRetries,
+			retryDelayMs: this.retryDelayMs,
+			precompleted: opts?.precompleted,
 		});
 		this.engine = engine;
 		void engine
@@ -267,7 +437,7 @@ export class RunManager {
 				// INSIDE run() (clients flip the card to 完成 before injection
 				// begins), and .finally below runs AFTER this .then — engine
 				// bookkeeping is still set, so the runId can never be stale.
-				if (chat && summary.status === "completed") this.fireChatComplete(runId, chat.goal);
+				if (opts?.chat && summary.status === "completed") this.fireChatComplete(runId, opts.chat.goal);
 			})
 			.catch((err: Error) => {
 				// The engine validates defensively; reaching here means a bug.
@@ -358,13 +528,90 @@ export class RunManager {
 		this.currentRunId = null;
 	}
 
-	private retainPlanDelta(runId: string, delta: string): void {
+	/** repair_failed + a terminal run_finished (the repair counts as a run). */
+	private finishRepair(runId: string, error: string): void {
+		this.flushPlanDelta();
+		this.publish({ type: "repair_failed", runId, error });
+		this.publish({
+			type: "run_finished",
+			runId,
+			finishedAt: this.now(),
+			status: "failed",
+			ok: 0,
+			failed: 0,
+			skipped: 0,
+			usage: zeroNodeUsage(),
+		});
+		this.clearPlanning();
+		this.currentRunId = null;
+	}
+
+	/**
+	 * A finished run's events: retention first (the last run, in memory), the
+	 * RunStore archive second (older runs / after a restart). Null when the id
+	 * is unknown to both.
+	 */
+	private async sourceEvents(fromRunId: string): Promise<{ events: RunEvent[] } | null> {
+		if (this.retained.some((e) => e.runId === fromRunId)) return { events: [...this.retained] };
+		if (!this.store) return null;
+		const archived = await this.store.read(fromRunId);
+		return archived.length > 0 ? { events: archived } : null;
+	}
+
+	private findRunStarted(events: readonly RunEvent[], runId: string): Extract<RunEvent, { type: "run_started" }> | null {
+		return (
+			events.find((e): e is Extract<RunEvent, { type: "run_started" }> => e.type === "run_started" && e.runId === runId) ??
+			null
+		);
+	}
+
+	/** Final output per node id for one run: completions, approved gate notes, reused seeds (in event order — later wins). */
+	private outputById(runId: string, events: readonly RunEvent[]): Map<string, string> {
+		const outputs = new Map<string, string>();
+		for (const e of events) {
+			if (e.runId !== runId) continue;
+			if (e.type === "node_completed") outputs.set(e.nodeId, e.output.text);
+			else if (e.type === "node_decided" && e.approved) outputs.set(e.nodeId, e.note.trim() || "（已批准）");
+			else if (e.type === "node_reused") outputs.set(e.nodeId, e.output.text);
+		}
+		return outputs;
+	}
+
+	/**
+	 * Seeds for a resume: every ok node's final output, keyed by node id.
+	 * Ids absent from THIS graph are ignored (the archive may disagree with
+	 * memory); nodes hit by `overrides` NEVER seed — their old output may be
+	 * invalidated by what is about to change (E7).
+	 */
+	private collectSeeds(
+		fromRunId: string,
+		events: readonly RunEvent[],
+		graph: GraphDef,
+		overrides?: ReadonlySet<string>,
+	): Map<string, { text: string; fromRunId: string }> {
+		const outputs = this.outputById(fromRunId, events);
+		const known = new Set(graph.nodes.map((n) => n.id));
+		const seeds = new Map<string, { text: string; fromRunId: string }>();
+		// node_reused seeds keep their ORIGINAL origin run (复用自 … stays
+		// truthful across reruns of reruns).
+		const originById = new Map<string, string>();
+		for (const e of events) {
+			if (e.type === "node_reused" && e.runId === fromRunId) originById.set(e.nodeId, e.fromRunId);
+		}
+		for (const [id, text] of outputs) {
+			if (!known.has(id) || overrides?.has(id)) continue;
+			seeds.set(id, { text, fromRunId: originById.get(id) ?? fromRunId });
+		}
+		return seeds;
+	}
+
+	private retainPlanDelta(runId: string, delta: string, kind: "plan_delta" | "repair_delta"): void {
 		const prev = this.planBuffer;
-		this.planBuffer = { runId: prev?.runId ?? runId, text: (prev?.text ?? "") + delta };
+		// The buffer keeps its ORIGINAL runId + kind (a post-settle tail must
+		// never be re-stamped with the next run's identity or wrong channel).
+		this.planBuffer = { runId: prev?.runId ?? runId, kind: prev?.kind ?? kind, text: (prev?.text ?? "") + delta };
 		if (!this.planTimer) {
-			this.planTimer = setTimeout(() => this.flushPlanDelta(), this.deltaIntervalMs);
-			// Never keep the process alive just for a coalescing flush.
-			(this.planTimer as { unref?: () => void }).unref?.();
+			this.planTimer = setTimeoutUnref(() => this.flushPlanDelta(), this.deltaIntervalMs);
 		}
 	}
 
@@ -376,7 +623,11 @@ export class RunManager {
 		const buffer = this.planBuffer;
 		if (!buffer) return;
 		this.planBuffer = null;
-		this.publish({ type: "plan_delta", runId: buffer.runId, delta: buffer.text });
+		// plan_delta (planner drafting a graph) and repair_delta (planner
+		// rewriting a failed node's task) share one coalescing buffer; the
+		// kind decides which channel the flush emits on.
+		if (buffer.kind === "plan_delta") this.publish({ type: "plan_delta", runId: buffer.runId, delta: buffer.text });
+		else this.publish({ type: "repair_delta", runId: buffer.runId, delta: buffer.text });
 	}
 
 	private retain(event: RunEvent): void {
@@ -388,16 +639,20 @@ export class RunManager {
 				text: (prev?.text ?? "") + event.delta,
 			});
 			if (!this.deltaTimers.has(event.nodeId)) {
-				const timer = setTimeout(() => this.flushNode(event.nodeId), this.deltaIntervalMs);
-				// Never keep the process alive just for a coalescing flush.
-				(timer as { unref?: () => void }).unref?.();
+				const timer = setTimeoutUnref(() => this.flushNode(event.nodeId), this.deltaIntervalMs);
 				this.deltaTimers.set(event.nodeId, timer);
 			}
 			return;
 		}
 		// Structure events flush pending deltas first so clients observe
-		// deltas strictly before the node's terminal event.
-		if (event.type === "node_completed" || event.type === "node_failed" || event.type === "node_skipped") {
+		// deltas strictly before the node's terminal event. node_retry joins
+		// the list: attempt-1's buffered tail must land before the retry notice.
+		if (
+			event.type === "node_completed" ||
+			event.type === "node_failed" ||
+			event.type === "node_skipped" ||
+			event.type === "node_retry"
+		) {
 			this.flushNode(event.nodeId);
 		} else if (event.type === "run_finished") {
 			this.flushAllDeltas();

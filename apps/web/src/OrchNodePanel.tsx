@@ -11,6 +11,7 @@ import {
 	EDGE_TYPES,
 	EDGE_TYPE_LABELS,
 	MAX_EDGE_NOTE_CHARS,
+	MAX_NODE_RETRIES,
 	type EdgeDef,
 	type EdgeType,
 } from "@pi-graph/shared";
@@ -160,6 +161,7 @@ export function OrchNodePanel() {
 	const updateNode = useOrchStore((s) => s.updateNode);
 	const deleteNode = useOrchStore((s) => s.deleteNode);
 	const approveNode = useOrchStore((s) => s.approveNode);
+	const repairNode = useOrchStore((s) => s.repairNode);
 	const agents = useAgentNames();
 	const runNode = selectedNodeId ? (run.nodes[selectedNodeId] ?? null) : null;
 	// The note belongs to ONE gate decision — switching nodes, a settled
@@ -258,6 +260,22 @@ export function OrchNodePanel() {
 							))}
 						</datalist>
 					</div>
+					<div className="pg-form-row">
+						<label htmlFor="pg-node-retries">失败自动重试（0-{MAX_NODE_RETRIES}，留空 = 服务器默认；仅超时/进程/模型类失败）</label>
+						<input
+							id="pg-node-retries"
+							className="pg-form-input"
+							type="number"
+							min={0}
+							max={MAX_NODE_RETRIES}
+							value={node.maxRetries ?? ""}
+							disabled={!editable}
+							onChange={(e) => {
+								const v = e.target.value;
+								updateNode(node.id, { maxRetries: v === "" ? undefined : Number(v) });
+							}}
+						/>
+					</div>
 				</>
 			)}
 			{gate && (
@@ -316,6 +334,15 @@ export function OrchNodePanel() {
 						{runNode.model ? ` · ${runNode.model}` : ""}
 						{runNode.stopReason ? ` · ${runNode.stopReason}` : ""}
 					</div>
+					{/* Live auto-retry status: an intermediate attempt failed but the
+					 * node re-executes (a retry that succeeds never failed). */}
+					{runNode.retry && (
+						<div className="pg-meta" title={runNode.retry.lastError}>
+							↻ 自动重试 {runNode.retry.attempt}/{runNode.retry.maxAttempts}
+							{runNode.retry.lastError ? ` · 上次错误：${runNode.retry.lastError.slice(0, 200)}` : ""}
+						</div>
+					)}
+					{runNode.reusedFrom && <div className="pg-dim">复用自 {runNode.reusedFrom}（本次未重新执行）</div>}
 					{runNode.assembledPrompt != null && (
 						<details>
 							<summary>assembledPrompt（{runNode.assembledPrompt.length} 字符）</summary>
@@ -335,6 +362,18 @@ export function OrchNodePanel() {
 						</div>
 					)}
 					{runNode.error && <pre className="pg-pre pg-error-text">{runNode.error}</pre>}
+					{/* AI 修复: only a FAILED node of a TERMINAL run qualifies (the
+					 * store guard double-checks); gates are excluded — a rejection is
+					 * a human decision, not something the planner may rewrite. */}
+					{runNode.status === "error" && !gate && (run.status === "failed" || run.status === "aborted") && (
+						<button
+							className="pg-btn pg-btn-sm"
+							title="AI 结合失败原因与上游输出重写该节点的任务（可调整模型/工具），复用其余节点输出后重跑"
+							onClick={() => repairNode(node.id)}
+						>
+							AI 修复并重跑
+						</button>
+					)}
 					{runNode.status === "skipped" && runNode.skipReason && (
 						<div className="pg-dim">跳过：{runNode.skipReason}</div>
 					)}

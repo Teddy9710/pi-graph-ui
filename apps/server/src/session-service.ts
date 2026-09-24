@@ -28,11 +28,9 @@ import {
 	type RpcResponse,
 	type SessionState,
 } from "@pi-graph/shared";
+import { isSessionId } from "./infra/id-regex.ts";
 import type { EventHub } from "./event-hub.ts";
 import type { SessionStore } from "./session-store.ts";
-
-/** Mirror of the archive-id allowlist (SessionStore.read). */
-const ID_RE = /^[0-9TZ-]+$/;
 
 export interface BridgeLike {
 	request(command: RpcCommand): Promise<RpcResponse>;
@@ -171,7 +169,7 @@ export class SessionService {
 	/** 恢复历史会话: RPC switch_session + archive-driven rebuild. */
 	async switchTo(ws: WsLike | undefined, id: string): Promise<void> {
 		const fail = (message: string) => this.deps.replyError(ws, message);
-		if (typeof id !== "string" || !ID_RE.test(id)) return fail("会话 id 非法");
+		if (typeof id !== "string" || !isSessionId(id)) return fail("会话 id 非法");
 		if (this.switching) return fail("会话切换进行中，请稍候");
 		if (id === this.deps.store.currentId) return fail("该会话已是当前会话");
 		if (this.deps.isRunBusy()) return fail("编排运行中，不能切换会话（可先中止编排）");
@@ -251,7 +249,7 @@ export class SessionService {
 	/** Delete an archive (+ index entry + pi session file). Returns the HTTP
 	 *  status; the caller maps non-204 to a JSON error body. */
 	removeSession(id: string): { status: 204 | 400 | 404 | 409; message?: string } {
-		if (typeof id !== "string" || !ID_RE.test(id)) return { status: 400, message: "会话 id 非法" };
+		if (typeof id !== "string" || !isSessionId(id)) return { status: 400, message: "会话 id 非法" };
 		if (id === this.deps.store.currentId) return { status: 409, message: "不能删除当前活跃会话（先切换到别的会话或新建）" };
 		const entry = this.deps.store.getEntry(id);
 		const archiveExists = existsSync(join(this.deps.store.dir, `${id}.jsonl`));

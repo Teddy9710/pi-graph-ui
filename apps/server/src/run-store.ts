@@ -13,6 +13,7 @@ import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RunEvent } from "@pi-graph/shared";
+import { isRunId } from "./infra/id-regex.ts";
 
 export interface RunMeta {
 	id: string;
@@ -41,9 +42,10 @@ export class RunStore {
 	append(event: RunEvent): void {
 		// A new run retries archival — write failures are often transient
 		// (AV lock, dir recreated); without this, one error silences the
-		// archive for the whole process lifetime. plan_started counts too:
-		// a plan that fails before any node ran is still a run.
-		if (event.type === "run_started" || event.type === "plan_started") this.disabled = false;
+		// archive for the whole process lifetime. plan_started/repair_started
+		// count too: a plan or repair that fails before any node ran is still
+		// a run.
+		if (event.type === "run_started" || event.type === "plan_started" || event.type === "repair_started") this.disabled = false;
 		if (this.disabled) return;
 		try {
 			appendFileSync(this.fileFor(event.runId), JSON.stringify(event) + "\n");
@@ -58,7 +60,7 @@ export class RunStore {
 		const file = this.fileFor(id);
 		// Strict id allowlist keeps read() inside dir. runIds look like
 		// orch-mx1y2z3-1 ([a-z0-9-], no path separators).
-		if (!/^[A-Za-z0-9-]+$/.test(id) || !existsSync(file)) return [];
+		if (!isRunId(id) || !existsSync(file)) return [];
 		const events: RunEvent[] = [];
 		const rl = createInterface({ input: createReadStream(file, "utf8") });
 		for await (const line of rl) {
@@ -78,13 +80,14 @@ export class RunStore {
 		for (const name of readdirSync(this.dir)) {
 			if (!name.endsWith(".jsonl")) continue;
 			const id = name.slice(0, -".jsonl".length);
-			if (!/^[A-Za-z0-9-]+$/.test(id)) continue;
+			if (!isRunId(id)) continue;
 			const events = await this.read(id);
-			// A run begins with run_started (manual) or plan_started (auto) —
-			// a plan that failed before any node ran is still a listed run.
+			// A run begins with run_started (manual), plan_started (auto), or
+			// repair_started (AI repair) — a plan or repair that failed before
+			// any node ran is still a listed run.
 			const started = events.find(
-				(e): e is Extract<RunEvent, { type: "run_started" }> | Extract<RunEvent, { type: "plan_started" }> =>
-					e.type === "run_started" || e.type === "plan_started",
+				(e): e is Extract<RunEvent, { type: "run_started" }> | Extract<RunEvent, { type: "plan_started" }> | Extract<RunEvent, { type: "repair_started" }> =>
+					e.type === "run_started" || e.type === "plan_started" || e.type === "repair_started",
 			);
 			if (!started) continue; // empty header-only file
 			let finished: Extract<RunEvent, { type: "run_finished" }> | null = null;

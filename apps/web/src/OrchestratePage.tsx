@@ -6,7 +6,11 @@
  *  - run bar: the manual editor controls (template picker, auto-arrange, add
  *    node, run/abort, run summary chips, issue badge, error lines).
  * The canvas below switches between the editable graphDef (editor view) and
- * the read-only generated run graph (run view).
+ * the read-only generated run graph (run view). A failed/aborted run grows
+ * recovery affordances: ↻ 重跑失败部分 (ok outputs seed as 复用, the failed
+ * remainder re-executes) and, per error node, AI 修复并重跑 (the planner
+ * rewrites the task — previewed in the plan channel while the ⚡ button reads
+ * AI 修复中).
  */
 
 import { useEffect, useState } from "react";
@@ -35,6 +39,7 @@ function PlanBar() {
 	const planRun = useOrchStore((s) => s.planRun);
 	const setView = useOrchStore((s) => s.setView);
 	const importGraphFromRun = useOrchStore((s) => s.importGraphFromRun);
+	const rerunFailed = useOrchStore((s) => s.rerunFailed);
 	const abortRun = useOrchStore((s) => s.abortRun);
 	const [goal, setGoal] = useState("");
 
@@ -65,7 +70,7 @@ function PlanBar() {
 				title="规划器把目标拆成任务 DAG 并立即执行"
 				onClick={() => planRun(trimmed)}
 			>
-				{planning ? "规划中…" : "⚡ 自动编排"}
+				{planning ? (run.repairTarget ? "AI 修复中…" : "规划中…") : "⚡ 自动编排"}
 			</button>
 			{planning && (
 				<button className="pg-btn pg-btn-danger pg-btn-sm" onClick={abortRun}>
@@ -95,6 +100,20 @@ function PlanBar() {
 							转入编辑器
 						</button>
 					</span>
+					{/* 一键重跑失败部分: only a TERMINAL failed/aborted run WITH a
+					 * materialized graph has a rerunnable remainder — plan_failed /
+					 * repair_failed / abort-during-planning leave graph null and the
+					 * server would reject with "没有图记录" (转入编辑器 at :97 uses the
+					 * same predicate; the store guard double-checks). */}
+					{(run.status === "failed" || run.status === "aborted") && run.graph && (
+						<button
+							className="pg-btn pg-btn-sm"
+							title="复用已完成节点的输出，只重跑失败/跳过的部分（产生一次新运行）"
+							onClick={rerunFailed}
+						>
+							↻ 重跑失败部分
+						</button>
+					)}
 				</>
 			)}
 			{planning && planTail && (

@@ -7,14 +7,11 @@
 
 import { readFileSync } from "node:fs";
 import type { BuiltinCatalogFile, BuiltinCatalogProvider, BuiltinProviderInfo } from "@pi-graph/shared";
+import { isPlainObject } from "./infra/predicates.ts";
 
 const EMPTY_CATALOG: BuiltinCatalogFile = { piVersion: "unknown", generatedAt: "", providers: [] };
 
 const AUTH_KINDS = new Set(["env-key", "oauth", "custom"]);
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-	return typeof v === "object" && v !== null && !Array.isArray(v);
-}
 
 /** 单个 provider 条目的结构校验（宽松：允许缺省字段，不接受错型）。 */
 function isValidProvider(v: unknown): v is BuiltinCatalogProvider {

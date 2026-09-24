@@ -117,6 +117,8 @@ pnpm test        # 单测（311 个用例）
 | `ORCH_NODE_TIMEOUT_MS` | 单节点超时 | `600000` |
 | `ORCH_MIN_OUTPUT_CHARS` | 质量门（字符数）：节点输出短于此值视为违规 | `0`（关闭） |
 | `ORCH_NODE_RETRY` | 质量门违规时是否原题重跑一次（两答取长）；`0` 关闭 | 开启 |
+| `ORCH_NODE_MAX_RETRIES` | 失败自动重试次数（仅超时/进程/模型类失败；节点 `maxRetries` 覆盖） | `1`（范围 0–3） |
+| `ORCH_NODE_RETRY_DELAY_MS` | 失败重试前的等待毫秒数（等待期间仍占并行槽位） | `2000` |
 | `ORCH_PLANNER_MODEL` | 规划器模型 | = `ORCH_MODEL` |
 | `ORCH_PLAN_TIMEOUT_MS` | 规划超时 | `180000` |
 | `SNAKE_DEMO` | 置 `0`：摘除贪吃蛇 demo 的全部路由（`/snake`、`/api/snake/*`），根路径只留提示文本。demo 与桥接服务同端口同进程（单二进制开发玩具），暴露面也就挂在最高权限进程上——任何非本机开发的部署都建议置 `0` | 未设置（开启） |
@@ -135,6 +137,7 @@ pnpm test        # 单测（311 个用例）
 | `workdir` | 节点子进程独立工作目录（相对 `PI_CWD` 的安全相对路径；并行节点互不踩文件） | 受 `isSafeWorkdir` 约束 |
 | `tools` | 工具白名单（`--tools`，逗号拼接） | ≤32 个合法工具名 |
 | `excludeTools` | 工具黑名单（`--exclude-tools`） | 同上 |
+| `maxRetries` | 节点级失败自动重试次数，优先于 `ORCH_NODE_MAX_RETRIES`（门控节点不可用） | `0–3` 整数 |
 
 质量门 + salvage 语义（对齐 pi-graph-tool v0.2.3）：
 
@@ -143,6 +146,14 @@ pnpm test        # 单测（311 个用例）
 - **重跑与首次共享同一份墙钟预算**：重跑的计时器用剩余预算（剩余不足 1s 时不再重跑），单节点总占用 ≤ timeoutMs，不会出现 2 × 超时的槽位占用；
 - **中止后绝不重试**；重跑发生时预览流会插入「—— 输出仅 N 字符（< 质量门 M），用原题重跑一次 ——」标记，
   `node_completed` 事件带 `attempts: 2`。
+
+## 失败恢复（failure recovery）
+
+节点出错不再只有「整图重跑」一条路，三层恢复手段由轻到重：
+
+1. **自动重试**（引擎级，默认开）：超时 / 进程退出 / 模型报错这类瞬态失败按 `ORCH_NODE_MAX_RETRIES`（默认 1，节点 `maxRetries` 覆盖）自动重跑——中间尝试只发 `node_retry` 事件（画布显示 ↻n/N 徽标），**绝不发 `node_failed`**，重试成功节点照常翻绿；配置错误（非法 model/agent/workdir）与人工中止永不重试。每次重试拿**全新的完整超时预算**，重试等待期间仍占用并行槽位，`durationMs` 从首次启动诚实累计。
+2. **一键重跑失败部分**（`rerun_failed`，Web 运行视图「↻ 重跑失败部分」）：已结束（失败/中止）的运行起新 runId 重跑——ok 节点输出直接播种为 `node_reused`（复用徽标，executor 不再碰它，批准过的门控批注原样复用），error/skipped 节点及其下游重新执行。材料取自内存保留或 `~/.pi-graph-ui/runs/` 归档，服务重启后依然可用。
+3. **AI 修复失败节点**（`repair_node`，错误节点面板「AI 修复并重跑」）：规划器带着失败原因 + 上游输出 + 当前执行配置重写该节点的 task（可调整 model/tools），流式预览（`repair_*` 事件，⚡ 按钮显示「AI 修复中…」）后用同一 runId 重跑该节点，其余 ok 输出照旧复用。门控节点不可修复（人工决策不可改写）；重写产物经 `validateGraph` 复验，解析失败会带反馈重试一次。
 
 ## 依赖
 

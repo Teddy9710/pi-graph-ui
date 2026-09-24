@@ -4,7 +4,10 @@
  * a compact run preview — stream tail while running, output tail / error
  * snippet / skip reason once the node settles. Gate nodes lead the head row
  * with a mono 「门」 mark and breathe amber while awaiting a human decision.
- * Stays ~220px wide to match the size dagre lays out with (orch-layout.ts).
+ * Recovery rides as printed 方标 badges in the head row: ↻n/N while an
+ * auto-retry re-executes a failed attempt, 复用 when the output carried over
+ * from a previous run. Stays ~220px wide to match the size dagre lays out
+ * with (orch-layout.ts).
  */
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
@@ -54,6 +57,21 @@ export function OrchNode({ data }: OrchNodeProps) {
 				{status === "running" && <span className="pg-spinner" />}
 				<b className="pg-title">{data.label}</b>
 				<span className={`pg-dot pg-dot-${status}`} />
+				{/* Recovery state as printed badges — kind is ink, never dye: the
+				 * dot next to them already speaks the state. */}
+				{runNode?.retry && status === "running" && (
+					<span
+						className="pg-orch-badge"
+						title={`自动重试 ${runNode.retry.attempt}/${runNode.retry.maxAttempts}：${runNode.retry.lastError}`}
+					>
+						↻{runNode.retry.attempt}/{runNode.retry.maxAttempts}
+					</span>
+				)}
+				{runNode?.reusedFrom && status === "ok" && (
+					<span className="pg-orch-badge" title={`复用自 ${runNode.reusedFrom}（本次未重新执行）`}>
+						复用
+					</span>
+				)}
 			</div>
 			{chips.length > 0 && (
 				<div className="pg-orch-chips">

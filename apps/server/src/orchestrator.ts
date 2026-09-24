@@ -18,12 +18,18 @@
  * - node_delta events forward executor onDelta callbacks verbatim;
  * - gate decisions bracket as node_awaiting → node_decided (never a
  *   node_started/node_completed pair — the executor was never involved);
+ * - retryable failures (timeout/process/model) re-execute the node under
+ *   node_retry events — an intermediate attempt NEVER emits node_failed, so
+ *   fold counters and the terminal verdict stay exact; carried-over outputs
+ *   (rerun-failed-part) surface as node_reused right after run_started and
+ *   never touch the Executor;
  * - run_finished.status: "aborted" > "failed" (any node_failed) > "completed".
  */
 
 import {
 	addNodeUsage,
 	assemblePrompt,
+	MAX_NODE_RETRIES,
 	zeroNodeUsage,
 	type EdgeType,
 	type GraphDef,
@@ -34,6 +40,7 @@ import {
 	type RunStatus,
 	type UpstreamInput,
 } from "@pi-graph/shared";
+import { setTimeoutUnref } from "./infra/timer-unref.ts";
 
 // ============================================================================
 // Executor seam
@@ -48,6 +55,12 @@ export interface NodeResult {
 	error?: string;
 	/** Executor attempt count (>1 = quality gate salvaged this node). */
 	attempts?: number;
+	/**
+	 * Machine-readable failure class for the ENGINE's retry policy. The engine
+	 * retries timeout/process/model only; config/aborted/internal (and an
+	 * ABSENT kind — old executors, adversarial results) are never retried.
+	 */
+	kind?: "timeout" | "process" | "model" | "config" | "aborted" | "internal";
 }
 
 export interface ExecutorCall {
@@ -71,6 +84,22 @@ export interface EngineOptions {
 	/** Injectable clock for deterministic tests. Default Date.now. */
 	now?: () => number;
 	onEvent: (event: RunEvent) => void;
+	/**
+	 * Engine-level auto-retry budget for RETRYABLE failures (timeout/process/
+	 * model), used when a node has no maxRetries of its own. Default 0 — the
+	 * product default (ORCH_NODE_MAX_RETRIES) is applied by main.ts, keeping
+	 * bare-engine callers (tests) at the pre-retry behavior.
+	 */
+	defaultMaxRetries?: number;
+	/** Delay between retry attempts (ms). Default 0 (immediate re-execution). */
+	retryDelayMs?: number;
+	/**
+	 * Outputs carried over from a previous run (rerun-failed-part): each node
+	 * present here is marked ok up front, injects downstream like an ordinary
+	 * completion, never touches the Executor, and surfaces as ONE node_reused
+	 * event right after run_started.
+	 */
+	precompleted?: ReadonlyMap<string, { text: string; fromRunId: string }>;
 }
 
 // ============================================================================
@@ -84,6 +113,9 @@ export class OrchestratorEngine {
 	private readonly maxParallel: number;
 	private readonly now: () => number;
 	private readonly emit: (event: RunEvent) => void;
+	private readonly defaultMaxRetries: number;
+	private readonly retryDelayMs: number;
+	private readonly precompleted: ReadonlyMap<string, { text: string; fromRunId: string }> | undefined;
 
 	private readonly nodeById = new Map<string, NodeDef>();
 	private readonly upstreams = new Map<string, string[]>();
@@ -97,6 +129,14 @@ export class OrchestratorEngine {
 	private readonly edgeTypes = new Map<string, EdgeType>();
 	private readonly edgeLabels = new Map<string, string>();
 	private readonly inflight = new Map<string, Promise<void>>();
+	/** Seed nodes (id → the run their output came from) for node_reused events. */
+	private readonly seededFrom = new Map<string, string>();
+	/**
+	 * Nodes sitting out their inter-attempt delay: abort must settle them the
+	 * way it settles an awaiting gate (the executor's abort signal can't reach
+	 * a node that isn't executing).
+	 */
+	private readonly retryDelays = new Map<string, { startedAt: number; cancel: () => void }>();
 	private ready: string[] = [];
 	/** Gate nodes parked on a human decision (subset of status==="awaiting"). */
 	private readonly awaiting = new Set<string>();
@@ -124,6 +164,9 @@ export class OrchestratorEngine {
 		this.maxParallel = Math.max(1, options.maxParallel ?? 4);
 		this.now = options.now ?? Date.now;
 		this.emit = options.onEvent;
+		this.defaultMaxRetries = Math.max(0, options.defaultMaxRetries ?? 0);
+		this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 0);
+		this.precompleted = options.precompleted;
 		this.build();
 	}
 
@@ -151,6 +194,23 @@ export class OrchestratorEngine {
 	/** Drive the graph to completion; resolves with the run summary. */
 	async run(): Promise<{ status: RunStatus; ok: number; failed: number; skipped: number }> {
 		this.emit({ type: "run_started", runId: this.runId, startedAt: this.now(), graph: this.graph });
+		// Resume seeding: one node_reused per carried-over node, graph order,
+		// immediately after run_started — clients (and the archive) see WHAT
+		// was reused before any execution begins. Seeds never emit
+		// node_started/node_completed in THIS run.
+		if (this.seededFrom.size > 0) {
+			for (const n of this.graph.nodes) {
+				const fromRunId = this.seededFrom.get(n.id);
+				if (fromRunId === undefined) continue;
+				this.emit({
+					type: "node_reused",
+					runId: this.runId,
+					nodeId: n.id,
+					fromRunId,
+					output: { text: this.outputs.get(n.id) ?? "" },
+				});
+			}
+		}
 		while (true) {
 			// Slot-blocked NORMAL nodes park here (order preserved) so the scan
 			// can continue past them — a ready gate queued behind blocked work
@@ -208,6 +268,17 @@ export class OrchestratorEngine {
 				this.status.set(n.id, "skipped");
 				this.skipped++;
 				this.emit({ type: "node_skipped", runId: this.runId, nodeId: n.id, reason: "run aborted" });
+				continue;
+			}
+			const delay = this.retryDelays.get(n.id);
+			if (delay) {
+				// A node waiting out its inter-attempt delay is "running" but
+				// owns no executor the abort signal could reach — settle it the
+				// way an awaiting gate settles (FAIL, not skip), measured from
+				// the FIRST attempt's start. cancel() wakes the drive loop,
+				// whose status guard then bows out without a second settle.
+				delay.cancel();
+				this.fail(n.id, delay.startedAt, "已中止");
 				continue;
 			}
 			if (st !== "awaiting") continue;
@@ -294,45 +365,141 @@ export class OrchestratorEngine {
 			this.remaining.set(e.target, this.remaining.get(e.target)! + 1);
 		}
 		this.validate();
+		// Precompleted seeds are marked BEFORE the ready queue is seeded (so the
+		// status!=="pending" filter below excludes seed roots), but their
+		// downstream settles AFTER it (settleDownstream PUSHes into this.ready —
+		// an earlier push would be wiped by the assignment below).
+		this.markPrecompleted();
 		// Seed the ready queue in graph order for deterministic scheduling.
-		this.ready = this.graph.nodes.filter((n) => this.remaining.get(n.id) === 0).map((n) => n.id);
+		this.ready = this.graph.nodes
+			.filter((n) => this.remaining.get(n.id) === 0 && this.status.get(n.id) === "pending")
+			.map((n) => n.id);
+		this.settlePrecompleted();
+	}
+
+	/** Phase 1 of seeding: mark seed nodes ok + record their outputs. */
+	private markPrecompleted(): void {
+		if (!this.precompleted) return;
+		for (const n of this.graph.nodes) {
+			const seed = this.precompleted.get(n.id);
+			if (!seed) continue;
+			this.status.set(n.id, "ok");
+			this.outputs.set(n.id, seed.text);
+			this.seededFrom.set(n.id, seed.fromRunId);
+			this.ok++;
+		}
+	}
+
+	/** Phase 2 of seeding: seeds settle their downstream exactly like ordinary
+	 *  completions (minus the events — run_started is followed by one
+	 *  node_reused per seed instead). */
+	private settlePrecompleted(): void {
+		for (const id of this.seededFrom.keys()) this.settleDownstream(id);
 	}
 
 	private launch(id: string): void {
-		const node = this.nodeById.get(id)!;
-		const upstream = this.upstreamInputs(id);
-		const assembledPrompt = assemblePrompt(node, upstream);
-		const startedAt = this.now();
-		this.status.set(id, "running");
-		this.emit({ type: "node_started", runId: this.runId, nodeId: id, startedAt, assembledPrompt });
-		let promise: Promise<void>;
+		const promise = this.drive(id);
+		// drive's synchronous prefix can already have settled the node (an
+		// executor that throws synchronously fails it before the first await) —
+		// tracking an already-resolved promise would strand a permanent inflight
+		// entry and wedge the run loop, so only track the node while live.
+		if (this.status.get(id) === "running" || this.retryDelays.has(id)) this.inflight.set(id, promise);
+	}
+
+	/**
+	 * Execute one node to its terminal state (ok / error), retrying RETRYABLE
+	 * failures (timeout / process / model) up to the node's budget. Each
+	 * attempt re-assembles the prompt and runs a FRESH executor.run — a fresh
+	 * full timeoutMs budget (unlike the quality gate's salvage, which shares
+	 * one wall clock). The inter-attempt delay OCCUPIES the parallel slot: the
+	 * node is logically running throughout, so maxParallel still bounds real
+	 * work. durationMs is measured from the FIRST attempt's start, delay
+	 * included. Intermediate attempts emit node_retry — never node_failed —
+	 * so fold counters and the terminal verdict stay exact.
+	 */
+	private async drive(id: string): Promise<void> {
 		try {
-			promise = this.executor
-				.run(
-					{ node, assembledPrompt, upstream },
-					{
-						onDelta: (kind, delta) => {
-							this.emit({ type: "node_delta", runId: this.runId, nodeId: id, kind, delta });
+			const node = this.nodeById.get(id)!;
+			const maxAttempts = (node.maxRetries ?? this.defaultMaxRetries) + 1;
+			const firstStartedAt = this.now();
+			this.status.set(id, "running");
+			this.emit({
+				type: "node_started",
+				runId: this.runId,
+				nodeId: id,
+				startedAt: firstStartedAt,
+				assembledPrompt: assemblePrompt(node, this.upstreamInputs(id)),
+			});
+			for (let attempt = 1; ; attempt++) {
+				const upstream = this.upstreamInputs(id);
+				let result: NodeResult;
+				try {
+					result = await this.executor.run(
+						{ node, assembledPrompt: assemblePrompt(node, upstream), upstream },
+						{
+							onDelta: (kind, delta) => {
+								this.emit({ type: "node_delta", runId: this.runId, nodeId: id, kind, delta });
+							},
+							signal: this.abortCtl.signal,
 						},
-						signal: this.abortCtl.signal,
-					},
-				)
-				.then(
-					(r) => {
-						if (r.ok) this.complete(id, startedAt, r);
-						else this.fail(id, startedAt, r.error ?? `stopReason: ${r.stopReason ?? "unknown"}`);
-					},
-					(err: Error) => this.fail(id, startedAt, err.message),
-				)
-				.then(() => {
-					this.inflight.delete(id);
-				});
-		} catch (err) {
-			// Executor violated the async contract (threw synchronously).
-			this.fail(id, startedAt, (err as Error).message);
-			return;
+					);
+				} catch (err) {
+					// Executor violated the async contract (threw synchronously):
+					// internal — retrying the same broken executor cannot help.
+					result = { ok: false, text: "", error: (err as Error).message, kind: "internal" };
+				}
+				if (result.ok) {
+					this.complete(id, firstStartedAt, result);
+					return;
+				}
+				const kind = result.kind ?? "internal";
+				const error = result.error ?? `stopReason: ${result.stopReason ?? "unknown"}`;
+				if ((kind === "timeout" || kind === "process" || kind === "model") && attempt < maxAttempts && !this.aborted) {
+					this.emit({
+						type: "node_retry",
+						runId: this.runId,
+						nodeId: id,
+						attempt: attempt + 1,
+						maxAttempts,
+						error,
+						retryInMs: this.retryDelayMs,
+					});
+					await this.delayRetry(id, firstStartedAt);
+					// abort() settles delay-waiting nodes itself (cancel + fail);
+					// a node no longer running must not execute another attempt.
+					if (this.status.get(id) !== "running") return;
+					continue;
+				}
+				this.fail(id, firstStartedAt, error);
+				return;
+			}
+		} finally {
+			this.inflight.delete(id);
 		}
-		this.inflight.set(id, promise);
+	}
+
+	/**
+	 * Wait out the inter-attempt delay, tracked in retryDelays so abort() can
+	 * settle a delay-waiting node (the executor's abort signal can't reach a
+	 * node that isn't executing). startedAt is the node's FIRST attempt start —
+	 * abort's fail measures duration from there, delay included.
+	 */
+	private delayRetry(id: string, firstStartedAt: number): Promise<void> {
+		if (this.retryDelayMs <= 0) return Promise.resolve();
+		return new Promise<void>((resolve) => {
+			const timer = setTimeoutUnref(() => {
+				this.retryDelays.delete(id);
+				resolve();
+			}, this.retryDelayMs);
+			this.retryDelays.set(id, {
+				startedAt: firstStartedAt,
+				cancel: () => {
+					clearTimeout(timer);
+					this.retryDelays.delete(id);
+					resolve();
+				},
+			});
+		});
 	}
 
 	/** Suspend a ready gate as awaiting a human decision (no executor call). */

@@ -16,7 +16,7 @@
  *   {type: "event", event: JsonAgentSessionEvent}        - live events (throttled)
  *   {type: "response", response: RpcResponse}            - correlated RPC replies
  *   {type: "run_event", event: RunEvent}                 - orchestration stream
- *   {type: "run_error", message, issues}                 - run_graph/approve_node rejected (requester only)
+ *   {type: "run_error", message, issues}                 - run_graph/approve_node/rerun_failed/repair_node rejected (requester only)
  *   {type: "error", message}                             - command/session-action rejected (requester only)
  *   {type: "pi-exit", code, stderr}                      - subprocess died
  *
@@ -37,7 +37,16 @@
  *          gate node (approve/reject with an optional note); invalid payloads,
  *          unknown/expired runIds and non-awaiting nodes answer the requester
  *          with run_error only
- *   {type: "abort_run"}                                  - abort the active run/planning
+ *   {type: "rerun_failed", runId}                        - 一键重跑失败部分: re-run a
+ *          TERMINAL run's error/skipped nodes in a fresh run; ok nodes' outputs
+ *          are seeded (node_reused, never re-executed). Source: retained events
+ *          or the RunStore archive; rejections answer the requester only
+ *   {type: "repair_node", runId, nodeId}                 - AI 修复失败节点: the planner
+ *          rewrites the FAILED node's task with error + upstream context
+ *          (repair_* events, same runId), then re-runs it with the other
+ *          outputs seeded; gate nodes are rejected (human decisions are not
+ *          rewritable); rejections answer the requester only
+ *   {type: "abort_run"}                                  - abort the active run/planning/repair
  *
  * HTTP:
  *   GET /health     - liveness + pi subprocess status
@@ -102,6 +111,23 @@ const ORCH_NODE_TIMEOUT_MS = Math.max(1_000, Number(process.env.ORCH_NODE_TIMEOU
  */
 const ORCH_MIN_OUTPUT_CHARS = Math.max(0, Math.floor(Number(process.env.ORCH_MIN_OUTPUT_CHARS ?? 0)) || 0);
 const ORCH_NODE_RETRY = process.env.ORCH_NODE_RETRY !== "0";
+/**
+ * Node FAILURE auto-retry (失败恢复) — distinct from the quality-gate salvage
+ * above: executor failures of transient kinds (timeout/process/model) re-run
+ * up to N extra attempts before the node is declared failed (node_retry
+ * events; a retry that succeeds never surfaces node_failed). Per-node
+ * override: node.maxRetries (0-3, shared's cap). 0 disables, invalid values
+ * fall back to the default 1 (a bare `|| 1` would also swallow an explicit 0).
+ */
+// Blank value = "not configured" → default (Number("") is 0, so trim first;
+// an explicit "0" still survives as a real disable).
+const rawNodeRetries = process.env.ORCH_NODE_MAX_RETRIES?.trim() ?? "";
+const parsedNodeRetries = rawNodeRetries === "" ? 1 : Number(rawNodeRetries);
+const ORCH_NODE_MAX_RETRIES = Math.min(3, Math.max(0, Math.floor(Number.isFinite(parsedNodeRetries) ? parsedNodeRetries : 1)));
+/** Pause between failure-retry attempts (occupies the node's parallel slot). */
+const rawRetryDelay = process.env.ORCH_NODE_RETRY_DELAY_MS?.trim() ?? "";
+const parsedRetryDelay = rawRetryDelay === "" ? 2000 : Number(rawRetryDelay);
+const ORCH_NODE_RETRY_DELAY_MS = Math.max(0, Math.floor(Number.isFinite(parsedRetryDelay) ? parsedRetryDelay : 2000));
 const ORCH_AGENTS_DIR = join(homedir(), ".pi", "agent", "agents");
 /**
  * Main-session pi persistence. Default ON: the main bridge spawns pi WITHOUT
@@ -152,6 +178,10 @@ const runManager = new RunManager({
 	executor,
 	planner,
 	maxParallel: ORCH_MAX_PARALLEL,
+	// Failure auto-retry budget/delay — engine-level defaults forwarded to
+	// every run (a node's own maxRetries still overrides).
+	maxRetries: ORCH_NODE_MAX_RETRIES,
+	retryDelayMs: ORCH_NODE_RETRY_DELAY_MS,
 	store: runStore,
 	// Chat-first runs: when the graph completes, compile the node outputs and
 	// inject them into the MAIN session agent (bridge declared above), which
@@ -524,6 +554,53 @@ wss.on("connection", (ws, req) => {
 				}
 			} catch (err) {
 				ws.send(JSON.stringify({ type: "run_error", message: `approve_node 无法处理: ${(err as Error).message}` }));
+			}
+			return;
+		}
+		if (msg.type === "rerun_failed") {
+			// 一键重跑失败部分: a TERMINAL run's error/skipped nodes re-run in a
+			// fresh runId; ok nodes' outputs are seeded as node_reused and never
+			// re-executed. Async (archive read) — strict validation first, then
+			// failures answer the REQUESTER only via the promise, never the
+			// broadcast stream.
+			try {
+				if (typeof msg.runId !== "string") {
+					ws.send(JSON.stringify({ type: "run_error", message: "rerun_failed 参数非法（runId 需为字符串）" }));
+					return;
+				}
+				void runManager
+					.rerunFailed(msg.runId)
+					.then((result) => {
+						if (!result.ok) ws.send(JSON.stringify({ type: "run_error", message: result.error, issues: result.issues }));
+					})
+					.catch((err: Error) => {
+						ws.send(JSON.stringify({ type: "run_error", message: `rerun_failed 无法处理: ${err.message}` }));
+					});
+			} catch (err) {
+				ws.send(JSON.stringify({ type: "run_error", message: `rerun_failed 无法处理: ${(err as Error).message}` }));
+			}
+			return;
+		}
+		if (msg.type === "repair_node") {
+			// AI 修复失败节点: the planner rewrites the FAILED node's task
+			// (repair_* events under the SAME runId), then the run re-executes
+			// it with every other ok node seeded. Same defensive shape as
+			// rerun_failed — async failures answer the requester only.
+			try {
+				if (typeof msg.runId !== "string" || typeof msg.nodeId !== "string") {
+					ws.send(JSON.stringify({ type: "run_error", message: "repair_node 参数非法（runId/nodeId 需为字符串）" }));
+					return;
+				}
+				void runManager
+					.startRepair(msg.runId, msg.nodeId)
+					.then((result) => {
+						if (!result.ok) ws.send(JSON.stringify({ type: "run_error", message: result.error }));
+					})
+					.catch((err: Error) => {
+						ws.send(JSON.stringify({ type: "run_error", message: `repair_node 无法处理: ${err.message}` }));
+					});
+			} catch (err) {
+				ws.send(JSON.stringify({ type: "run_error", message: `repair_node 无法处理: ${(err as Error).message}` }));
 			}
 			return;
 		}

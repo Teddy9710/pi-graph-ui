@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyUsage, type AssistantMessage, type JsonAgentSessionEvent, type NodeDef } from "@pi-graph/shared";
@@ -82,6 +82,11 @@ class FakeBridge implements ExecutorBridge {
 
 	emitExit(code: number | null, stderr: string): void {
 		for (const fn of [...this.handlers.exit]) fn(code, stderr);
+	}
+
+	/** Inject a raw wire event (scripts only cover text streaming). */
+	emitEvent(ev: JsonAgentSessionEvent): void {
+		for (const fn of [...this.handlers.event]) fn(ev);
 	}
 }
 
@@ -346,5 +351,201 @@ describe("PiNodeExecutor capability profile", () => {
 			quietCtx(),
 		);
 		expect(FakeBridge.instances[1]!.opts.extraArgs).toEqual(["--model", "prov/m"]);
+	});
+});
+
+// ============================================================================
+// Failure classification (kind) — the engine's auto-retry keys on these:
+// timeout/process/model are retryable, config/aborted/internal never are. A
+// mis-classified site would either burn retry budget on a permanent error or
+// skip retrying a transient one, so every failure site is pinned here.
+// ============================================================================
+
+describe("PiNodeExecutor failure classification (kind)", () => {
+	it("config: bad model metacharacters / missing agent fail BEFORE spawning", async () => {
+		const exec = freshExecutor([]);
+		const badModel = await exec.run(
+			{ node: { ...baseNode, model: "x & calc" }, assembledPrompt: "t", upstream: [] },
+			quietCtx(),
+		);
+		expect(badModel.ok).toBe(false);
+		if (!badModel.ok) {
+			expect(badModel.kind).toBe("config");
+			expect(badModel.error).toContain("非法字符");
+		}
+		const missingAgent = await exec.run(
+			{ node: { ...baseNode, agent: "no-such-persona" }, assembledPrompt: "t", upstream: [] },
+			quietCtx(),
+		);
+		expect(missingAgent.ok).toBe(false);
+		if (!missingAgent.ok) {
+			expect(missingAgent.kind).toBe("config");
+			expect(missingAgent.error).toContain("未找到 agent");
+		}
+		expect(FakeBridge.instances).toHaveLength(0);
+	});
+
+	it("config: workdir escape and an un-creatable workdir (a file blocks the path)", async () => {
+		const base = mkdtempSync(join(tmpdir(), "pi-exec-test-"));
+		tempDirs.push(base);
+		writeFileSync(join(base, "blocker"), "x"); // mkdirSync would hit ENOTDIR/EEXIST
+		const exec = freshExecutor([], { cwd: base });
+		const escape = await exec.run(
+			{ node: { ...baseNode, workdir: "../../elsewhere" }, assembledPrompt: "t", upstream: [] },
+			quietCtx(),
+		);
+		expect(escape.ok).toBe(false);
+		if (!escape.ok) expect(escape.kind).toBe("config");
+		const blocked = await exec.run(
+			{ node: { ...baseNode, workdir: "blocker" }, assembledPrompt: "t", upstream: [] },
+			quietCtx(),
+		);
+		expect(blocked.ok).toBe(false);
+		if (!blocked.ok) {
+			expect(blocked.kind).toBe("config");
+			expect(blocked.error).toContain("创建失败");
+		}
+		expect(FakeBridge.instances).toHaveLength(0);
+	});
+
+	it("process: the pi process exits nonzero", async () => {
+		FakeBridge.scripts = [[]];
+		FakeBridge.instances = [];
+		const exec = new PiNodeExecutor({
+			defaultModel: "test/node",
+			bridgeFactory: (opts) => {
+				const b = new FakeBridge(opts);
+				const origStart = b.start.bind(b);
+				b.start = () => {
+					origStart();
+					b.emitExit(1, "boom");
+				};
+				return b;
+			},
+		});
+		const r = await exec.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r.ok).toBe(false);
+		if (!r.ok) {
+			expect(r.kind).toBe("process");
+			expect(r.error).toContain("pi 进程退出");
+		}
+	});
+
+	it("timeout: an attempt that never settles", async () => {
+		const exec = freshExecutor([[]], { timeoutMs: 5 });
+		const r = await exec.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r.ok).toBe(false);
+		if (!r.ok) {
+			expect(r.kind).toBe("timeout");
+			expect(r.error).toContain("节点超时");
+		}
+	}, 10_000);
+
+	it("model: agent_settled after a folded terminal error (stopReason=error)", async () => {
+		FakeBridge.scripts = [[]];
+		FakeBridge.instances = [];
+		const exec = new PiNodeExecutor({
+			defaultModel: "test/node",
+			bridgeFactory: (opts) => {
+				const b = new FakeBridge(opts);
+				const origRequest = b.request.bind(b);
+				b.request = async (cmd) => {
+					const ok = await origRequest(cmd); // records the prompt
+					const errored = { ...assistant(""), stopReason: "error", errorMessage: "quota exceeded" } as AssistantMessage;
+					b.emitEvent({ type: "agent_end", messages: [errored] });
+					b.emitEvent({ type: "agent_settled" });
+					return ok;
+				};
+				return b;
+			},
+		});
+		const r = await exec.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r.ok).toBe(false);
+		if (!r.ok) {
+			expect(r.kind).toBe("model");
+			expect(r.error).toContain("quota exceeded");
+		}
+	});
+
+	it("model: the rpc rejects the prompt (success:false) / process: the request throws", async () => {
+		FakeBridge.scripts = [[]];
+		FakeBridge.instances = [];
+		const rejected = new PiNodeExecutor({
+			defaultModel: "test/node",
+			bridgeFactory: (opts) => {
+				const b = new FakeBridge(opts);
+				b.request = async () => ({ success: false, data: { reason: "nope" } });
+				return b;
+			},
+		});
+		const r1 = await rejected.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r1.ok).toBe(false);
+		if (!r1.ok) {
+			expect(r1.kind).toBe("model");
+			expect(r1.error).toContain("prompt 被拒绝");
+		}
+
+		FakeBridge.scripts = [[]];
+		FakeBridge.instances = [];
+		const thrown = new PiNodeExecutor({
+			defaultModel: "test/node",
+			bridgeFactory: (opts) => {
+				const b = new FakeBridge(opts);
+				b.request = async () => {
+					throw new Error("stdin broke");
+				};
+				return b;
+			},
+		});
+		const r2 = await thrown.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r2.ok).toBe(false);
+		if (!r2.ok) {
+			expect(r2.kind).toBe("process");
+			expect(r2.error).toContain("stdin broke");
+		}
+	});
+
+	it("aborted: abort mid-attempt", async () => {
+		const exec = freshExecutor([[]]); // never settles on its own
+		const abort = new AbortController();
+		const promise = exec.run(
+			{ node: { ...baseNode }, assembledPrompt: "t", upstream: [] },
+			{ onDelta: () => {}, signal: abort.signal },
+		);
+		await Promise.resolve(); // let runOnce register the listener + start
+		abort.abort();
+		const r = await promise;
+		expect(r.ok).toBe(false);
+		if (!r.ok) {
+			expect(r.kind).toBe("aborted");
+			expect(r.error).toBe("已中止");
+		}
+	});
+
+	it("model: quality-gate empty outputs (retry off / budget spent / both empty)", async () => {
+		// Retry off, empty first answer.
+		const off = freshExecutor([[""]], { minOutputChars: 20, salvageRetry: false });
+		const r1 = await off.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r1.ok).toBe(false);
+		if (!r1.ok) {
+			expect(r1.kind).toBe("model");
+			expect(r1.error).toContain("输出为空");
+		}
+		// Salvage on but the wall clock is spent.
+		const spent = freshExecutor([[""]], { minOutputChars: 20, timeoutMs: 100 });
+		const r2 = await spent.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r2.ok).toBe(false);
+		if (!r2.ok) {
+			expect(r2.kind).toBe("model");
+			expect(r2.error).toContain("预算已用尽");
+		}
+		// Both salvage answers empty.
+		const both = freshExecutor([[""], [""]], { minOutputChars: 20 });
+		const r3 = await both.run({ node: { ...baseNode }, assembledPrompt: "t", upstream: [] }, quietCtx());
+		expect(r3.ok).toBe(false);
+		if (!r3.ok) {
+			expect(r3.kind).toBe("model");
+			expect(r3.error).toContain("两次输出均为空");
+		}
 	});
 });

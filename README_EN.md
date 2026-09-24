@@ -141,7 +141,16 @@ flowchart LR
 - Rejection, failure, and timeout propagate through the graph and skip descendants that can no longer run.
 - `ORCH_MAX_PARALLEL` controls concurrency; `ORCH_NODE_TIMEOUT_MS` sets the node deadline.
 - `ORCH_MIN_OUTPUT_CHARS` enables an output quality gate. A short result is retried once with the original prompt, and the longer answer is kept.
+- Transient node failures (timeout / process / model) auto-retry once by default; a failed run can be partially re-run reusing finished outputs, or a failed node can be rewritten by AI and re-run (see the next section).
 - Aborting a run terminates the planner and every node process tree.
+
+## Failure recovery
+
+Three layers, from lightest to heaviest:
+
+1. **Auto-retry**: timeout / process-exit / model failures re-run per `ORCH_NODE_MAX_RETRIES` (default 1; per-node `maxRetries` overrides, 0–3). Intermediate attempts emit only `node_retry` (the canvas shows a ↻n/N badge) — never `node_failed` — so a successful retry still turns the node green. Config errors and aborts are never retried; every retry gets a fresh timeout budget.
+2. **Re-run the failed part**: one click starts a fresh run of a failed/aborted one — completed nodes' outputs are reused (「复用」 badge, never re-executed) while only the failed/skipped remainder and its descendants re-execute. Source material comes from the run archive, so this survives a server restart.
+3. **AI repair**: the failed node's panel offers to have the planner rewrite its task with the error and upstream outputs as context (it may also adjust the model/tools); after a streamed preview of the rewrite, only that node re-runs while every other output stays reused.
 
 ## Architecture
 
@@ -194,10 +203,12 @@ docs              Architecture research, design notes, and README images
 | `ORCH_PLAN_TIMEOUT_MS` | Planning deadline | `180000` |
 | `ORCH_MIN_OUTPUT_CHARS` | Output quality threshold; `0` disables it | `0` |
 | `ORCH_NODE_RETRY` | Retry output that misses the quality gate | Enabled |
+| `ORCH_NODE_MAX_RETRIES` | Auto-retries for failed nodes (timeout/process/model only; per-node `maxRetries` overrides) | `1` (0–3) |
+| `ORCH_NODE_RETRY_DELAY_MS` | Delay between failure retries, in milliseconds | `2000` |
 | `ALLOWED_HOSTS` / `TRUSTED_ORIGINS` | Additional allowed hosts and origins | Safe local and private-network defaults |
 | `SNAKE_DEMO` | Set to `0` to disable the bridge demo page | Enabled |
 
-Nodes can override `minOutputChars`, `timeoutMs`, `outputCapBytes`, `workdir`, `tools`, and `excludeTools`. See the [server documentation](apps/server/README.md) for details.
+Nodes can override `minOutputChars`, `timeoutMs`, `outputCapBytes`, `workdir`, `tools`, `excludeTools`, and `maxRetries`. See the [server documentation](apps/server/README.md) for details.
 
 ## Verification
 

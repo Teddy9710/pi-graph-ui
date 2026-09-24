@@ -81,6 +81,8 @@ export const MAX_MIN_OUTPUT_CHARS = 1_000_000;
 export const MAX_NODE_TIMEOUT_MS = 86_400_000;
 /** Per-node injection cap bounds (bytes). */
 export const MAX_OUTPUT_CAP_BYTES = 1_000_000;
+/** Per-node engine-level retry budget bound (see NodeDef.maxRetries). */
+export const MAX_NODE_RETRIES = 3;
 /**
  * workdir is a RELATIVE path under the server cwd (spawn cwd — the only
  * isolation mechanism pi rpc offers). Pure-string shape check usable from
@@ -156,6 +158,13 @@ export interface NodeDef {
 	tools?: string[];
 	/** pi tool DENYLIST (`--exclude-tools a,b`), applied after `tools`. */
 	excludeTools?: string[];
+	/**
+	 * Engine-level auto-retry on RETRYABLE failures (timeout / process crash /
+	 * model rejection); config errors and aborts are never retried. Overrides
+	 * the server default ORCH_NODE_MAX_RETRIES. Each retry attempt gets a
+	 * FRESH full timeoutMs budget.
+	 */
+	maxRetries?: number;
 }
 
 export interface EdgeDef {
@@ -260,7 +269,7 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 		}
 		if (
 			n.gate === true &&
-			[n.model, n.agent, n.tools, n.excludeTools, n.workdir, n.minOutputChars, n.timeoutMs, n.outputCapBytes].some((v) => v !== undefined)
+			[n.model, n.agent, n.tools, n.excludeTools, n.workdir, n.minOutputChars, n.timeoutMs, n.outputCapBytes, n.maxRetries].some((v) => v !== undefined)
 		) {
 			issues.push({ nodeOrEdge: n.id, message: "门控节点不能带执行配置（model/agent/tools/workdir/能力档案）" });
 		}
@@ -292,6 +301,9 @@ export function validateGraph(def: GraphDef): GraphValidationIssue[] {
 			(!Number.isInteger(n.outputCapBytes) || n.outputCapBytes < 1 || n.outputCapBytes > MAX_OUTPUT_CAP_BYTES)
 		) {
 			issues.push({ nodeOrEdge: n.id, message: `outputCapBytes 非法（需为 1–${MAX_OUTPUT_CAP_BYTES} 的整数，字节）` });
+		}
+		if (n.maxRetries !== undefined && (!Number.isInteger(n.maxRetries) || n.maxRetries < 0 || n.maxRetries > MAX_NODE_RETRIES)) {
+			issues.push({ nodeOrEdge: n.id, message: `maxRetries 非法（需为 0–${MAX_NODE_RETRIES} 的整数）` });
 		}
 		if (n.workdir !== undefined && (typeof n.workdir !== "string" || !isSafeWorkdir(n.workdir))) {
 			issues.push({ nodeOrEdge: n.id, message: "workdir 非法（仅限服务目录内的相对路径，不可含 .. / 绝对路径 / 反斜杠）" });
@@ -600,6 +612,25 @@ export type RunEvent =
 	| { type: "node_awaiting"; runId: string; nodeId: string; startedAt: number; assembledPrompt: string }
 	| { type: "node_decided"; runId: string; nodeId: string; endedAt: number; durationMs: number; approved: boolean; note: string }
 	| { type: "node_skipped"; runId: string; nodeId: string; reason: string }
+	// Engine-level auto-retry: an intermediate attempt failed with a RETRYABLE
+	// kind and budget remains, so the node re-executes. Deliberately NOT a
+	// node_failed — fold counters are increment-only and the engine's terminal
+	// verdict is failed>0→failed, so an intermediate failure must not pollute
+	// either. attempt = the execution ABOUT to start (first retry = 2);
+	// maxAttempts = total execution budget = maxRetries + 1.
+	| { type: "node_retry"; runId: string; nodeId: string; attempt: number; maxAttempts: number; error: string; retryInMs: number }
+	// Resume seeding: this node's output carries over from a previous run
+	// (rerun-failed-part); the node never executes in THIS run.
+	| { type: "node_reused"; runId: string; nodeId: string; fromRunId: string; output: { text: string } }
+	// AI repair phase (mirror of plan_*): the planner rewrites a FAILED node's
+	// task (with the error + upstream outputs as context) before the run
+	// re-executes it — repair_started → repair_delta* → repair_completed →
+	// run_started (same runId; the engine takes over with the seeded outputs)
+	// — or repair_failed.
+	| { type: "repair_started"; runId: string; fromRunId: string; nodeId: string; startedAt: number }
+	| { type: "repair_delta"; runId: string; delta: string }
+	| { type: "repair_completed"; runId: string; task: string; model?: string; tools?: string[] }
+	| { type: "repair_failed"; runId: string; error: string }
 	| {
 			type: "run_finished";
 			runId: string;
@@ -631,6 +662,10 @@ export interface RunNodeState {
 	preview: string;
 	/** Executor attempt count (>1 = quality gate salvaged this node). */
 	attempts: number | null;
+	/** Live auto-retry status (set by node_retry; cleared at the node's terminal event). */
+	retry: { attempt: number; maxAttempts: number; lastError: string } | null;
+	/** Set when this node's output carried over from a previous run (node_reused). */
+	reusedFrom: string | null;
 }
 
 export interface RunState {
@@ -651,6 +686,13 @@ export interface RunState {
 	failed: number;
 	skipped: number;
 	usage: NodeUsage;
+	/**
+	 * AI-repair target while status === "planning" for a repair flow (the
+	 * planText/planError channels carry the rewrite preview; the ⚡ button
+	 * labels itself 「AI 修复中」). Cleared when the engine takes over
+	 * (run_started) or the repair fails.
+	 */
+	repairTarget: { fromRunId: string; nodeId: string } | null;
 }
 
 export function initRunState(): RunState {
@@ -668,6 +710,7 @@ export function initRunState(): RunState {
 		failed: 0,
 		skipped: 0,
 		usage: zeroNodeUsage(),
+		repairTarget: null,
 	};
 }
 
@@ -696,6 +739,8 @@ function initNode(id: string): RunNodeState {
 		skipReason: null,
 		preview: "",
 		attempts: null,
+		retry: null,
+		reusedFrom: null,
 	};
 }
 
@@ -704,11 +749,11 @@ function initNode(id: string): RunNodeState {
  * unknown-nodeId events are ignored, so replay + live share one path.
  */
 export function foldRunEvent(state: RunState, event: RunEvent): RunState {
-	// Stale-runId guard — EXCEPT the two reset points (run_started /
-	// plan_started): a new run starting on a live connection must RESET the
+	// Stale-runId guard — EXCEPT the reset points (run_started / plan_started /
+	// repair_started): a new run starting on a live connection must RESET the
 	// state, not be ignored as stale (otherwise a browser that stays connected
 	// across two runs shows the first run forever).
-	if (event.type !== "run_started" && event.type !== "plan_started" && state.runId !== null && event.runId !== state.runId) {
+	if (event.type !== "run_started" && event.type !== "plan_started" && event.type !== "repair_started" && state.runId !== null && event.runId !== state.runId) {
 		return state;
 	}
 	switch (event.type) {
@@ -726,6 +771,7 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			state.failed = 0;
 			state.skipped = 0;
 			state.usage = zeroNodeUsage();
+			state.repairTarget = null;
 			return state;
 		}
 		case "plan_delta": {
@@ -747,6 +793,10 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			if (state.runId !== event.runId) state.goal = null;
 			state.runId = event.runId;
 			state.status = "running";
+			// A new run supersedes a stale plan/repair error (planText stays as
+			// the preview; the error text of a PREVIOUS failed phase must not
+			// outlive it — both UI render sites show planError unconditionally).
+			state.planError = null;
 			state.graph = event.graph;
 			state.startedAt = event.startedAt;
 			state.finishedAt = null;
@@ -754,6 +804,7 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			state.failed = 0;
 			state.skipped = 0;
 			state.usage = zeroNodeUsage();
+			state.repairTarget = null;
 			state.nodes = emptyNodeMap();
 			for (const n of event.graph.nodes) {
 				// Total on adversarial graphs: a reserved id that slipped past
@@ -792,6 +843,7 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			node.model = event.output.model ?? null;
 			node.usage = event.output.usage;
 			node.attempts = event.output.attempts ?? null;
+			node.retry = null;
 			return state;
 		}
 		case "node_failed": {
@@ -801,6 +853,7 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			node.status = "error";
 			node.endedAt = event.endedAt;
 			node.error = event.error;
+			node.retry = null;
 			return state;
 		}
 		case "node_awaiting": {
@@ -836,6 +889,62 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			node.skipReason = event.reason;
 			return state;
 		}
+		case "node_retry": {
+			const node = state.nodes[event.nodeId];
+			if (!node) return state;
+			// Status stays/becomes running (an intermediate attempt failed, the
+			// node re-executes); NO counter movement — node_failed is reserved
+			// for the terminal verdict so ok/failed never double-count a node.
+			node.status = "running";
+			node.retry = { attempt: event.attempt, maxAttempts: event.maxAttempts, lastError: event.error };
+			return state;
+		}
+		case "node_reused": {
+			const node = state.nodes[event.nodeId];
+			if (!node) return state;
+			// Same LIVE-tally reasoning as node_completed; run_finished still
+			// overwrites authoritatively.
+			state.ok += 1;
+			node.status = "ok";
+			node.output = event.output.text;
+			node.reusedFrom = event.fromRunId;
+			return state;
+		}
+		case "repair_started": {
+			// Mirror of plan_started (same reset semantics), minus the goal —
+			// a repair rewrites one node's task, the planText/planError channels
+			// carry the rewrite preview so the planning UI serves both flows.
+			state.runId = event.runId;
+			state.status = "planning";
+			state.goal = null;
+			state.planText = "";
+			state.planError = null;
+			state.graph = null;
+			state.nodes = emptyNodeMap();
+			state.startedAt = event.startedAt;
+			state.finishedAt = null;
+			state.ok = 0;
+			state.failed = 0;
+			state.skipped = 0;
+			state.usage = zeroNodeUsage();
+			state.repairTarget = { fromRunId: event.fromRunId, nodeId: event.nodeId };
+			return state;
+		}
+		case "repair_delta": {
+			state.planText = (state.planText + event.delta).slice(-PREVIEW_CAP);
+			return state;
+		}
+		case "repair_completed": {
+			// No state to commit — the rewritten task shows up in run_started's
+			// graph and the target's node_started assembledPrompt right after.
+			return state;
+		}
+		case "repair_failed": {
+			state.planError = event.error;
+			state.status = "failed";
+			state.repairTarget = null;
+			return state;
+		}
 		case "run_finished": {
 			state.status = event.status;
 			state.finishedAt = event.finishedAt;
@@ -845,5 +954,9 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			state.usage = event.usage;
 			return state;
 		}
+		default:
+			// Unknown event types (an older bundle against a newer server, or a
+			// forged wire event) fold as no-ops — same tolerance as foldEvent.
+			return state;
 	}
 }

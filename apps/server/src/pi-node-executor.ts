@@ -35,6 +35,7 @@ import {
 	type JsonAgentSessionEvent,
 	type NodeUsage,
 } from "@pi-graph/shared";
+import { setTimeoutUnref, type UnrefableTimeout } from "./infra/timer-unref.ts";
 import { PiBridge } from "./pi-bridge.ts";
 import type { Executor, ExecutorCall, NodeResult } from "./orchestrator.ts";
 
@@ -147,7 +148,7 @@ export class PiNodeExecutor implements Executor {
 		if (!this.salvageRetry) {
 			// Gate on, retry off: only a truly EMPTY output escalates to failure;
 			// a short-but-nonempty answer stands as-is.
-			if (len === 0) return { ok: false, text: "", error: `输出为空（质量门 minOutputChars=${minChars}）` };
+			if (len === 0) return { ok: false, text: "", error: `输出为空（质量门 minOutputChars=${minChars}）`, kind: "model" };
 			return first;
 		}
 		if (ctx.signal.aborted) return first; // 中止后不重试
@@ -158,7 +159,7 @@ export class PiNodeExecutor implements Executor {
 		// one stands (same verdicts as the retry-off branch).
 		const remaining = deadline - Date.now();
 		if (remaining < MIN_RETRY_BUDGET_MS) {
-			if (len === 0) return { ok: false, text: "", error: `输出为空且节点预算已用尽（质量门 minOutputChars=${minChars}）` };
+			if (len === 0) return { ok: false, text: "", error: `输出为空且节点预算已用尽（质量门 minOutputChars=${minChars}）`, kind: "model" };
 			return first;
 		}
 
@@ -170,7 +171,7 @@ export class PiNodeExecutor implements Executor {
 		const second = await this.runOnce(call, ctx, remaining);
 		const pick = second.ok && second.text.trim().length > len ? second : first;
 		if (pick.text.trim().length === 0) {
-			return { ok: false, text: "", error: `两次输出均为空（质量门 minOutputChars=${minChars}）` };
+			return { ok: false, text: "", error: `两次输出均为空（质量门 minOutputChars=${minChars}）`, kind: "model" };
 		}
 		return { ...pick, attempts: 2 };
 	}
@@ -188,7 +189,7 @@ export class PiNodeExecutor implements Executor {
 		// Argv safety net (validateGraph already rejects these): the model id
 		// passes through a cmd.exe shim where metacharacters would be executed.
 		if (node.model !== undefined && !MODEL_RE.test(node.model)) {
-			return { ok: false, text: "", error: `model「${node.model}」含非法字符` };
+			return { ok: false, text: "", error: `model「${node.model}」含非法字符`, kind: "config" };
 		}
 
 		// --- persona: resolve before spawning; missing agent fails fast ---
@@ -198,13 +199,13 @@ export class PiNodeExecutor implements Executor {
 			try {
 				raw = readFileSync(resolvePath(this.agentsDir, `${node.agent}.md`), "utf8");
 			} catch {
-				return { ok: false, text: "", error: `未找到 agent「${node.agent}」（查找目录 ${this.agentsDir}）` };
+				return { ok: false, text: "", error: `未找到 agent「${node.agent}」（查找目录 ${this.agentsDir}）`, kind: "config" };
 			}
 			try {
 				tempDir = mkdtempSync(resolvePath(tmpdir(), "pi-orch-"));
 				writeFileSync(resolvePath(tempDir, "persona.md"), personaBody(raw) + "\n", "utf8");
 			} catch (err) {
-				return { ok: false, text: "", error: `persona 临时文件写入失败: ${(err as Error).message}` };
+				return { ok: false, text: "", error: `persona 临时文件写入失败: ${(err as Error).message}`, kind: "process" };
 			}
 		}
 
@@ -216,12 +217,12 @@ export class PiNodeExecutor implements Executor {
 			const base = resolvePath(this.cwd ?? process.cwd());
 			const resolved = resolvePath(base, node.workdir);
 			if (resolved !== base && !resolved.startsWith(base + sep)) {
-				return { ok: false, text: "", error: `workdir「${node.workdir}」越界（必须在 ${base} 内）` };
+				return { ok: false, text: "", error: `workdir「${node.workdir}」越界（必须在 ${base} 内）`, kind: "config" };
 			}
 			try {
 				mkdirSync(resolved, { recursive: true });
 			} catch (err) {
-				return { ok: false, text: "", error: `workdir「${node.workdir}」创建失败: ${(err as Error).message}` };
+				return { ok: false, text: "", error: `workdir「${node.workdir}」创建失败: ${(err as Error).message}`, kind: "config" };
 			}
 			bridgeCwd = resolved;
 		}
@@ -237,8 +238,8 @@ export class PiNodeExecutor implements Executor {
 		const bridge = this.bridgeFactory({ extraArgs, cwd: bridgeCwd });
 		const state = initState();
 		let settled = false;
-		let timer: ReturnType<typeof setTimeout> | null = null;
-		const onAbort = () => finish({ ok: false, text: "", error: "已中止" });
+		let timer: UnrefableTimeout | null = null;
+		const onAbort = () => finish({ ok: false, text: "", error: "已中止", kind: "aborted" });
 
 		function cleanup(): void {
 			if (timer) clearTimeout(timer);
@@ -277,7 +278,7 @@ export class PiNodeExecutor implements Executor {
 			} else if (ev.type === "agent_settled") {
 				// Success path (unless a terminal error was folded earlier).
 				if (state.lastError) {
-					finish({ ok: false, text: finalOutput(state), error: state.lastError });
+					finish({ ok: false, text: finalOutput(state), error: state.lastError, kind: "model" });
 					return;
 				}
 				const last = lastAssistant(state.messages);
@@ -292,20 +293,19 @@ export class PiNodeExecutor implements Executor {
 		});
 		bridge.on("exit", (code: number | null, stderr: string) => {
 			const tail = stderr.replace(/\s+/g, " ").trim().slice(-500);
-			finish({ ok: false, text: "", error: `pi 进程退出 (code ${code ?? "null"})${tail ? `: ${tail}` : ""}` });
+			finish({ ok: false, text: "", error: `pi 进程退出 (code ${code ?? "null"})${tail ? `: ${tail}` : ""}`, kind: "process" });
 		});
 
-		timer = setTimeout(() => finish({ ok: false, text: "", error: `节点超时（${budgetMs}ms）` }), budgetMs);
-		(timer as { unref?: () => void }).unref?.();
+		timer = setTimeoutUnref(() => finish({ ok: false, text: "", error: `节点超时（${budgetMs}ms）`, kind: "timeout" }), budgetMs);
 		ctx.signal.addEventListener("abort", onAbort);
 
 		bridge.start();
 		bridge
 			.request({ type: "prompt", message: assembledPrompt })
 			.then((res) => {
-				if (!res.success) finish({ ok: false, text: "", error: `prompt 被拒绝: ${JSON.stringify(res.data ?? {})}` });
+				if (!res.success) finish({ ok: false, text: "", error: `prompt 被拒绝: ${JSON.stringify(res.data ?? {})}`, kind: "model" });
 			})
-			.catch((err: Error) => finish({ ok: false, text: "", error: err.message }));
+			.catch((err: Error) => finish({ ok: false, text: "", error: err.message, kind: "process" }));
 
 		return done;
 	}

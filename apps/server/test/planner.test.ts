@@ -2,12 +2,17 @@ import { describe, expect, it } from "vitest";
 import { emptyUsage, type AssistantMessage, type JsonAgentSessionEvent } from "@pi-graph/shared";
 import {
 	buildPlanPrompt,
+	buildRepairPrompt,
 	extractGraph,
+	extractTaskOverride,
 	MAX_PLAN_NODES,
 	MAX_PLANNER_GATES,
 	PiPlanner,
+	REPAIR_SECTION_CHARS,
+	REPAIR_TOTAL_CHARS,
 	type PlanOutcome,
 	type PlannerBridge,
+	type RepairRequest,
 } from "../src/planner.ts";
 
 // ============================================================================
@@ -406,6 +411,102 @@ describe("buildPlanPrompt", () => {
 });
 
 // ============================================================================
+// AI repair: buildRepairPrompt + extractTaskOverride (pure)
+// ============================================================================
+
+const repairReq = (over: Partial<RepairRequest> = {}): RepairRequest => ({
+	nodeId: "n3",
+	task: "汇总上游调研并输出结论",
+	error: "节点超时（60000ms）",
+	upstream: [
+		{ nodeId: "n1", text: "调研材料 A" },
+		{ nodeId: "n2", text: "调研材料 B" },
+	],
+	...over,
+});
+
+describe("buildRepairPrompt", () => {
+	it("embeds the node, the failure, the upstream material, and the strict-JSON contract", () => {
+		const p = buildRepairPrompt(repairReq());
+		expect(p).toContain("节点 id：n3");
+		expect(p).toContain("汇总上游调研并输出结论");
+		expect(p).toContain("节点超时（60000ms）");
+		expect(p).toContain("### from n1\n调研材料 A");
+		expect(p).toContain("### from n2\n调研材料 B");
+		expect(p).toContain("只有一个 JSON 对象");
+		expect(p).toContain('"task"');
+	});
+
+	it("carries current model/tools so the model can keep or adjust them", () => {
+		const p = buildRepairPrompt(repairReq({ model: "deepseek/deepseek-chat", tools: ["read", "grep"] }));
+		expect(p).toContain("model=deepseek/deepseek-chat");
+		expect(p).toContain("tools=read,grep");
+		// Absent config → no config line at all.
+		expect(buildRepairPrompt(repairReq({ model: undefined, tools: undefined }))).not.toContain("当前执行配置");
+		// No upstream → no upstream block.
+		expect(buildRepairPrompt(repairReq({ upstream: [] }))).not.toContain("上游节点输出");
+	});
+
+	it("caps each upstream section and the total material budget", () => {
+		// 9 over-long sections: the per-section cap (2000) makes each ~2011
+		// chars, so the 16000-char total budget runs out mid-way through #8 —
+		// #8 is cut by the BUDGET (not just the section cap) and #9 gets only
+		// the omission note.
+		const upstream = Array.from({ length: 9 }, (_, i) => ({ nodeId: `n${i + 1}`, text: "x".repeat(REPAIR_SECTION_CHARS + 500) }));
+		const p = buildRepairPrompt(repairReq({ upstream }));
+		expect(p).toContain("（该段过长，已截断）");
+		expect(p).toContain("（材料预算用尽，已截断）");
+		expect(p).toContain(`### from n9\n（材料预算用尽，已省略）`);
+	});
+
+	it("appends feedback on retry", () => {
+		const p = buildRepairPrompt(repairReq(), "task 缺失或为空");
+		expect(p).toContain("无法使用");
+		expect(p).toContain("task 缺失或为空");
+	});
+});
+
+describe("extractTaskOverride", () => {
+	it("extracts JSON wrapped in prose/fences, keeping model and tools", () => {
+		const out = extractTaskOverride('好的：\n```json\n{"task":"改写后的任务","model":"openai/gpt-4o","tools":["read","bash"]}\n```');
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			expect(out.override.task).toBe("改写后的任务");
+			expect(out.override.model).toBe("openai/gpt-4o");
+			expect(out.override.tools).toEqual(["read", "bash"]);
+		}
+	});
+
+	it("missing/empty task is a hard error (the whole point of a repair)", () => {
+		for (const text of ['{"model":"a/b"}', '{"task":"   "}']) {
+			const out = extractTaskOverride(text);
+			expect(out.ok).toBe(false);
+			if (!out.ok) expect(out.error).toContain("task");
+		}
+	});
+
+	it("drops (never fails on) an invalid model, unsafe/blank tools, non-objects", () => {
+		const out = extractTaskOverride('{"task":"t","model":"bad & model","tools":["read","bad tool",7,"a,b"]}');
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			expect(out.override.model).toBeUndefined(); // MODEL_RE failure → dropped
+			expect(out.override.tools).toEqual(["read"]); // TOOL_NAME_RE filter
+		}
+		const empty = extractTaskOverride('{"task":"t","tools":[]}');
+		expect(empty.ok).toBe(true);
+		if (empty.ok) expect(empty.override.tools).toBeUndefined(); // empty list → absent
+		expect(extractTaskOverride("抱歉，修不了") .ok).toBe(false); // no JSON
+		expect(extractTaskOverride("[1,2,3]").ok).toBe(false); // not an object
+	});
+
+	it("caps the task at the planner ceiling (untrusted LLM text)", () => {
+		const out = extractTaskOverride(JSON.stringify({ task: "长".repeat(20_000) }));
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.override.task.length).toBe(8000);
+	});
+});
+
+// ============================================================================
 // PiPlanner over a fake bridge
 // ============================================================================
 
@@ -588,6 +689,40 @@ describe("PiPlanner", () => {
 	it("satisfies the Planner contract RunManager drives (type-level)", async () => {
 		const outcome: PlanOutcome = { ok: true, graph: { nodes: [], edges: [] } };
 		expect(outcome.ok).toBe(true);
+	});
+
+	it("rewriteTask streams the rewrite and returns the override", async () => {
+		const planner = freshPlanner(['{"task":"分两步汇总，先列要点再下结论","model":"openai/gpt-4o","tools":["read"]}']);
+		const deltas: string[] = [];
+		const out = await planner.rewriteTask(repairReq(), { onDelta: (d) => deltas.push(d), signal: new AbortController().signal });
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			expect(out.task).toContain("分两步汇总");
+			expect(out.model).toBe("openai/gpt-4o");
+			expect(out.tools).toEqual(["read"]);
+		}
+		expect(deltas.join("")).toContain("分两步汇总");
+		const bridge = FakeBridge.instances[0]!;
+		expect(bridge.prompts[0]).toContain("节点超时（60000ms）");
+		expect(bridge.prompts[0]).toContain("### from n1");
+	});
+
+	it("rewriteTask retries once with the parse error fed back", async () => {
+		const planner = freshPlanner(["这不是 JSON", '{"task":"修正后的任务"}']);
+		const deltas: string[] = [];
+		const out = await planner.rewriteTask(repairReq(), { onDelta: (d) => deltas.push(d), signal: new AbortController().signal });
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.task).toBe("修正后的任务");
+		const second = FakeBridge.instances[1]!;
+		expect(second.prompts[0]).toContain("无法使用");
+		expect(deltas.join("")).toContain("修复无效");
+	});
+
+	it("rewriteTask fails after exhausting retries with the last error", async () => {
+		const planner = freshPlanner(["仍然不是 JSON", '{"model":"a/b"}']); // 2nd has no task either
+		const out = await planner.rewriteTask(repairReq(), { onDelta: () => {}, signal: new AbortController().signal });
+		expect(out.ok).toBe(false);
+		if (!out.ok) expect(out.error).toContain("task");
 	});
 });
 
