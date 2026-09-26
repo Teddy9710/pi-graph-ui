@@ -1026,6 +1026,22 @@ select:focus-visible {
 	max-width: 420px;
 }
 
+/* group run-bar action clusters without changing gap semantics */
+.pg-orch-group {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+}
+
+/* file input is triggered via ref, never displayed */
+.pg-hidden-input {
+	position: absolute;
+	opacity: 0;
+	width: 0;
+	height: 0;
+	pointer-events: none;
+}
+
 /* run-view placeholder (planning before the graph materializes). Also reused
  * as the empty-canvas hint overlaid on live canvases — never block clicks. */
 .pg-orch-empty {

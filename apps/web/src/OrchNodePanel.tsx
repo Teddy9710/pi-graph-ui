@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 import {
+	buildRunExport,
 	EDGE_TYPES,
 	EDGE_TYPE_LABELS,
 	MAX_EDGE_NOTE_CHARS,
@@ -19,6 +20,13 @@ import { API_BASE } from "./store.ts";
 import { Icon } from "./icons.tsx";
 import { RUN_NODE_STATUS_LABEL } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
+import {
+	copyText,
+	downloadJson,
+	exportGraphToJson,
+	graphExportFilename,
+	runExportFilename,
+} from "./export-utils.ts";
 
 /** GET /api/agents → persona names for the agent datalist. Tolerates both
  *  string[] and {name}[] shapes; failure just leaves the list empty. */
@@ -113,6 +121,32 @@ function GraphSummary() {
 	const run = useOrchStore((s) => s.run);
 	const view = useOrchStore((s) => s.view);
 	const shown = view === "run" ? run.graph : graphDef;
+
+	async function copyShown() {
+		if (!shown) return;
+		try {
+			await copyText(exportGraphToJson(shown));
+		} catch {
+			// Errors are transient; the toolbar already shows copy failures.
+		}
+	}
+	function downloadShown() {
+		if (!shown) return;
+		downloadJson(exportGraphToJson(shown), graphExportFilename(shown));
+	}
+	async function copyRunExport() {
+		if (run.status === "idle") return;
+		try {
+			await copyText(JSON.stringify(buildRunExport(run), null, 2));
+		} catch {
+			// Ignore.
+		}
+	}
+	function downloadRunExport() {
+		if (run.status === "idle") return;
+		downloadJson(JSON.stringify(buildRunExport(run), null, 2), runExportFilename(buildRunExport(run)));
+	}
+
 	return (
 		<aside className="pg-panel">
 			<header>
@@ -120,6 +154,16 @@ function GraphSummary() {
 				<span className="pg-dim">
 					{shown ? `${shown.nodes.length} 节点 · ${shown.edges.length} 边` : "尚未生成"}
 				</span>
+				{shown && (
+					<span style={{ marginLeft: "auto", display: "inline-flex", gap: 2 }}>
+						<button className="pg-session-act" title="复制图为 JSON" onClick={copyShown}>
+							<Icon name="copy" size={14} />
+						</button>
+						<button className="pg-session-act" title="下载图为 JSON" onClick={downloadShown}>
+							<Icon name="download" size={14} />
+						</button>
+					</span>
+				)}
 			</header>
 			{run.goal && (
 				<>
@@ -141,6 +185,19 @@ function GraphSummary() {
 							</div>
 						))
 					)}
+				</>
+			)}
+			{run.status !== "idle" && (
+				<>
+					<h4>运行结果</h4>
+					<div className="pg-form-row" style={{ gap: 6 }}>
+						<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={copyRunExport}>
+							<Icon name="copy" size={13} /> 复制运行 JSON
+						</button>
+						<button className="pg-btn pg-btn-ghost pg-btn-sm" onClick={downloadRunExport}>
+							<Icon name="download" size={13} /> 下载运行 JSON
+						</button>
+					</div>
 				</>
 			)}
 			<h4>提示</h4>

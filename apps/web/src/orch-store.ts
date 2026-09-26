@@ -14,6 +14,7 @@ import {
 	edgeId,
 	emptyNodeMap,
 	foldRunEvent,
+	formatImportIssues,
 	initRunState,
 	validateGraph,
 	type EdgeType,
@@ -24,6 +25,7 @@ import {
 	type RunState,
 } from "@pi-graph/shared";
 import { autoLayoutGraphDef } from "./orch-layout.ts";
+import { importGraphDef, readTextFile } from "./export-utils.ts";
 // Circular import with store.ts is INTENTIONAL and safe: both sides only hold
 // function references that are called at runtime (never during module
 // evaluation), and function declarations are hoisted before any import runs.
@@ -67,6 +69,8 @@ interface OrchState {
 	connectIssue: string | null;
 	/** Server-side run rejection (run_error envelope); cleared on next run start. */
 	orchError: { message: string; issues: GraphValidationIssue[] } | null;
+	/** Clipboard/file import rejection; cleared on the next successful import. */
+	importError: string | null;
 	/** Add a node at the staggered spawn grid; gate = place a HITL gate node
 	 *  (never executed — the run parks on it until a human decides). */
 	addNode: (gate?: boolean) => void;
@@ -113,6 +117,11 @@ interface OrchState {
 	setView: (view: "editor" | "run") => void;
 	/** Copy the generated/executed run graph into the editor for hand-tuning. */
 	importGraphFromRun: () => void;
+	/** Import a GraphDef from clipboard text or a JSON file, validate it, and
+	 *  replace the editor state on success. Errors surface in `importError`. */
+	importGraph: (source: string | File) => Promise<void>;
+	/** Clear the import error banner. */
+	clearImportError: () => void;
 }
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -194,6 +203,7 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 	view: "editor",
 	connectIssue: null,
 	orchError: null,
+	importError: null,
 
 	addNode: (gate) =>
 		set((s) => {
@@ -427,6 +437,34 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 				view: "editor",
 			};
 		}),
+
+	importGraph: async (source) => {
+		let input: unknown;
+		try {
+			input = typeof source === "string" ? source : await readTextFile(source);
+		} catch (e) {
+			set({ importError: e instanceof Error ? e.message : "读取失败" });
+			return;
+		}
+		const result = importGraphDef(input);
+		if ("error" in result) {
+			set({ importError: `导入失败：${result.error}` });
+			return;
+		}
+		if (result.issues.length > 0) {
+			set({ importError: `导入失败：${formatImportIssues(result.issues)}` });
+			return;
+		}
+		set({
+			...graphState(autoLayoutGraphDef(cloneGraph(result.graph))),
+			selectedNodeId: null,
+			selectedEdgeId: null,
+			importError: null,
+			view: "editor",
+		});
+	},
+
+	clearImportError: () => set({ importError: null }),
 }));
 
 // ============================================================================

@@ -13,14 +13,21 @@
  * AI 修复中).
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
-import { TEMPLATES } from "@pi-graph/shared";
+import { buildRunExport, TEMPLATES } from "@pi-graph/shared";
 import { OrchCanvas } from "./OrchCanvas.tsx";
 import { OrchNodePanel } from "./OrchNodePanel.tsx";
 import { RUN_STATUS_LABEL } from "./status.ts";
 import { useOrchStore } from "./orch-store.ts";
 import { Icon } from "./icons.tsx";
+import {
+	copyText,
+	downloadJson,
+	exportGraphToJson,
+	graphExportFilename,
+	runExportFilename,
+} from "./export-utils.ts";
 
 /** Ticking `now` while `active` — the elapsed chip freezes otherwise (its
  *  value only recomputed when a run event arrived). */
@@ -128,19 +135,24 @@ function PlanBar() {
 }
 
 function OrchRunBar() {
+	const graphDef = useOrchStore((s) => s.graphDef);
 	const issues = useOrchStore((s) => s.issues);
 	const run = useOrchStore((s) => s.run);
 	const view = useOrchStore((s) => s.view);
 	const connectIssue = useOrchStore((s) => s.connectIssue);
 	const orchError = useOrchStore((s) => s.orchError);
+	const importError = useOrchStore((s) => s.importError);
 	const applyTemplate = useOrchStore((s) => s.applyTemplate);
 	const autoArrange = useOrchStore((s) => s.autoArrange);
 	const addNode = useOrchStore((s) => s.addNode);
 	const clearCanvas = useOrchStore((s) => s.clearCanvas);
 	const runGraph = useOrchStore((s) => s.runGraph);
 	const abortRun = useOrchStore((s) => s.abortRun);
+	const importGraph = useOrchStore((s) => s.importGraph);
+	const clearImportError = useOrchStore((s) => s.clearImportError);
 	const select = useOrchStore((s) => s.select);
 	const [tpl, setTpl] = useState("");
+	const fileInputRef = useRef<HTMLInputElement>(null);
 
 	const running = run.status === "running";
 	const planning = run.status === "planning";
@@ -151,6 +163,48 @@ function OrchRunBar() {
 	const issueTitle = issues.map((i) => (i.nodeOrEdge ? `${i.nodeOrEdge}：` : "") + i.message).join("\n");
 	const now = useNow(running);
 	const elapsed = run.startedAt != null ? ((run.finishedAt ?? now) - run.startedAt) / 1000 : null;
+
+	async function copyGraph() {
+		try {
+			await copyText(exportGraphToJson(graphDef));
+		} catch (e) {
+			useOrchStore.setState({ importError: e instanceof Error ? e.message : "复制失败" });
+		}
+	}
+	function downloadGraph() {
+		downloadJson(exportGraphToJson(graphDef), graphExportFilename(graphDef));
+	}
+	async function copyRun() {
+		if (!run.graph) return;
+		try {
+			await copyText(JSON.stringify(buildRunExport(run), null, 2));
+		} catch (e) {
+			useOrchStore.setState({ importError: e instanceof Error ? e.message : "复制失败" });
+		}
+	}
+	function downloadRun() {
+		if (!run.graph) return;
+		downloadJson(JSON.stringify(buildRunExport(run), null, 2), runExportFilename(buildRunExport(run)));
+	}
+	async function importFromClipboard() {
+		clearImportError();
+		let text: string | null = null;
+		try {
+			if (navigator.clipboard?.readText) {
+				text = await navigator.clipboard.readText();
+			}
+		} catch {
+			// Permission denied or unavailable — fall back to prompt.
+		}
+		if (text === null || text === "") {
+			text = window.prompt("粘贴图 JSON") ?? "";
+		}
+		if (text) await importGraph(text);
+	}
+	async function importFromFile(file: File) {
+		clearImportError();
+		await importGraph(file);
+	}
 
 	return (
 		<div className="pg-orch-bar">
@@ -215,6 +269,55 @@ function OrchRunBar() {
 			<button className="pg-btn pg-btn-danger pg-btn-sm" disabled={!busy} onClick={abortRun}>
 				<Icon name="stop" size={13} /> 中止
 			</button>
+			<input
+				ref={fileInputRef}
+				type="file"
+				accept=".json,application/json"
+				className="pg-hidden-input"
+				onChange={(e) => {
+					const file = e.target.files?.[0];
+					if (file) importFromFile(file);
+					e.target.value = "";
+				}}
+			/>
+			<span className="pg-orch-group" title="图导入/导出">
+				<button className="pg-btn pg-btn-ghost pg-btn-sm" title="复制当前图为 JSON" onClick={copyGraph}>
+					<Icon name="copy" size={13} />
+				</button>
+				<button className="pg-btn pg-btn-ghost pg-btn-sm" title="下载当前图为 JSON" onClick={downloadGraph}>
+					<Icon name="download" size={13} />
+				</button>
+				<button className="pg-btn pg-btn-ghost pg-btn-sm" title="从剪贴板导入图" onClick={importFromClipboard}>
+					<Icon name="copy" size={13} /> 粘贴
+				</button>
+				<button
+					className="pg-btn pg-btn-ghost pg-btn-sm"
+					title="从文件导入图"
+					onClick={() => fileInputRef.current?.click()}
+				>
+					<Icon name="upload" size={13} /> 文件
+				</button>
+			</span>
+			{run.status !== "idle" && (
+				<span className="pg-orch-group" title="运行结果导出">
+					<button
+						className="pg-btn pg-btn-ghost pg-btn-sm"
+						title="复制运行结果为 JSON"
+						disabled={!run.graph}
+						onClick={copyRun}
+					>
+						<Icon name="copy" size={13} /> 复制运行
+					</button>
+					<button
+						className="pg-btn pg-btn-ghost pg-btn-sm"
+						title="下载运行结果为 JSON"
+						disabled={!run.graph}
+						onClick={downloadRun}
+					>
+						<Icon name="download" size={13} /> 下载运行
+					</button>
+				</span>
+			)}
 			{issues.length > 0 && view === "editor" && (
 				<span
 					className="pg-orch-chip pg-error-text"
@@ -241,6 +344,11 @@ function OrchRunBar() {
 			{orchError && (
 				<span className="pg-error-text" title={orchError.issues.map((i) => i.message).join("\n")}>
 					{orchError.message}
+				</span>
+			)}
+			{importError && (
+				<span className="pg-error-text" title={importError}>
+					{importError}
 				</span>
 			)}
 		</div>
