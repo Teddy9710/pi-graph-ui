@@ -144,6 +144,36 @@ flowchart LR
 - 中止会终止规划器与所有节点进程树，避免孤儿进程继续消耗资源。
 - 每次运行的每个节点都有专属产物目录 `<root>/<runId>/<nodeId>/`（默认 `~/.pi-graph-ui/artifacts`）：未设置 `workdir` 的节点以它为子进程工作目录（并行节点互不踩文件），最终输出归档为目录下的 `output.md`（复用节点写 `fromRunId` 头）。
 
+## 网络搜索
+
+项目内置了 Jina AI 驱动的 pi 扩展，提供两个工具：
+
+- `web_search`：联网搜索并返回干净 Markdown 结果
+- `read_url`：读取任意 URL 并返回正文 Markdown
+
+安装扩展（仓库根目录执行一次）：
+
+```bash
+# 复制到项目级 pi 扩展目录
+mkdir -p .pi/extensions
+cp extensions/web-search.ts .pi/extensions/web-search.ts
+```
+
+可选环境变量（写到 `.env` 或启动服务前 export）：
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `JINA_API_KEY` | Jina API key；无 key 也能用，但限额更低 | 无 |
+| `JINA_SEARCH_URL` | 搜索 endpoint | `https://s.jina.ai` |
+| `JINA_READER_URL` | 网页读取 endpoint | `https://r.jina.ai` |
+
+启用方式：
+
+1. 主会话：pi 会自动加载 `.pi/extensions/web-search.ts`，工具出现在 `Available tools`。
+2. 编排节点：在节点档案的 `tools` 里填 `web_search`（或 `read_url`），该节点运行时就会带上 `--tools web_search`。
+
+> 需要本机能访问 `s.jina.ai` / `r.jina.ai`。如果在国内受限，可开 VPN，或把 `JINA_SEARCH_URL`/`JINA_READER_URL` 指向自建代理/SearXNG 地址。
+
 ## 失败恢复
 
 节点出错时三层手段由轻到重：
