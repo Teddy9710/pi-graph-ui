@@ -190,6 +190,20 @@ export interface GraphDef {
 	edges: EdgeDef[];
 }
 
+/** A patch that replaces a subgraph of an existing graph at runtime. */
+export interface SubgraphPatch {
+	/** New nodes to insert (must not collide with surviving original nodes). */
+	nodes: NodeDef[];
+	/** New edges: internal to the patch plus wiring edges to/from the original graph. */
+	edges: EdgeDef[];
+	/** Node ids in the original graph that this patch replaces. */
+	replaces: string[];
+	/** The patch entry node id; it receives the upstream edges of the replaced node. */
+	entryNodeId: string;
+	/** The patch exit node id; its output flows to downstream nodes that survive the replacement. */
+	exitNodeId: string;
+}
+
 export function edgeId(source: string, target: string): string {
 	return `${source}->${target}`;
 }
@@ -638,6 +652,20 @@ export type RunEvent =
 	| { type: "repair_delta"; runId: string; delta: string }
 	| { type: "repair_completed"; runId: string; task: string; model?: string; tools?: string[] }
 	| { type: "repair_failed"; runId: string; error: string }
+	// Subgraph repair: the planner rewrites a failed node as a small DAG and the
+	// engine restarts the run with the patched graph, seeding completed nodes.
+	| { type: "subgraph_repair_started"; runId: string; nodeId: string; startedAt: number }
+	| { type: "subgraph_repair_delta"; runId: string; delta: string }
+	| { type: "subgraph_repair_completed"; runId: string; patch: SubgraphPatch }
+	| { type: "subgraph_repair_failed"; runId: string; error: string }
+	| {
+			type: "graph_patched";
+			runId: string;
+			patchedAt: number;
+			graph: GraphDef;
+			replacedNodeIds: string[];
+			addedNodeIds: string[];
+	  }
 	| {
 			type: "run_finished";
 			runId: string;
@@ -701,7 +729,7 @@ export interface RunState {
 	 * labels itself 「AI 修复中」). Cleared when the engine takes over
 	 * (run_started) or the repair fails.
 	 */
-	repairTarget: { fromRunId: string; nodeId: string } | null;
+	repairTarget: { fromRunId: string; nodeId: string; kind: "task" | "subgraph" } | null;
 }
 
 export function initRunState(): RunState {
@@ -754,6 +782,25 @@ function initNode(id: string): RunNodeState {
 	};
 }
 
+/** Recompute aggregate ok/failed/skipped counters from current node statuses.
+ *  Used after graph_patched, where removed nodes should stop contributing. */
+function recomputeRunCounts(state: RunState): void {
+	let ok = 0;
+	let failed = 0;
+	let skipped = 0;
+	for (const id of Object.keys(state.nodes)) {
+		const node = state.nodes[id];
+		if (!node) continue;
+		const status = node.status;
+		if (status === "ok") ok++;
+		else if (status === "error") failed++;
+		else if (status === "skipped") skipped++;
+	}
+	state.ok = ok;
+	state.failed = failed;
+	state.skipped = skipped;
+}
+
 /**
  * Fold one run event into the run state (mutating it). Stale-runId and
  * unknown-nodeId events are ignored, so replay + live share one path.
@@ -763,7 +810,14 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 	// repair_started): a new run starting on a live connection must RESET the
 	// state, not be ignored as stale (otherwise a browser that stays connected
 	// across two runs shows the first run forever).
-	if (event.type !== "run_started" && event.type !== "plan_started" && event.type !== "repair_started" && state.runId !== null && event.runId !== state.runId) {
+	if (
+		event.type !== "run_started" &&
+		event.type !== "plan_started" &&
+		event.type !== "repair_started" &&
+		event.type !== "subgraph_repair_started" &&
+		state.runId !== null &&
+		event.runId !== state.runId
+	) {
 		return state;
 	}
 	switch (event.type) {
@@ -939,7 +993,7 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			state.failed = 0;
 			state.skipped = 0;
 			state.usage = zeroNodeUsage();
-			state.repairTarget = { fromRunId: event.fromRunId, nodeId: event.nodeId };
+			state.repairTarget = { fromRunId: event.fromRunId, nodeId: event.nodeId, kind: "task" };
 			return state;
 		}
 		case "repair_delta": {
@@ -955,6 +1009,53 @@ export function foldRunEvent(state: RunState, event: RunEvent): RunState {
 			state.planError = event.error;
 			state.status = "failed";
 			state.repairTarget = null;
+			return state;
+		}
+		case "subgraph_repair_started": {
+			// Same reset semantics as repair_started, but for a subgraph rewrite.
+			state.runId = event.runId;
+			state.status = "planning";
+			state.goal = null;
+			state.planText = "";
+			state.planError = null;
+			state.graph = null;
+			state.nodes = emptyNodeMap();
+			state.startedAt = event.startedAt;
+			state.finishedAt = null;
+			state.ok = 0;
+			state.failed = 0;
+			state.skipped = 0;
+			state.usage = zeroNodeUsage();
+			state.repairTarget = { fromRunId: event.runId, nodeId: event.nodeId, kind: "subgraph" };
+			return state;
+		}
+		case "subgraph_repair_delta": {
+			state.planText = (state.planText + event.delta).slice(-PREVIEW_CAP);
+			return state;
+		}
+		case "subgraph_repair_completed": {
+			// Patch state is committed by graph_patched; here we just keep the
+			// planning UI alive until the engine takes over.
+			return state;
+		}
+		case "subgraph_repair_failed": {
+			state.planError = event.error;
+			state.status = "failed";
+			state.repairTarget = null;
+			return state;
+		}
+		case "graph_patched": {
+			state.graph = event.graph;
+			state.repairTarget = null;
+			// Remove nodes that no longer exist.
+			for (const id of Object.keys(state.nodes)) {
+				if (!event.graph.nodes.some((n) => n.id === id)) delete state.nodes[id];
+			}
+			// Initialize new nodes.
+			for (const n of event.graph.nodes) {
+				if (!state.nodes[n.id]) state.nodes[n.id] = initNode(n.id);
+			}
+			recomputeRunCounts(state);
 			return state;
 		}
 		case "run_finished": {

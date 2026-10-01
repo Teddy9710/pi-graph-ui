@@ -220,6 +220,7 @@ export function OrchNodePanel() {
 	const deleteNode = useOrchStore((s) => s.deleteNode);
 	const approveNode = useOrchStore((s) => s.approveNode);
 	const repairNode = useOrchStore((s) => s.repairNode);
+	const repairSubgraph = useOrchStore((s) => s.repairSubgraph);
 	const agents = useAgentNames();
 	const runNode = selectedNodeId ? (run.nodes[selectedNodeId] ?? null) : null;
 	// The note belongs to ONE gate decision — switching nodes, a settled
@@ -428,17 +429,26 @@ export function OrchNodePanel() {
 						</div>
 					)}
 					{runNode.error && <pre className="pg-pre pg-error-text">{runNode.error}</pre>}
-					{/* AI 修复: only a FAILED node of a TERMINAL run qualifies (the
+					{/* AI 修复 / 子图重规划：only a FAILED non-gate node qualifies (the
 					 * store guard double-checks); gates are excluded — a rejection is
 					 * a human decision, not something the planner may rewrite. */}
-					{runNode.status === "error" && !gate && (run.status === "failed" || run.status === "aborted") && (
-						<button
-							className="pg-btn pg-btn-sm"
-							title="AI 结合失败原因与上游输出重写该节点的任务（可调整模型/工具），复用其余节点输出后重跑"
-							onClick={() => repairNode(node.id)}
-						>
-							AI 修复并重跑
-						</button>
+					{runNode.status === "error" && !gate && (
+						<div className="pg-form-row" style={{ gap: 6 }}>
+							<button
+								className="pg-btn pg-btn-sm"
+								title="AI 结合失败原因与上游输出重写该节点的任务（可调整模型/工具），复用其余节点输出后重跑"
+								onClick={() => repairNode(node.id)}
+							>
+								AI 修复并重跑
+							</button>
+							<button
+								className="pg-btn pg-btn-sm"
+								title="用 AI 重新规划该节点为子图，替换原节点并继续执行"
+								onClick={() => repairSubgraph(node.id)}
+							>
+								重新规划子图
+							</button>
+						</div>
 					)}
 					{runNode.status === "skipped" && runNode.skipReason && (
 						<div className="pg-dim">跳过：{runNode.skipReason}</div>

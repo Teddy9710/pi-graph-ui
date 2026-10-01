@@ -3,7 +3,9 @@ import { emptyUsage, type AssistantMessage, type JsonAgentSessionEvent } from "@
 import {
 	buildPlanPrompt,
 	buildRepairPrompt,
+	buildSubgraphPatchPrompt,
 	extractGraph,
+	extractSubgraphPatch,
 	extractTaskOverride,
 	MAX_PLAN_NODES,
 	MAX_PLANNER_GATES,
@@ -13,6 +15,7 @@ import {
 	type PlanOutcome,
 	type PlannerBridge,
 	type RepairRequest,
+	type SubgraphPatchRequest,
 } from "../src/planner.ts";
 
 // ============================================================================
@@ -503,6 +506,82 @@ describe("extractTaskOverride", () => {
 		const out = extractTaskOverride(JSON.stringify({ task: "长".repeat(20_000) }));
 		expect(out.ok).toBe(true);
 		if (out.ok) expect(out.override.task.length).toBe(8000);
+	});
+});
+
+// ============================================================================
+// Subgraph repair: buildSubgraphPatchPrompt + extractSubgraphPatch (pure)
+// ============================================================================
+
+function subgraphReq(over: Partial<SubgraphPatchRequest> = {}): SubgraphPatchRequest {
+	return {
+		nodeId: "b",
+		task: "跑b",
+		error: "模型太弱",
+		upstream: [{ nodeId: "a", text: "结果:a" }],
+		downstreamNodes: [{ id: "c", task: "跑c" }],
+		...over,
+	};
+}
+
+describe("buildSubgraphPatchPrompt", () => {
+	it("embeds the node, failure, downstream context, upstream material, and strict-JSON contract", () => {
+		const p = buildSubgraphPatchPrompt(subgraphReq());
+		expect(p).toContain("被替换节点：b");
+		expect(p).toContain("模型太弱");
+		expect(p).toContain("结果:a");
+		expect(p).toContain("- c: 跑c");
+		expect(p).toContain('"replaces": ["b"]');
+		expect(p).toContain("entryNodeId");
+		expect(p).toContain("exitNodeId");
+	});
+
+	it("carries current model/tools and goal when present", () => {
+		const p = buildSubgraphPatchPrompt(subgraphReq({ model: "deepseek/deepseek-chat", tools: ["read"], goal: "写报告" }));
+		expect(p).toContain("model=deepseek/deepseek-chat");
+		expect(p).toContain("tools=read");
+		expect(p).toContain("整体目标：写报告");
+	});
+
+	it("appends feedback on retry", () => {
+		const p = buildSubgraphPatchPrompt(subgraphReq(), "entryNodeId 缺失");
+		expect(p).toContain("无法使用");
+		expect(p).toContain("entryNodeId 缺失");
+	});
+});
+
+describe("extractSubgraphPatch", () => {
+	it("extracts JSON wrapped in prose/fences", () => {
+		const text = '好的：\n```json\n{"nodes":[{"id":"s1","task":"x"},{"id":"s2","task":"y"}],"edges":[{"source":"s1","target":"s2"}],"replaces":["b"],"entryNodeId":"s1","exitNodeId":"s2"}\n```';
+		const out = extractSubgraphPatch(text, new Set(["b", "c"]));
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			expect(out.patch.replaces).toEqual(["b"]);
+			expect(out.patch.entryNodeId).toBe("s1");
+			expect(out.patch.exitNodeId).toBe("s2");
+			expect(out.patch.nodes).toHaveLength(2);
+			expect(out.patch.edges[0]!.id).toBe("s1->s2");
+		}
+	});
+
+	it("rejects id collisions with surviving original nodes", () => {
+		const out = extractSubgraphPatch(
+			JSON.stringify({ nodes: [{ id: "c", task: "x" }], edges: [], replaces: ["b"], entryNodeId: "c", exitNodeId: "c" }),
+			new Set(["b", "c"]),
+		);
+		expect(out.ok).toBe(false);
+		if (!out.ok) expect(out.error).toContain("冲突");
+	});
+
+	it("rejects missing entry/exit/replaces and invalid internal graphs", () => {
+		expect(extractSubgraphPatch("{}", new Set()).ok).toBe(false);
+		expect(extractSubgraphPatch(JSON.stringify({ nodes: [], edges: [], replaces: ["b"], entryNodeId: "s1", exitNodeId: "s1" }), new Set()).ok).toBe(false);
+		expect(
+			extractSubgraphPatch(
+				JSON.stringify({ nodes: [{ id: "s1", task: "x" }], edges: [], replaces: ["b"], entryNodeId: "missing", exitNodeId: "s1" }),
+				new Set(),
+			).ok,
+		).toBe(false);
 	});
 });
 

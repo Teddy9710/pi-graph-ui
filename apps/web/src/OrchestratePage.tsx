@@ -78,7 +78,13 @@ function PlanBar() {
 				title="规划器把目标拆成任务 DAG 并立即执行"
 				onClick={() => planRun(trimmed)}
 			>
-				{planning ? (run.repairTarget ? "AI 修复中…" : "规划中…") : (<><Icon name="bolt" size={14} /> 自动编排</>)}
+				{planning
+				? run.repairTarget?.kind === "subgraph"
+					? "子图重规划中…"
+					: run.repairTarget
+						? "AI 修复中…"
+						: "规划中…"
+				: (<><Icon name="bolt" size={14} /> 自动编排</>)}
 			</button>
 			{planning && (
 				<button className="pg-btn pg-btn-danger pg-btn-sm" onClick={abortRun}>

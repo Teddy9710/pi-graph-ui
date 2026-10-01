@@ -46,6 +46,10 @@
  *          (repair_* events, same runId), then re-runs it with the other
  *          outputs seeded; gate nodes are rejected (human decisions are not
  *          rewritable); rejections answer the requester only
+ *   {type: "repair_subgraph", runId, nodeId}             - 重新规划子图: replace the failed
+ *          node with an AI-generated small subgraph (subgraph_repair_* events,
+ *          then graph_patched and run_started under the same runId), seeding
+ *          completed upstream outputs; rejections answer the requester only
  *   {type: "abort_run"}                                  - abort the active run/planning/repair
  *
  * HTTP:
@@ -619,6 +623,27 @@ wss.on("connection", (ws, req) => {
 					});
 			} catch (err) {
 				ws.send(JSON.stringify({ type: "run_error", message: `repair_node 无法处理: ${(err as Error).message}` }));
+			}
+			return;
+		}
+		if (msg.type === "repair_subgraph") {
+			// 重新规划子图：replace the failed node with an AI-generated small
+			// subgraph under the same runId, seeding completed upstream outputs.
+			try {
+				if (typeof msg.runId !== "string" || typeof msg.nodeId !== "string") {
+					ws.send(JSON.stringify({ type: "run_error", message: "repair_subgraph 参数非法（runId/nodeId 需为字符串）" }));
+					return;
+				}
+				void runManager
+					.startSubgraphRepair(msg.runId, msg.nodeId)
+					.then((result) => {
+						if (!result.ok) ws.send(JSON.stringify({ type: "run_error", message: result.error }));
+					})
+					.catch((err: Error) => {
+						ws.send(JSON.stringify({ type: "run_error", message: `repair_subgraph 无法处理: ${err.message}` }));
+					});
+			} catch (err) {
+				ws.send(JSON.stringify({ type: "run_error", message: `repair_subgraph 无法处理: ${(err as Error).message}` }));
 			}
 			return;
 		}

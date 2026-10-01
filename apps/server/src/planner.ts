@@ -19,6 +19,7 @@
 
 import {
 	EDGE_TYPES,
+	edgeId,
 	finalOutput,
 	foldEvent,
 	initState,
@@ -34,6 +35,7 @@ import {
 	type EdgeType,
 	type GraphDef,
 	type JsonAgentSessionEvent,
+	type SubgraphPatch,
 } from "@pi-graph/shared";
 import { setTimeoutUnref, type UnrefableTimeout } from "./infra/timer-unref.ts";
 import { PiBridge } from "./pi-bridge.ts";
@@ -88,6 +90,34 @@ export interface TaskOverride {
 }
 
 export type RepairOutcome = { ok: true } & TaskOverride | { ok: false; error: string };
+
+// ============================================================================
+// Subgraph repair (rewriteSubgraph): replace a failed node with a small DAG
+// ============================================================================
+
+/** Upstream-output material budget for the subgraph repair prompt. */
+export const SUBGRAPH_REPAIR_SECTION_CHARS = 2000;
+export const SUBGRAPH_REPAIR_TOTAL_CHARS = 16000;
+
+/** Everything the subgraph repair prompt needs about one failed node. */
+export interface SubgraphPatchRequest {
+	nodeId: string;
+	/** The failed node's current task. */
+	task: string;
+	/** The node_failed error text, when replacing due to failure. */
+	error?: string;
+	/** Upstream outputs (in graph edge order). */
+	upstream: { nodeId: string; text: string }[];
+	/** Current direct downstream nodes that will receive the subgraph exit output. */
+	downstreamNodes: { id: string; task: string; label?: string }[];
+	/** Goal of the whole graph, if any, to keep context. */
+	goal?: string;
+	/** Current per-node model/tools, when set. */
+	model?: string;
+	tools?: string[];
+}
+
+export type SubgraphPatchOutcome = { ok: true } & SubgraphPatch | { ok: false; error: string };
 
 export function buildRepairPrompt(req: RepairRequest, feedback?: string): string {
 	const sections: string[] = [];
@@ -155,6 +185,117 @@ export function extractTaskOverride(text: string): { ok: true; override: TaskOve
 		if (names.length > 0) override.tools = names;
 	}
 	return { ok: true, override };
+}
+
+/**
+ * Build a prompt asking the planner to replace a single node with a small
+ * subgraph. The reply must be one JSON object shaped like `SubgraphPatch`.
+ */
+export function buildSubgraphPatchPrompt(req: SubgraphPatchRequest, feedback?: string): string {
+	const sections: string[] = [];
+	let remaining = SUBGRAPH_REPAIR_TOTAL_CHARS;
+	for (const u of req.upstream) {
+		if (remaining <= 0) {
+			sections.push(`### from ${u.nodeId}\n（材料预算用尽，已省略）`);
+			continue;
+		}
+		const capped =
+			u.text.length > SUBGRAPH_REPAIR_SECTION_CHARS ? `${u.text.slice(0, SUBGRAPH_REPAIR_SECTION_CHARS)}\n（该段过长，已截断）` : u.text;
+		const piece = capped.slice(0, remaining);
+		remaining -= piece.length;
+		sections.push(`### from ${u.nodeId}\n${piece}${piece.length < capped.length ? "\n（材料预算用尽，已截断）" : ""}`);
+	}
+	const downstreamText = req.downstreamNodes
+		.map((d) => `- ${d.id}${d.label ? `（${d.label}）` : ""}: ${d.task.slice(0, 300)}`)
+		.join("\n") || "无";
+	const configBits: string[] = [];
+	if (req.model) configBits.push(`model=${req.model}`);
+	if (req.tools?.length) configBits.push(`tools=${req.tools.join(",")}`);
+	const base = `你是一个子图重写器。图编排运行中，下面的节点需要被替换为一个更合适的子图。
+
+要求：
+- 输出**只有一个 JSON 对象**，不要 markdown 代码块围栏、不要任何解释文字。
+- 结构：{"nodes": [{"id": "s1", "label": "简短标签", "task": "完整任务指令"}], "edges": [{"source": "s1", "target": "s2", "type": "input"}], "replaces": ["${req.nodeId}"], "entryNodeId": "s1", "exitNodeId": "s2"}
+- replaces 必须是 ["${req.nodeId}"]，不要包含其他节点。
+- entryNodeId 会承接原节点 ${req.nodeId} 的所有上游输入；exitNodeId 会输出给原节点的下游。
+- 新节点 id 不能与现有节点重复。现有节点 id 列表：${req.nodeId}${req.downstreamNodes.length > 0 ? ", " + req.downstreamNodes.map((d) => d.id).join(", ") : ""}。
+- 子图内部以及子图与原图连接后整体必须是 DAG，不许环、不许自环。
+- 节点 task 必须自包含：执行该节点的 agent 只看到 task 与上游节点输出。
+- 只做最小替换，不要引入无关分支。
+
+被替换节点：${req.nodeId}
+当前任务指令：
+${req.task}
+${req.error ? `\n失败原因：${req.error}\n` : ""}下游节点：
+${downstreamText}${sections.length > 0 ? `\n\n上游输出（会原样注入 entryNodeId）：\n\n${sections.join("\n\n")}` : ""}${configBits.length > 0 ? `\n\n当前执行配置：${configBits.join("、")}` : ""}${req.goal ? `\n\n整体目标：${req.goal}` : ""}`;
+	if (!feedback) return base;
+	return `${base}
+
+你上一次输出的 JSON 无法使用：${feedback}
+请修正问题后重新输出——仍然只输出一个 JSON 对象，不要任何其他文字。`;
+}
+
+/**
+ * Extract a SubgraphPatch from a repair reply. Whitelist fields, ensure new
+ * node ids do not collide with surviving original ids, and validate the
+ * internal subgraph as a DAG.
+ */
+export function extractSubgraphPatch(
+	text: string,
+	existingNodeIds: ReadonlySet<string>,
+): { ok: true; patch: SubgraphPatch } | { ok: false; error: string } {
+	const first = text.indexOf("{");
+	const last = text.lastIndexOf("}");
+	if (first === -1 || last <= first) return { ok: false, error: "输出中没有找到 JSON 对象" };
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text.slice(first, last + 1));
+	} catch (err) {
+		return { ok: false, error: `JSON 解析失败: ${(err as Error).message}` };
+	}
+	if (typeof parsed !== "object" || parsed === null) return { ok: false, error: "JSON 不是有效的对象" };
+	const r = parsed as {
+		nodes?: unknown;
+		edges?: unknown;
+		replaces?: unknown;
+		entryNodeId?: unknown;
+		exitNodeId?: unknown;
+	};
+	if (!Array.isArray(r.nodes) || !Array.isArray(r.edges)) return { ok: false, error: "缺少 nodes/edges 数组" };
+	if (typeof r.entryNodeId !== "string" || !r.entryNodeId.trim()) return { ok: false, error: "entryNodeId 缺失或为空" };
+	if (typeof r.exitNodeId !== "string" || !r.exitNodeId.trim()) return { ok: false, error: "exitNodeId 缺失或为空" };
+	if (!Array.isArray(r.replaces) || r.replaces.length === 0) return { ok: false, error: "replaces 必须为非空数组" };
+
+	// Reuse extractGraph's normalization/validation on the inner subgraph.
+	const innerText = JSON.stringify({ nodes: r.nodes, edges: r.edges });
+	const extracted = extractGraph(innerText);
+	if (!extracted.ok) return { ok: false, error: `子图无效：${extracted.error}` };
+
+	const ids = new Set(extracted.graph.nodes.map((n) => n.id));
+	if (!ids.has(r.entryNodeId)) return { ok: false, error: "entryNodeId 不在子图节点中" };
+	if (!ids.has(r.exitNodeId)) return { ok: false, error: "exitNodeId 不在子图节点中" };
+
+	// Ensure new ids do not collide with surviving original nodes.
+	for (const id of ids) {
+		if (existingNodeIds.has(id)) return { ok: false, error: `新节点 id「${id}」与现有节点冲突` };
+	}
+
+	const replaces = r.replaces.filter((id): id is string => typeof id === "string" && id.trim() !== "");
+	if (replaces.length === 0) return { ok: false, error: "replaces 中没有有效节点 id" };
+
+	// Normalize missing edge ids.
+	const edges = extracted.graph.edges.map((e) => ({ ...e, id: e.id || edgeId(e.source, e.target) }));
+
+	return {
+		ok: true,
+		patch: {
+			nodes: extracted.graph.nodes,
+			edges,
+			replaces,
+			entryNodeId: r.entryNodeId,
+			exitNodeId: r.exitNodeId,
+		},
+	};
 }
 
 /** One planner turn's raw result (text not yet parsed). */
@@ -427,6 +568,34 @@ export class PiPlanner {
 			feedback = extracted.error;
 		}
 		return { ok: false, error: feedback ?? "修复失败" };
+	}
+
+	/**
+	 * Rewrite a failed node as a subgraph (子图重规划): same askOnce lifecycle
+	 * and retry-once-with-feedback as plan()/rewriteTask().
+	 */
+	async rewriteSubgraph(
+		req: SubgraphPatchRequest,
+		ctx: { onDelta: (delta: string) => void; signal: AbortSignal },
+	): Promise<SubgraphPatchOutcome> {
+		if (!MODEL_RE.test(this.model)) return { ok: false, error: `重写模型「${this.model}」含非法字符` };
+		const existingNodeIds = new Set<string>([
+			req.nodeId,
+			...req.upstream.map((u) => u.nodeId),
+			...req.downstreamNodes.map((d) => d.id),
+		]);
+		let feedback: string | undefined;
+		for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+			if (attempt > 1) {
+				ctx.onDelta(`\n\n—— 第 ${attempt - 1} 次子图重写无效：${feedback ?? ""}，正在重试 ——\n\n`);
+			}
+			const asked = await this.askOnce(buildSubgraphPatchPrompt(req, feedback), ctx);
+			if (!asked.ok) return asked;
+			const extracted = extractSubgraphPatch(asked.text, existingNodeIds);
+			if (extracted.ok) return { ok: true, ...extracted.patch };
+			feedback = extracted.error;
+		}
+		return { ok: false, error: feedback ?? "子图重写失败" };
 	}
 
 	/** One planner turn: spawn → prompt over stdin → race settle/exit/timeout/abort. */

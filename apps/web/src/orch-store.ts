@@ -110,6 +110,9 @@ interface OrchState {
 	 *  node's task (repair_* stream previews it), then re-runs it with every
 	 *  other ok node seeded. Guarded to error nodes of failed|aborted runs. */
 	repairNode: (nodeId: string) => void;
+	/** 重新规划子图 (repair_subgraph): replace the failed node with an AI-generated
+	 *  small subgraph and continue the same run, seeding completed upstream outputs. */
+	repairSubgraph: (nodeId: string) => void;
 	/** Auto-orchestrate: send the goal, the server plans then runs (plan_run).
 	 *  opts.chat = on completion the server injects the compiled node outputs
 	 *  into the main session agent (chat-first orchestration). */
@@ -411,6 +414,20 @@ export const useOrchStore = create<OrchState>((set, get) => ({
 		useOrchStore.setState({ orchError: { message: "发送失败（连接已断开）——请重试", issues: [] } });
 	},
 
+	repairSubgraph: (nodeId) => {
+		const s = get();
+		const runId = s.run.runId;
+		if (runId == null) return;
+		if (s.run.nodes[nodeId]?.status !== "error") return;
+		const guardKey = `subgraph:${runId}:${nodeId}`;
+		if (Date.now() - (lastRecoverSentAt.get(guardKey) ?? 0) < RECOVER_SEND_GUARD_MS) return;
+		if (sendWs({ type: "repair_subgraph", runId, nodeId })) {
+			lastRecoverSentAt.set(guardKey, Date.now());
+			return;
+		}
+		useOrchStore.setState({ orchError: { message: "发送失败（连接已断开）——请重试", issues: [] } });
+	},
+
 	planRun: (goal, opts) => {
 		const s = get();
 		if (s.run.status === "running" || s.run.status === "planning") return;
@@ -510,10 +527,10 @@ export function applyRunEvent(event: RunEvent): void {
 		// An auto-orchestrated run takes over the canvas: the generated graph
 		// only exists in the run state, not in the editor — and the editor's
 		// selections reference that graph, so they must not leak into the run
-		// view's panel (ids can coincide). repair_started too: the rewrite
-		// previews in the plan channel and the re-execution that follows
-		// belongs to the run view.
-		if (event.type === "plan_started" || event.type === "repair_started") {
+		// view's panel (ids can coincide). repair_started / subgraph_repair_started
+		// too: the rewrite previews in the plan channel and the re-execution that
+		// follows belongs to the run view.
+		if (event.type === "plan_started" || event.type === "repair_started" || event.type === "subgraph_repair_started") {
 			return { run: next, view: "run" as const, selectedNodeId: null, selectedEdgeId: null };
 		}
 		return { run: next, view: s.view };

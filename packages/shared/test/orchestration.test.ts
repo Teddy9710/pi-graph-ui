@@ -19,6 +19,7 @@ import {
 	validateGraph,
 	type GraphDef,
 	type RunEvent,
+	type SubgraphPatch,
 } from "../src/orchestration.ts";
 import { initState } from "../src/fold.ts";
 import type { AssistantMessage } from "../src/types.ts";
@@ -531,6 +532,77 @@ describe("foldRunEvent", () => {
 		foldRunEvent(s, started);
 		foldRunEvent(s, { type: "node_delta", runId: "r1", nodeId: "ghost", kind: "text", delta: "?" });
 		expect(s.nodes.ghost).toBeUndefined();
+	});
+});
+
+describe("foldRunEvent subgraph repair", () => {
+	it("subgraph_repair_started → delta → completed sets planning state and clears on graph_patched", () => {
+		const s = initRunState();
+		foldRunEvent(s, { type: "subgraph_repair_started", runId: "r1", nodeId: "b", startedAt: 1 });
+		expect(s.status).toBe("planning");
+		expect(s.repairTarget).toEqual({ fromRunId: "r1", nodeId: "b", kind: "subgraph" });
+		foldRunEvent(s, { type: "subgraph_repair_delta", runId: "r1", delta: '{"nodes":' });
+		expect(s.planText).toContain('{"nodes":');
+		const patch: SubgraphPatch = {
+			nodes: [{ id: "s1", task: "x" }],
+			edges: [],
+			replaces: ["b"],
+			entryNodeId: "s1",
+			exitNodeId: "s1",
+		};
+		foldRunEvent(s, { type: "subgraph_repair_completed", runId: "r1", patch });
+		expect(s.status).toBe("planning");
+	});
+
+	it("graph_patched replaces the graph, initializes new nodes, removes old nodes, and recomputes counters", () => {
+		const s = initRunState();
+		foldRunEvent(s, {
+			type: "run_started",
+			runId: "r1",
+			startedAt: 1,
+			graph: { nodes: [{ id: "a", task: "x" }, { id: "b", task: "x" }, { id: "c", task: "x" }], edges: [] },
+		});
+		foldRunEvent(s, {
+			type: "node_completed",
+			runId: "r1",
+			nodeId: "a",
+			endedAt: 2,
+			durationMs: 1,
+			output: { text: "A", stopReason: "stop", usage: { input: 1, output: 1, totalTokens: 2, cost: 0 } },
+		});
+		foldRunEvent(s, { type: "node_failed", runId: "r1", nodeId: "b", endedAt: 3, durationMs: 1, error: "boom" });
+		foldRunEvent(s, { type: "node_skipped", runId: "r1", nodeId: "c", reason: "upstream failed: b" });
+		expect(s.ok).toBe(1);
+		expect(s.failed).toBe(1);
+		expect(s.skipped).toBe(1);
+
+		foldRunEvent(s, {
+			type: "graph_patched",
+			runId: "r1",
+			patchedAt: 4,
+			graph: { nodes: [{ id: "a", task: "x" }, { id: "s1", task: "x" }, { id: "c", task: "x" }], edges: [] },
+			replacedNodeIds: ["b"],
+			addedNodeIds: ["s1"],
+		});
+		expect(s.graph?.nodes.map((n) => n.id).sort()).toEqual(["a", "c", "s1"]);
+		expect(s.nodes.b).toBeUndefined();
+		expect(s.nodes.s1).toBeDefined();
+		expect(s.nodes.s1?.status).toBe("pending");
+		// Counters are recomputed from remaining node statuses only. Node c is
+		// still skipped (it gets reset to pending by the following run_started).
+		expect(s.ok).toBe(1);
+		expect(s.failed).toBe(0);
+		expect(s.skipped).toBe(1);
+		expect(s.repairTarget).toBeNull();
+	});
+
+	it("subgraph_repair_failed records the error and leaves no nodes", () => {
+		const s = initRunState();
+		foldRunEvent(s, { type: "subgraph_repair_started", runId: "r1", nodeId: "b", startedAt: 1 });
+		foldRunEvent(s, { type: "subgraph_repair_failed", runId: "r1", error: "子图无效" });
+		expect(s.status).toBe("failed");
+		expect(s.planError).toBe("子图无效");
+		expect(s.repairTarget).toBeNull();
 	});
 });
 

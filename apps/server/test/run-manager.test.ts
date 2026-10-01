@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { MAX_GATE_NOTE_CHARS, RunManager, type ChatRunResult, type Planner } from "../src/run-manager.ts";
 import { RunStore } from "../src/run-store.ts";
 import type { Executor, ExecutorCall, NodeResult } from "../src/orchestrator.ts";
-import type { PlanOutcome, RepairOutcome, RepairRequest } from "../src/planner.ts";
+import type { PlanOutcome, RepairOutcome, RepairRequest, SubgraphPatchOutcome, SubgraphPatchRequest } from "../src/planner.ts";
 import { MAX_GOAL_CHARS } from "../src/planner.ts";
+import type { SubgraphPatch } from "@pi-graph/shared";
 import { foldRunEvent, initRunState, type GraphDef, type RunEvent } from "@pi-graph/shared";
 
 type Ctx = { onDelta: (kind: "text" | "tool", delta: string) => void; signal: AbortSignal };
@@ -904,6 +905,36 @@ class FakeRepairPlanner implements Planner {
 	}
 }
 
+/** Fake planner exposing the optional rewriteSubgraph seam. */
+class FakeSubgraphRepairPlanner implements Planner {
+	readonly requests: SubgraphPatchRequest[] = [];
+	readonly signals: AbortSignal[] = [];
+	private resolve: ((o: SubgraphPatchOutcome) => void) | null = null;
+
+	constructor(private readonly deltas: string[] = []) {}
+
+	plan(): Promise<PlanOutcome> {
+		return Promise.resolve({ ok: false, error: "plan not used" });
+	}
+
+	rewriteTask(): Promise<RepairOutcome> {
+		return Promise.resolve({ ok: false, error: "task repair not used" });
+	}
+
+	rewriteSubgraph(req: SubgraphPatchRequest, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<SubgraphPatchOutcome> {
+		this.requests.push(req);
+		this.signals.push(ctx.signal);
+		for (const d of this.deltas) ctx.onDelta(d);
+		return new Promise<SubgraphPatchOutcome>((res) => {
+			this.resolve = res;
+		});
+	}
+
+	settle(outcome: SubgraphPatchOutcome): void {
+		this.resolve?.(outcome);
+	}
+}
+
 describe("RunManager.startRepair", () => {
 	let dir: string;
 	let store: RunStore;
@@ -1264,5 +1295,247 @@ describe("RunManager artifacts (output.md 归档)", () => {
 		expect(existsSync(join(blocker, "under", "a", "file", runId, "a", "output.md"))).toBe(false);
 		// Node b executed, but the latch should have suppressed archiving.
 		expect(existsSync(join(blocker, "under", "a", "file", runId, "b", "output.md"))).toBe(false);
+	});
+});
+
+// ============================================================================
+// 子图重规划 (startSubgraphRepair)
+// ============================================================================
+
+const simplePatch: SubgraphPatch = {
+	nodes: [
+		{ id: "s1", task: "子步骤1" },
+		{ id: "s2", task: "子步骤2" },
+	],
+	edges: [{ id: "s1->s2", source: "s1", target: "s2" }],
+	replaces: ["b"],
+	entryNodeId: "s1",
+	exitNodeId: "s2",
+};
+
+const chain3Graph: GraphDef = {
+	name: "chain3",
+	nodes: [
+		{ id: "a", task: "跑a" },
+		{ id: "b", task: "跑b" },
+		{ id: "c", task: "跑c" },
+	],
+	edges: [
+		{ id: "a->b", source: "a", target: "b" },
+		{ id: "b->c", source: "b", target: "c" },
+	],
+};
+
+describe("RunManager.startSubgraphRepair", () => {
+	let dir: string;
+	let store: RunStore;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(tmpdir(), "runs-test-"));
+		store = new RunStore(dir);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+		delete process.env.ORCH_AUTO_SUBGRAPH_REPAIR;
+	});
+
+	/** Run a->b->c once: a ok, b failed, c skipped. */
+	async function failedChain(overrides: { planner?: Planner } = {}) {
+		const planner = overrides.planner ?? new FakeSubgraphRepairPlanner(['{"nodes":']);
+		const calls: ExecutorCall[] = [];
+		let bCalls = 0;
+		const manager = new RunManager({
+			executor: fakeExecutor(async (call) => {
+				calls.push(call);
+				if (call.node.id === "b" && ++bCalls === 1) return { ok: false, text: "", error: "模型太弱" };
+				return ok(`结果:${call.node.id}`);
+			}),
+			planner,
+			store,
+		});
+		const seen: RunEvent[] = [];
+		manager.subscribe((e) => seen.push(e));
+		const first = manager.start(structuredClone(chain3Graph));
+		await vi.advanceTimersByTimeAsync(0);
+		return { manager, planner: planner as FakeSubgraphRepairPlanner, calls, seen, fromRunId: first.ok ? first.runId : "" };
+	}
+
+	it("replaces a failed node with a subgraph and continues under the same runId", async () => {
+		const f = await failedChain();
+		const repair = await f.manager.startSubgraphRepair(f.fromRunId, "b");
+		expect(repair.ok).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(f.planner.requests).toHaveLength(1);
+		const req = f.planner.requests[0]!;
+		expect(req.nodeId).toBe("b");
+		expect(req.error).toBe("模型太弱");
+		expect(req.upstream).toEqual([{ nodeId: "a", text: "结果:a" }]);
+		expect(req.downstreamNodes).toEqual([{ id: "c", task: "跑c" }]);
+
+		f.planner.settle({ ok: true, ...simplePatch });
+		await vi.advanceTimersByTimeAsync(0);
+
+		const runId = repair.ok ? repair.runId : "";
+		const events = f.seen.filter((e) => e.runId === runId);
+		expect(events.map((e) => e.type)).toEqual([
+			"run_started",
+			"node_started",
+			"node_completed",
+			"node_started",
+			"node_failed",
+			"node_skipped",
+			"run_finished",
+			"subgraph_repair_started",
+			"subgraph_repair_delta",
+			"subgraph_repair_completed",
+			"graph_patched",
+			"run_started",
+			"node_reused",
+			"node_started",
+			"node_completed",
+			"node_started",
+			"node_completed",
+			"node_started",
+			"node_completed",
+			"run_finished",
+		]);
+		// Same runId across the original run, repair, and patched execution.
+		expect(events.find((e) => e.type === "subgraph_repair_started")!.runId).toBe(runId);
+		expect(events.find((e) => e.type === "graph_patched")!.runId).toBe(runId);
+
+		const patched = events.find((e) => e.type === "graph_patched");
+		if (patched?.type !== "graph_patched") throw new Error("graph_patched missing");
+		expect(patched.replacedNodeIds).toEqual(["b"]);
+		expect(patched.addedNodeIds).toEqual(["s1", "s2"]);
+		expect(patched.graph.nodes.map((n) => n.id).sort()).toEqual(["a", "c", "s1", "s2"]);
+
+		// a was seeded, s1/s2 executed, c consumed the subgraph exit output.
+		const callsById = new Map(f.calls.map((c) => [c.node.id, c]));
+		expect(callsById.has("a")).toBe(true);
+		expect(callsById.has("b")).toBe(true); // original failed attempt
+		expect(callsById.has("s1")).toBe(true);
+		expect(callsById.has("s2")).toBe(true);
+		expect(callsById.has("c")).toBe(true);
+		const cCall = callsById.get("c")!;
+		expect(cCall.assembledPrompt).toContain("结果:s2");
+		expect(cCall.node.task).toBe("跑c");
+
+		const fin = events.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("completed");
+		expect(f.manager.active).toBe(false);
+	});
+
+	it("subgraph repair failure emits subgraph_repair_failed + terminal run_finished", async () => {
+		const f = await failedChain();
+		const repair = await f.manager.startSubgraphRepair(f.fromRunId, "b");
+		await vi.advanceTimersByTimeAsync(0);
+		f.planner.settle({ ok: false, error: "子图生成失败" });
+		await vi.advanceTimersByTimeAsync(0);
+
+		const runId = repair.ok ? repair.runId : "";
+		const events = f.seen.filter((e) => e.runId === runId);
+		expect(events.map((e) => e.type).slice(-4)).toEqual([
+			"subgraph_repair_started",
+			"subgraph_repair_delta",
+			"subgraph_repair_failed",
+			"run_finished",
+		]);
+		const fin = events.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("failed");
+		expect(f.manager.active).toBe(false);
+	});
+
+	it("auto-repairs a failed node when ORCH_AUTO_SUBGRAPH_REPAIR=1", async () => {
+		process.env.ORCH_AUTO_SUBGRAPH_REPAIR = "1";
+		const f = await failedChain();
+		// The failure should have triggered the auto-repair automatically.
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(f.planner.requests).toHaveLength(1);
+		expect(f.seen.some((e) => e.type === "subgraph_repair_started")).toBe(true);
+
+		f.planner.settle({ ok: true, ...simplePatch });
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(0);
+
+		const fin = f.seen.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("completed");
+		expect(f.manager.active).toBe(false);
+	});
+
+	it("guards: no rewriteSubgraph seam, gate target, unknown node, no failure record, busy", async () => {
+		// No rewriteSubgraph seam.
+		{
+			const planner = new FakeRepairPlanner();
+			const f = await failedChain({ planner });
+			const r = await f.manager.startSubgraphRepair(f.fromRunId, "b");
+			expect(r.ok).toBe(false);
+			if (!r.ok) expect(r.error).toContain("未配置子图修复器");
+		}
+		// Gate target.
+		{
+			const manager = new RunManager({ executor: fakeExecutor(async () => ok("x")), planner: new FakeSubgraphRepairPlanner(), store });
+			const gated: GraphDef = {
+				name: "g",
+				nodes: [
+					{ id: "a", task: "跑" },
+					{ id: "g", task: "审", gate: true },
+				],
+				edges: [{ id: "a->g", source: "a", target: "g" }],
+			};
+			const first = manager.start(gated);
+			await vi.advanceTimersByTimeAsync(0);
+			manager.abort();
+			await vi.advanceTimersByTimeAsync(0);
+			const r = await manager.startSubgraphRepair(first.ok ? first.runId : "", "g");
+			expect(r.ok).toBe(false);
+			if (!r.ok) expect(r.error).toContain("门控");
+		}
+		// Unknown node / non-failed node.
+		{
+			const f = await failedChain();
+			const unknown = await f.manager.startSubgraphRepair(f.fromRunId, "zzz");
+			expect(unknown.ok).toBe(false);
+			const notFailed = await f.manager.startSubgraphRepair(f.fromRunId, "a");
+			expect(notFailed.ok).toBe(false);
+		}
+		// Busy.
+		{
+			const busyManager = new RunManager({ executor: fakeExecutor(hangOnAbort), planner: new FakeSubgraphRepairPlanner(), store });
+			busyManager.start(singleNodeGraph());
+			const busy = await busyManager.startSubgraphRepair("whatever", "a");
+			expect(busy.ok).toBe(false);
+			if (!busy.ok) expect(busy.error).toContain("运行");
+			busyManager.abort();
+			await vi.advanceTimersByTimeAsync(0);
+		}
+	});
+
+	it("abort during subgraph repair: terminal run_finished, signal fired, late settle ignored", async () => {
+		const f = await failedChain();
+		const repair = await f.manager.startSubgraphRepair(f.fromRunId, "b");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(f.manager.abort()).toBe(true);
+		expect(f.planner.signals[0]!.aborted).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+
+		const runId = repair.ok ? repair.runId : "";
+		const events = f.seen.filter((e) => e.runId === runId);
+		expect(events.map((e) => e.type).slice(-4)).toEqual([
+			"subgraph_repair_started",
+			"subgraph_repair_delta",
+			"subgraph_repair_failed",
+			"run_finished",
+		]);
+		const fin = events.at(-1)!;
+		expect(fin.type === "run_finished" ? fin.status : "").toBe("failed");
+		expect(f.manager.active).toBe(false);
+
+		f.planner.settle({ ok: true, ...simplePatch });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(f.seen.filter((e) => e.type === "run_started").length).toBe(1); // only source run
 	});
 });

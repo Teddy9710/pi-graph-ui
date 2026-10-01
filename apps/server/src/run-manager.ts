@@ -26,17 +26,26 @@
  */
 
 import {
+	edgeId,
 	validateGraph,
 	zeroNodeUsage,
 	type GraphDef,
 	type GraphValidationIssue,
 	type OrchResultNode,
 	type RunEvent,
+	type SubgraphPatch,
 } from "@pi-graph/shared";
 import { setTimeoutUnref, type UnrefableTimeout } from "./infra/timer-unref.ts";
 import { nodeArtifactsDir, writeNodeOutput, type NodeOutputMeta } from "./artifacts.ts";
 import { OrchestratorEngine, type Executor } from "./orchestrator.ts";
-import { MAX_GOAL_CHARS, type PlanOutcome, type RepairOutcome, type RepairRequest } from "./planner.ts";
+import {
+	MAX_GOAL_CHARS,
+	type PlanOutcome,
+	type RepairOutcome,
+	type RepairRequest,
+	type SubgraphPatchOutcome,
+	type SubgraphPatchRequest,
+} from "./planner.ts";
 import { RunStore } from "./run-store.ts";
 
 export type StartResult = { ok: true; runId: string } | { ok: false; error: string; issues?: GraphValidationIssue[] };
@@ -75,6 +84,11 @@ export interface Planner {
 	plan(goal: string, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<PlanOutcome>;
 	/** AI-repair seam — optional so existing fakes / old planners still satisfy the interface. */
 	rewriteTask?(req: RepairRequest, ctx: { onDelta: (delta: string) => void; signal: AbortSignal }): Promise<RepairOutcome>;
+	/** Subgraph repair seam — optional so existing fakes / old planners still satisfy the interface. */
+	rewriteSubgraph?(
+		req: SubgraphPatchRequest,
+		ctx: { onDelta: (delta: string) => void; signal: AbortSignal },
+	): Promise<SubgraphPatchOutcome>;
 }
 
 export interface RunManagerOptions {
@@ -130,8 +144,19 @@ export class RunManager {
 	 *  post-settle tail must never be re-stamped with the next run's id). */
 	private readonly deltaBuffers = new Map<string, { runId: string; text: string }>();
 	private readonly deltaTimers = new Map<string, UnrefableTimeout>();
-	private planBuffer: { runId: string; text: string; kind: "plan_delta" | "repair_delta" } | null = null;
+	private planBuffer: { runId: string; text: string; kind: "plan_delta" | "repair_delta" | "subgraph_repair_delta" } | null = null;
 	private planTimer: UnrefableTimeout | null = null;
+	/** Node id currently being rewritten as a subgraph; null when no subgraph repair is in flight. */
+	private subgraphRepairNodeId: string | null = null;
+	private subgraphRepairAbort: AbortController | null = null;
+	/** Track nodes already auto-repaired to avoid infinite replan loops. */
+	private autoRepairedNodes = new Set<string>();
+	/** Whether automatic subgraph repair on failure is enabled. */
+	private readonly autoSubgraphRepair: boolean;
+	/** When auto-repair is triggered, the old engine must settle before the repair starts. */
+	private pendingSubgraphRepair: { fromRunId: string; nodeId: string } | null = null;
+	/** True while a user-initiated abort is in flight (suppresses auto-repair). */
+	private userAborting = false;
 	/** Once an output.md write fails for a run, archiving stops for THAT run
 	 * (mirrors RunStore's per-run append latch; a new run retries). */
 	private artifactsFailedRun: string | null = null;
@@ -148,10 +173,11 @@ export class RunManager {
 		this.maxRetries = options.maxRetries;
 		this.retryDelayMs = options.retryDelayMs;
 		this.artifactsRoot = options.artifactsRoot;
+		this.autoSubgraphRepair = process.env.ORCH_AUTO_SUBGRAPH_REPAIR === "1";
 	}
 
 	get active(): boolean {
-		return this.engine !== null || this.planning;
+		return this.engine !== null || this.planning || this.subgraphRepairNodeId !== null;
 	}
 
 	/** Start a run; rejects (returns issues) when busy or the graph is invalid. */
@@ -227,6 +253,13 @@ export class RunManager {
 
 	/** Abort the active run/planning phase (no-op when idle). */
 	abort(): boolean {
+		if (this.subgraphRepairAbort) {
+			const runId = this.currentRunId;
+			const nodeId = this.subgraphRepairNodeId ?? "";
+			this.subgraphRepairAbort.abort();
+			this.finishSubgraphRepair(runId ?? "", nodeId, "已中止");
+			return true;
+		}
 		if (this.plannerAbort) {
 			const runId = this.currentRunId;
 			this.plannerAbort.abort();
@@ -247,6 +280,7 @@ export class RunManager {
 			return true;
 		}
 		if (!this.engine) return false;
+		this.userAborting = true;
 		this.engine.abort();
 		return true;
 	}
@@ -406,6 +440,123 @@ export class RunManager {
 		return { ok: true, runId };
 	}
 
+	/**
+	 * 重新规划子图：把失败节点替换为 AI 生成的小型 DAG，保留已完成节点的输出
+	 * 作为种子，用同一个 runId 重启引擎继续执行。
+	 * subgraph_repair_started → subgraph_repair_delta* → subgraph_repair_completed
+	 * → graph_patched → run_started → ...
+	 */
+	async startSubgraphRepair(fromRunId: string, nodeId: string): Promise<StartResult> {
+		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
+		const rewrite = this.planner?.rewriteSubgraph?.bind(this.planner);
+		if (!rewrite) return { ok: false, error: "服务器未配置子图修复器" };
+
+		const sourced = await this.sourceEvents(fromRunId);
+		if (!sourced) return { ok: false, error: `找不到运行 ${fromRunId} 的记录` };
+		const { events } = sourced;
+		const runStarted = this.findRunStarted(events, fromRunId);
+		if (!runStarted) return { ok: false, error: "该运行没有图记录，无法修复" };
+
+		const graph = structuredClone(runStarted.graph);
+		const target = graph.nodes.find((n) => n.id === nodeId);
+		if (!target) return { ok: false, error: `节点 ${nodeId} 不在该运行中` };
+		if (target.gate === true) return { ok: false, error: "门控节点不支持子图重规划（人工决策不可改写）" };
+
+		const failedEv = events.find(
+			(e): e is Extract<RunEvent, { type: "node_failed" }> => e.type === "node_failed" && e.runId === fromRunId && e.nodeId === nodeId,
+		);
+		if (!failedEv) return { ok: false, error: `节点 ${nodeId} 在该运行中没有失败记录` };
+
+		const outputs = this.outputById(fromRunId, events);
+		const upstream = graph.edges
+			.filter((e) => e.target === nodeId)
+			.map((e) => ({ nodeId: e.source, text: outputs.get(e.source) ?? "" }));
+
+		const directDownstream = graph.edges
+			.filter((e) => e.source === nodeId)
+			.map((e) => graph.nodes.find((n) => n.id === e.target))
+			.filter(Boolean) as GraphDef["nodes"];
+		const downstreamNodes = directDownstream.map((n) => ({
+			id: n.id,
+			label: n.label,
+			task: n.task,
+		}));
+
+		const goalEv = events.find(
+			(e): e is Extract<RunEvent, { type: "plan_started" }> => e.type === "plan_started" && e.runId === fromRunId,
+		);
+
+		const req: SubgraphPatchRequest = {
+			nodeId,
+			task: target.task,
+			...(failedEv ? { error: failedEv.error } : {}),
+			upstream,
+			downstreamNodes,
+			...(goalEv ? { goal: goalEv.goal } : {}),
+			...(target.model !== undefined ? { model: target.model } : {}),
+			...(target.tools !== undefined ? { tools: target.tools } : {}),
+		};
+
+		if (this.active) return { ok: false, error: "已有一次运行正在进行，请先中止" };
+
+		// Reuse the same runId so retention stays continuous.
+		this.currentRunId = fromRunId;
+		this.subgraphRepairNodeId = nodeId;
+		const abort = new AbortController();
+		this.subgraphRepairAbort = abort;
+		this.publish({ type: "subgraph_repair_started", runId: fromRunId, nodeId, startedAt: this.now() });
+
+		let planned: Promise<SubgraphPatchOutcome>;
+		try {
+			planned = rewrite(req, {
+				onDelta: (delta) => this.retainPlanDelta(fromRunId, delta, "subgraph_repair_delta"),
+				signal: abort.signal,
+			});
+		} catch (err) {
+			console.error("[run-manager] subgraph rewriter threw synchronously:", err);
+			this.finishSubgraphRepair(fromRunId, nodeId, `子图修复器异常: ${(err as Error).message}`);
+			return { ok: true, runId: fromRunId };
+		}
+
+		planned
+			.then((outcome) => {
+				if (this.subgraphRepairNodeId !== nodeId) return;
+				this.flushPlanDelta();
+				if (!outcome.ok) {
+					this.finishSubgraphRepair(fromRunId, nodeId, outcome.error);
+					return;
+				}
+				const patched = this.applySubgraphPatch(graph, outcome);
+				const issues = validateGraph(patched);
+				if (issues.length > 0) {
+					this.finishSubgraphRepair(fromRunId, nodeId, `修补后的图未通过校验：${issues[0]!.message}`);
+					return;
+				}
+
+				const replacedIds = new Set(outcome.replaces);
+				const seeds = this.collectSeeds(fromRunId, events, patched, replacedIds);
+				const addedNodeIds = outcome.nodes.map((n) => n.id);
+
+				this.publish({ type: "subgraph_repair_completed", runId: fromRunId, patch: outcome });
+				this.publish({
+					type: "graph_patched",
+					runId: fromRunId,
+					patchedAt: this.now(),
+					graph: patched,
+					replacedNodeIds: [...replacedIds],
+					addedNodeIds,
+				});
+				this.clearSubgraphRepair();
+				this.launchEngine(patched, fromRunId, { precompleted: seeds });
+			})
+			.catch((err: Error) => {
+				console.error("[run-manager] subgraph rewriter crashed:", err);
+				if (this.subgraphRepairNodeId === nodeId) this.finishSubgraphRepair(fromRunId, nodeId, `子图修复器异常: ${err.message}`);
+			});
+
+		return { ok: true, runId: fromRunId };
+	}
+
 	retainedEvents(): RunEvent[] {
 		return [...this.retained];
 	}
@@ -422,6 +573,7 @@ export class RunManager {
 		this.flushAllDeltas();
 		this.flushPlanDelta();
 		this.currentRunId = runId;
+		this.autoRepairedNodes.clear();
 		return runId;
 	}
 
@@ -473,8 +625,21 @@ export class RunManager {
 				// Flush BEFORE clearing run bookkeeping — a late tail still
 				// carries its original runId (see deltaBuffers).
 				this.flushAllDeltas();
-				this.engine = null;
-				this.currentRunId = null;
+				// A superseding engine (e.g. subgraph repair launching a new engine
+				// under the same or a different runId) must not be torn down by the
+				// previous engine's finally.
+				const superseded = this.engine !== engine;
+				if (!superseded) {
+					this.engine = null;
+					this.currentRunId = null;
+				}
+				this.userAborting = false;
+				// Auto-repair chains a subgraph replan after the old engine settles.
+				const pending = this.pendingSubgraphRepair;
+				if (pending) {
+					this.pendingSubgraphRepair = null;
+					void this.startSubgraphRepair(pending.fromRunId, pending.nodeId);
+				}
 			});
 	}
 
@@ -590,6 +755,69 @@ export class RunManager {
 		this.currentRunId = null;
 	}
 
+	/** Apply a subgraph patch to a graph copy: remove replaced nodes/edges, insert the new subgraph, and rewire upstream/downstream. */
+	private applySubgraphPatch(graph: GraphDef, patch: SubgraphPatch): GraphDef {
+		const replaced = new Set(patch.replaces);
+		const result: GraphDef = {
+			name: graph.name,
+			nodes: graph.nodes.filter((n) => !replaced.has(n.id)).concat(structuredClone(patch.nodes)),
+			edges: graph.edges
+				.filter((e) => !replaced.has(e.source) && !replaced.has(e.target))
+				.concat(
+					patch.edges.map((e) => ({
+						...structuredClone(e),
+						id: e.id || edgeId(e.source, e.target),
+					})),
+				),
+		};
+
+		// Rewire original edges that touched replaced nodes.
+		for (const e of graph.edges) {
+			if (replaced.has(e.source) && !replaced.has(e.target)) {
+				result.edges.push({
+					id: edgeId(patch.exitNodeId, e.target),
+					source: patch.exitNodeId,
+					target: e.target,
+					type: e.type,
+					label: e.label,
+				});
+			}
+			if (replaced.has(e.target) && !replaced.has(e.source)) {
+				result.edges.push({
+					id: edgeId(e.source, patch.entryNodeId),
+					source: e.source,
+					target: patch.entryNodeId,
+					type: e.type,
+					label: e.label,
+				});
+			}
+		}
+		return result;
+	}
+
+	private clearSubgraphRepair(): void {
+		this.subgraphRepairNodeId = null;
+		this.subgraphRepairAbort = null;
+	}
+
+	/** subgraph_repair_failed + a terminal run_finished. */
+	private finishSubgraphRepair(runId: string, nodeId: string, error: string): void {
+		this.flushPlanDelta();
+		this.publish({ type: "subgraph_repair_failed", runId, error });
+		this.publish({
+			type: "run_finished",
+			runId,
+			finishedAt: this.now(),
+			status: "failed",
+			ok: 0,
+			failed: 0,
+			skipped: 0,
+			usage: zeroNodeUsage(),
+		});
+		this.clearSubgraphRepair();
+		this.currentRunId = null;
+	}
+
 	/**
 	 * A finished run's events: retention first (the last run, in memory), the
 	 * RunStore archive second (older runs / after a restart). Null when the id
@@ -649,7 +877,7 @@ export class RunManager {
 		return seeds;
 	}
 
-	private retainPlanDelta(runId: string, delta: string, kind: "plan_delta" | "repair_delta"): void {
+	private retainPlanDelta(runId: string, delta: string, kind: "plan_delta" | "repair_delta" | "subgraph_repair_delta"): void {
 		const prev = this.planBuffer;
 		// The buffer keeps its ORIGINAL runId + kind (a post-settle tail must
 		// never be re-stamped with the next run's identity or wrong channel).
@@ -671,7 +899,8 @@ export class RunManager {
 		// rewriting a failed node's task) share one coalescing buffer; the
 		// kind decides which channel the flush emits on.
 		if (buffer.kind === "plan_delta") this.publish({ type: "plan_delta", runId: buffer.runId, delta: buffer.text });
-		else this.publish({ type: "repair_delta", runId: buffer.runId, delta: buffer.text });
+		else if (buffer.kind === "repair_delta") this.publish({ type: "repair_delta", runId: buffer.runId, delta: buffer.text });
+		else this.publish({ type: "subgraph_repair_delta", runId: buffer.runId, delta: buffer.text });
 	}
 
 	private retain(event: RunEvent): void {
@@ -700,6 +929,21 @@ export class RunManager {
 			this.flushNode(event.nodeId);
 		} else if (event.type === "run_finished") {
 			this.flushAllDeltas();
+		}
+		// Optional automatic subgraph repair: a failed node (after engine retries)
+		// can trigger an AI replan. Guarded to avoid loops and user aborts.
+		if (
+			event.type === "node_failed" &&
+			this.autoSubgraphRepair &&
+			!this.userAborting &&
+			!this.autoRepairedNodes.has(event.nodeId) &&
+			event.runId === this.currentRunId &&
+			!this.pendingSubgraphRepair &&
+			this.engine
+		) {
+			this.autoRepairedNodes.add(event.nodeId);
+			this.pendingSubgraphRepair = { fromRunId: event.runId, nodeId: event.nodeId };
+			this.engine.abort();
 		}
 		// output.md archiving: every completed/reused node's final text lands
 		// in its per-run dir, BEFORE publish so the archive write and the
